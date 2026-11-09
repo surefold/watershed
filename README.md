@@ -67,6 +67,31 @@ cargo run --release --example collection -- 1000000
 Calculations are typed. `qty + region` (a number plus a string) does not
 compile, and neither does setting a calculated node.
 
+## From Python
+
+`crates/watershed-py` is a Python package with the same engine, built with
+PyO3 and managed with [uv](https://docs.astral.sh/uv/):
+
+```python
+import watershed as ws
+
+g = ws.Graph()
+qty = g.input("qty", 10.0)
+price = g.input("price", 2.5)
+total = g.define("total", qty * price * 1.2)
+g.set(price, 3.0)
+g.stabilize()
+print(total.value, g.explain(total))
+```
+
+```bash
+cd crates/watershed-py
+uv sync && uv run pytest
+```
+
+Calling from Python adds little: on a 210,000-node graph, changing one price
+and updating takes about 29 µs from Python.
+
 ## Try it in your browser
 
 `web/` is an interactive page running the real engine, compiled to
@@ -233,6 +258,7 @@ crates/watershed-core/
   src/error.rs    errors
   tests/          behaviour and property tests
   examples/       tour and benchmark
+crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
 crates/watershed-web/   the engine as WebAssembly, with three example models
 web/                    the interactive page and its build script
 ```
@@ -248,5 +274,5 @@ web/                    the interactive page and its build script
 - **Removing nodes** in general (collections reuse rows instead), and **pull
   mode** (only calculating what someone is watching).
 - **Time travel and full lineage** (values as of an earlier update).
-- **Bindings** for Python and the JVM, a formula parser for end users, and the
-  cluster.
+- **Bindings** for the JVM, a formula parser for end users, publishing the
+  Python package, and the cluster.
