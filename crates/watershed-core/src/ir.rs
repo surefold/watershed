@@ -45,6 +45,18 @@ pub enum Ir {
     Binary(BinOp, Arc<Ir>, Arc<Ir>),
     /// `If(condition, then, otherwise)`. Only the chosen branch is evaluated.
     If(Arc<Ir>, Arc<Ir>, Arc<Ir>),
+    /// `Choose(index, options)`: the option at position `index` (an `i64`,
+    /// counting from 0). Only that option is evaluated; an index out of range
+    /// is an error.
+    Choose(Arc<Ir>, Vec<Arc<Ir>>),
+}
+
+/// The error for a `Choose` index outside its options. Shared by both
+/// evaluators so they always agree.
+pub(crate) fn out_of_range(index: i64, options: usize) -> Value {
+    Value::error(format!(
+        "choice {index} is out of range: there are {options} options, numbered from 0"
+    ))
 }
 
 /// An expression whose types do not fit together.
@@ -108,6 +120,25 @@ impl Ir {
                 }
                 Ok(t)
             }
+            Ir::Choose(index, options) => {
+                let i = index.type_check(type_of_node)?;
+                if i != Type::I64 {
+                    return Err(TypeError(format!("a choice's index must be i64, got {i}")));
+                }
+                let Some((first, rest)) = options.split_first() else {
+                    return Err(TypeError("a choice needs at least one option".into()));
+                };
+                let ty = first.type_check(type_of_node)?;
+                for option in rest {
+                    let other = option.type_check(type_of_node)?;
+                    if other != ty {
+                        return Err(TypeError(format!(
+                            "every option must have the same type, got {ty} and {other}"
+                        )));
+                    }
+                }
+                Ok(ty)
+            }
         }
     }
 
@@ -123,6 +154,11 @@ impl Ir {
             }
             (Ir::If(c1, t1, e1), Ir::If(c2, t2, e2)) => {
                 c1.same_as(c2) && t1.same_as(t2) && e1.same_as(e2)
+            }
+            (Ir::Choose(i1, o1), Ir::Choose(i2, o2)) => {
+                i1.same_as(i2)
+                    && o1.len() == o2.len()
+                    && o1.iter().zip(o2).all(|(a, b)| a.same_as(b))
             }
             _ => false,
         }
@@ -143,6 +179,12 @@ impl Ir {
                 t.refs(out);
                 e.refs(out);
             }
+            Ir::Choose(index, options) => {
+                index.refs(out);
+                for option in options {
+                    option.refs(out);
+                }
+            }
         }
     }
 
@@ -159,6 +201,14 @@ impl Ir {
                 Value::Bool(false) => e.eval(values),
                 Value::Error(err) => Value::Error(err),
                 other => internal(format!("condition evaluated to {other}")),
+            },
+            Ir::Choose(index, options) => match index.eval(values) {
+                Value::I64(i) => match usize::try_from(i).ok().and_then(|i| options.get(i)) {
+                    Some(option) => option.eval(values),
+                    None => out_of_range(i, options.len()),
+                },
+                Value::Error(err) => Value::Error(err),
+                other => internal(format!("choice index evaluated to {other}")),
             },
         }
     }
@@ -201,6 +251,11 @@ impl Ir {
                 t.render(name),
                 e.render(name)
             ),
+            Ir::Choose(index, options) => {
+                let mut parts = vec![index.render(name)];
+                parts.extend(options.iter().map(|o| o.render(name)));
+                format!("choose({})", parts.join(", "))
+            }
         }
     }
 

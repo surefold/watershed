@@ -64,7 +64,7 @@ pub mod ir;
 pub mod value;
 
 pub use error::CalcError;
-pub use expr::{Expr, IntoExpr, when};
+pub use expr::{Expr, IntoExpr, choose, when};
 pub use graph::{Graph, Report};
 pub use handle::{Handle, Input, Node, NodeId};
 pub use ir::{BinOp, Ir, TypeError, UnOp};
@@ -72,5 +72,5 @@ pub use value::{CalcType, Numeric, Ordered, Text, Type, Value};
 
 /// Everything you need to build and use a graph: `use watershed_core::prelude::*;`
 pub mod prelude {
-    pub use crate::{CalcError, Expr, Graph, Input, IntoExpr, Node, Report, when};
+    pub use crate::{CalcError, Expr, Graph, Input, IntoExpr, Node, Report, choose, when};
 }

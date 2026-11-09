@@ -411,3 +411,100 @@ fn dependents_lists_each_user_once_in_the_order_added() -> Result {
     assert_eq!(g.get(e)?, 9.0);
     Ok(())
 }
+
+#[test]
+fn a_conditional_only_waits_on_the_branch_it_took() -> Result {
+    let mut g = Graph::new();
+    let use_live = g.input("use_live", true)?;
+    let live = g.input("live", 101.0)?;
+    let end_of_day = g.input("end_of_day", 100.0)?;
+    let price = g.define("price", when(use_live).then(live).otherwise(end_of_day))?;
+    let value = g.define("value", price * 10.0)?;
+
+    // The end-of-day price is not being used, so changing it recalculates nothing.
+    g.set(end_of_day, 98.0)?;
+    let report = g.stabilize();
+    assert_eq!(report.recalculated, 0);
+    assert_eq!(g.get(value)?, 1010.0);
+
+    // Switching source reads the other branch from now on...
+    g.set(use_live, false)?;
+    g.stabilize();
+    assert_eq!(recalculated(&g), ["price", "value"]);
+    assert_eq!(g.get(value)?, 980.0);
+
+    // ...so the live price is the one that no longer matters.
+    g.set(live, 150.0)?;
+    assert_eq!(g.stabilize().recalculated, 0);
+    g.set(end_of_day, 99.0)?;
+    g.stabilize();
+    assert_eq!(recalculated(&g), ["price", "value"]);
+    assert_eq!(g.get(value)?, 990.0);
+    Ok(())
+}
+
+#[test]
+fn choose_reads_only_the_option_it_picks() -> Result {
+    let mut g = Graph::new();
+    let which = g.input("which", 1_i64)?;
+    let a = g.input("a", 10.0)?;
+    let b = g.input("b", 20.0)?;
+    let c = g.input("c", 30.0)?;
+    let picked = g.define("picked", choose(which, [a, b, c]))?;
+    assert_eq!(g.get(picked)?, 20.0);
+    assert_eq!(g.reads(picked.id()), [which.id(), b.id()]);
+
+    g.set(a, 11.0)?;
+    g.set(c, 31.0)?;
+    assert_eq!(g.stabilize().recalculated, 0, "a and c are not picked");
+
+    g.set(b, 21.0)?;
+    g.stabilize();
+    assert_eq!(g.get(picked)?, 21.0);
+
+    g.set(which, 2)?;
+    g.stabilize();
+    assert_eq!(g.get(picked)?, 31.0);
+    assert_eq!(g.reads(picked.id()), [which.id(), c.id()]);
+    Ok(())
+}
+
+#[test]
+fn choosing_out_of_range_is_an_error_until_the_index_is_fixed() -> Result {
+    let mut g = Graph::new();
+    let which = g.input("which", 0_i64)?;
+    let a = g.input("a", 1.0)?;
+    let picked = g.define("picked", choose(which, [a]))?;
+
+    g.set(which, 3)?;
+    g.stabilize();
+    let message = match g.get(picked) {
+        Err(CalcError::Evaluation { message, .. }) => message,
+        other => panic!("expected an error, got {other:?}"),
+    };
+    assert_eq!(
+        message,
+        "choice 3 is out of range: there are 1 options, numbered from 0"
+    );
+
+    g.set(which, 0)?;
+    g.stabilize();
+    assert_eq!(g.get(picked)?, 1.0);
+    Ok(())
+}
+
+#[test]
+fn explain_follows_only_what_a_node_read() -> Result {
+    let mut g = Graph::new();
+    let use_live = g.input("use_live", true)?;
+    let live = g.input("live", 101.0)?;
+    let end_of_day = g.input("end_of_day", 100.0)?;
+    let price = g.define("price", when(use_live).then(live).otherwise(end_of_day))?;
+    let text = g.explain(price);
+    assert!(text.contains("live = 101"), "{text}");
+    assert!(!text.contains("end_of_day = 100"), "{text}");
+    // The picture still shows the branch not taken, faint and dashed.
+    assert!(g.to_dot().contains("[style=dashed, color=gray]"));
+    let _ = end_of_day;
+    Ok(())
+}
