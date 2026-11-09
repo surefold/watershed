@@ -223,6 +223,14 @@ pub struct Graph {
     changes: Vec<Outcome>,
     /// Nodes whose value changed on the level being processed in parallel.
     changed_ids: Vec<NodeId>,
+    /// Nodes given a new expression (or an aggregate given a new member) by
+    /// `redefine` since the last update. The next update recalculates them
+    /// whatever their reads say.
+    redefined: HashSet<NodeId>,
+    /// Whether `redefine` left links that are stale (a node's old
+    /// dependencies still list it as a user, or an edge holds an old height).
+    /// The next update rebuilds every link from the nodes' expressions.
+    relink_pending: bool,
 }
 
 /// The level size from which recalculating in parallel pays off. Measured on
@@ -265,6 +273,8 @@ impl Graph {
             levels: None,
             changes: Vec::new(),
             changed_ids: Vec::new(),
+            redefined: HashSet::new(),
+            relink_pending: false,
         }
     }
 
@@ -393,6 +403,246 @@ impl Graph {
         Ok(self.push(name, hot, ty, &deps, value))
     }
 
+    /// Gives a calculated node a new expression, of the same type as before.
+    ///
+    /// Like [`set`](Self::set), it counts from the next update: reads return
+    /// the old value until [`stabilize`](Self::stabilize), which recalculates
+    /// the node and passes the update on as usual (stopping wherever a value
+    /// comes out the same). The node keeps its name and id, so everything
+    /// that uses it carries on using it.
+    ///
+    /// It is refused if the node is an input or an aggregate, if the
+    /// expression's type differs from the node's, or if the expression uses
+    /// the node itself, directly or through other nodes.
+    ///
+    /// The next update rebuilds every link in the graph, which takes time in
+    /// proportion to the graph's size, so this suits edits (a formula or a
+    /// build file changing) rather than a stream of changes.
+    pub fn redefine<T: CalcType>(
+        &mut self,
+        node: Node<T>,
+        expr: impl IntoExpr<T>,
+    ) -> Result<(), CalcError> {
+        let at = node.node_ref();
+        self.check_ref(at)?;
+        self.redefine_ir(at.node, (*expr.into_expr().ir).clone())
+    }
+
+    /// [`redefine`](Self::redefine) through the untyped API, for front ends
+    /// other than the typed Rust API. The type is checked here instead.
+    pub fn redefine_ir(&mut self, id: NodeId, ir: Ir) -> Result<(), CalcError> {
+        let old = *self.hot.get(id.index()).ok_or(CalcError::UnknownNode(id))?;
+        if !matches!(old.kind, Kind::Float | Kind::General) {
+            let what = if old.kind == Kind::Input {
+                "an input"
+            } else {
+                "an aggregate"
+            };
+            return Err(CalcError::Invalid(format!(
+                "{:?} is {what}, so it cannot be redefined",
+                self.name(id)
+            )));
+        }
+
+        let mut refs = Vec::new();
+        ir.refs(&mut refs);
+        for r in &refs {
+            self.check_ref(*r)?;
+        }
+        let ty = ir.type_check(&|r| {
+            self.types
+                .get(r.node.index())
+                .copied()
+                .ok_or_else(|| TypeError(format!("there is no node {}", r.node)))
+        })?;
+        if ty != self.types[id.index()] {
+            return Err(CalcError::TypeMismatch {
+                node: self.name(id).to_string(),
+                expected: self.types[id.index()],
+                found: Some(ty),
+            });
+        }
+
+        // Members waiting to join aggregates are links too: join them now,
+        // so the search for a cycle below sees them.
+        for (aggregate, value, present) in std::mem::take(&mut self.pending_members) {
+            self.join_aggregate(aggregate, value, present);
+            self.redefined.insert(aggregate);
+        }
+
+        let mut deps: Vec<NodeId> = refs.into_iter().map(|r| r.node).collect();
+        deps.sort();
+        deps.dedup();
+        if let Some(path) = self.path_down(&deps, id) {
+            return Err(CalcError::Invalid(format!(
+                "{:?} cannot use {}: that would make it depend on itself",
+                self.name(id),
+                path
+            )));
+        }
+
+        let types = &self.types;
+        let program = compile(
+            &ir,
+            &|i| types[i],
+            &mut self.float_ops,
+            &mut self.float_consts,
+        );
+        // The old program is left where it is, unused (its slot in `general`
+        // is reused when the new one is general too).
+        let (code, len, kind) = match program {
+            Program::Float { start, len } => (start, len, Kind::Float),
+            Program::General(program) => {
+                let code = if old.kind == Kind::General {
+                    self.general[old.code as usize] = program;
+                    self.reads[old.code as usize] = Box::default();
+                    old.code
+                } else {
+                    self.general.push(program);
+                    self.reads.push(Box::default());
+                    u32::try_from(self.general.len() - 1).expect("too many programs")
+                };
+                (code, 0, Kind::General)
+            }
+        };
+        let height = deps
+            .iter()
+            .map(|d| self.hot[d.index()].height + 1)
+            .max()
+            .unwrap_or(1)
+            .max(old.height);
+        self.hot[id.index()] = Hot {
+            code,
+            len,
+            height,
+            kind,
+        };
+        for &d in &deps {
+            self.add_user(d, id);
+        }
+        self.raise_users(id);
+        self.redefined.insert(id);
+        self.relink_pending = true;
+        self.levels = None;
+        Ok(())
+    }
+
+    /// If `target` can be reached from any of `from` by following what each
+    /// node uses, the names along the way (`a → b → target`).
+    fn path_down(&self, from: &[NodeId], target: NodeId) -> Option<String> {
+        // A node is always higher than everything it uses, so only nodes
+        // higher than the target can lead down to it.
+        let floor = self.hot[target.index()].height;
+        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut stack: Vec<NodeId> = Vec::new();
+        for &start in from {
+            if start == target {
+                return Some(format!("{:?}", self.name(target)));
+            }
+            if self.hot[start.index()].height > floor && !came_from.contains_key(&start) {
+                came_from.insert(start, start);
+                stack.push(start);
+            }
+        }
+        while let Some(n) = stack.pop() {
+            for d in self.dependencies(n) {
+                if d == target {
+                    let mut path = vec![self.name(target), self.name(n)];
+                    let mut at = n;
+                    while came_from[&at] != at {
+                        at = came_from[&at];
+                        path.push(self.name(at));
+                    }
+                    path.reverse();
+                    let path: Vec<String> = path.iter().map(|p| format!("{p:?}")).collect();
+                    return Some(path.join(" → "));
+                }
+                if self.hot[d.index()].height > floor && !came_from.contains_key(&d) {
+                    came_from.insert(d, n);
+                    stack.push(d);
+                }
+            }
+        }
+        None
+    }
+
+    /// After `id`'s height has gone up, raises everything above it that is
+    /// no longer higher than all it uses.
+    fn raise_users(&mut self, id: NodeId) {
+        let mut stack = vec![id];
+        while let Some(n) = stack.pop() {
+            let floor = self.hot[n.index()].height + 1;
+            assert!(floor < AGGREGATE, "graph too deep");
+            let mut users = Vec::new();
+            let i = n.index();
+            if i + 1 < self.packed_start.len() {
+                let range = self.packed_start[i] as usize..self.packed_start[i + 1] as usize;
+                users.extend(self.packed[range].iter().map(|u| u.user));
+            }
+            let mut edge = self.first_user[i];
+            while edge != NONE {
+                users.push(self.edges[edge as usize].user);
+                edge = self.edges[edge as usize].next;
+            }
+            for user in users {
+                // Skip links left over from replaced expressions: following
+                // one can lead in a circle, as the node at its end may now
+                // be used by the node at its start.
+                if self.relink_pending && !self.dependencies(NodeId(user)).contains(&n) {
+                    continue;
+                }
+                let hot = &mut self.hot[user as usize];
+                if hot.height < floor {
+                    hot.height = floor;
+                    stack.push(NodeId(user));
+                }
+            }
+        }
+        let top = self
+            .hot
+            .iter()
+            .map(|h| h.height as usize)
+            .max()
+            .unwrap_or(0);
+        if self.queue.len() <= top {
+            self.queue.resize_with(top + 1, Vec::new);
+        }
+    }
+
+    /// Rebuilds every link from what each node uses, with current heights,
+    /// dropping any left over from redefined expressions.
+    fn relink(&mut self) {
+        let nodes = self.hot.len();
+        let mut users: Vec<Vec<Use>> = vec![Vec::new(); nodes];
+        for user in self.node_ids() {
+            let hot = self.hot[user.index()];
+            let flag = if hot.kind == Kind::Aggregate {
+                AGGREGATE
+            } else {
+                0
+            };
+            for dep in self.dependencies(user) {
+                users[dep.index()].push(Use {
+                    user: user.0,
+                    height: hot.height | flag,
+                });
+            }
+        }
+        let mut start = Vec::with_capacity(nodes + 1);
+        let mut packed = Vec::with_capacity(users.iter().map(Vec::len).sum());
+        start.push(0);
+        for list in users {
+            packed.extend(list);
+            start.push(u32::try_from(packed.len()).expect("a graph holds at most u32::MAX links"));
+        }
+        self.packed = packed;
+        self.packed_start = start;
+        self.edges.clear();
+        self.first_user.fill(NONE);
+        self.last_user.fill(NONE);
+        self.relink_pending = false;
+    }
+
     fn push(&mut self, name: &str, hot: Hot, ty: Type, deps: &[NodeId], value: Value) -> NodeId {
         let id =
             NodeId(u32::try_from(self.hot.len()).expect("a graph holds at most u32::MAX nodes"));
@@ -473,7 +723,7 @@ impl Graph {
     fn recalculate(&mut self, id: NodeId, report: &mut Report) {
         let i = id.index();
         let hot = self.hot[i];
-        if self.reads_unchanged(hot) {
+        if self.reads_unchanged(hot) && !self.redefined.contains(&id) {
             return;
         }
         let new_value = if hot.kind == Kind::Aggregate {
@@ -617,8 +867,8 @@ impl Graph {
         Ok(())
     }
 
-    /// Adds a member staged by `extend_aggregate`: links it and queues the
-    /// aggregate for this update.
+    /// Adds a member staged by `extend_aggregate` and links it. The caller
+    /// queues the aggregate, so that it is recalculated to count the member.
     fn join_aggregate(&mut self, aggregate: NodeId, value: NodeId, present: NodeId) {
         let hot = self.hot[aggregate.index()];
         let code = hot.code as usize;
@@ -634,7 +884,6 @@ impl Graph {
             }
         }
         self.aggregates[code].push(value.0, present.0);
-        self.queue[hot.height as usize].push(aggregate);
     }
 
     // ---------------------------------------------------------------- updating
@@ -675,11 +924,19 @@ impl Graph {
         self.epoch += 1;
         let epoch = self.epoch;
         self.last_recalculated.clear();
-        if self.edges.len() * 4 > self.packed.len() {
+        if self.relink_pending {
+            self.relink();
+        } else if self.edges.len() * 4 > self.packed.len() {
             self.repack();
         }
         for (aggregate, value, present) in std::mem::take(&mut self.pending_members) {
             self.join_aggregate(aggregate, value, present);
+            self.redefined.insert(aggregate);
+        }
+        // Queued now, not when they were redefined, because a later
+        // redefinition can still have raised their height.
+        for &id in &self.redefined {
+            self.queue[self.hot[id.index()].height as usize].push(id);
         }
         let mut report = Report {
             epoch,
@@ -743,6 +1000,7 @@ impl Graph {
             level.clear();
             self.queue[height] = level;
         }
+        self.redefined.clear();
         report
     }
 
@@ -1011,7 +1269,8 @@ impl Graph {
         }
     }
 
-    /// The nodes that use this node, in the order they were added.
+    /// The nodes that use this node, in the order they were added (in id
+    /// order after a [`redefine`](Self::redefine) and the next update).
     pub fn dependents(&self, id: NodeId) -> Vec<NodeId> {
         let n = id.index();
         let mut users = Vec::new();
@@ -1023,6 +1282,11 @@ impl Graph {
         while edge != NONE {
             users.push(NodeId(self.edges[edge as usize].user));
             edge = self.edges[edge as usize].next;
+        }
+        if self.relink_pending {
+            // Some links may be left over from expressions since replaced.
+            let mut seen = HashSet::new();
+            users.retain(|&u| seen.insert(u) && self.dependencies(u).contains(&id));
         }
         users
     }

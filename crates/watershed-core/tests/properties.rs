@@ -258,6 +258,30 @@ fn add_random_node(rng: &mut Rng, g: &mut Graph, n: usize, nonsense: bool) -> bo
     }
 }
 
+/// Whether `ir` uses `target`, directly or through the nodes it uses
+/// (counting `staged` members, which have not joined their aggregates yet).
+/// A plain search, independent of the engine's own (which prunes by height).
+fn reaches(g: &Graph, ir: &Ir, target: NodeId, staged: &[(NodeId, NodeId, NodeId)]) -> bool {
+    let mut refs = Vec::new();
+    ir.refs(&mut refs);
+    let mut stack: Vec<NodeId> = refs.iter().map(|r| r.node).collect();
+    let mut seen = HashSet::new();
+    while let Some(n) = stack.pop() {
+        if n == target {
+            return true;
+        }
+        if seen.insert(n) {
+            stack.extend(g.dependencies(n));
+            for &(aggregate, value, present) in staged {
+                if aggregate == n {
+                    stack.extend([value, present]);
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Builds a random graph, then applies random updates. After each one it
 /// checks every rule. Returns a description of the first rule broken.
 /// With `parallel`, every level is recalculated on all cores, however small.
@@ -313,16 +337,61 @@ fn run(
         // Sometimes a member joins an aggregate. It may sit too high, which
         // must be refused cleanly; if accepted, it counts from this update.
         let mut joined: HashSet<NodeId> = HashSet::new();
+        let mut staged: Vec<(NodeId, NodeId, NodeId)> = Vec::new();
         if !aggregates.is_empty() && rng.percent(40) {
             let (aggregate, op, value_type) = rng.pick(&aggregates);
             if let Some((value, present)) = random_member(&mut rng, &g, op, value_type) {
                 match g.extend_aggregate(aggregate, value, present) {
                     Ok(()) => {
                         joined.insert(aggregate);
+                        staged.push((aggregate, value, present));
                     }
                     Err(CalcError::Invalid(_)) => {}
                     Err(other) => return Err(format!("extending an aggregate failed: {other}")),
                 }
+            }
+        }
+
+        // Sometimes a calculated node gets a new expression, possibly using
+        // nodes above it. It must be refused exactly when that would make the
+        // node depend on itself, and if accepted it counts from this update.
+        let mut redefined: HashSet<NodeId> = HashSet::new();
+        for _ in 0..rng.below(3) {
+            if rng.percent(50) {
+                continue;
+            }
+            let calculated: Vec<NodeId> = g
+                .node_ids()
+                .filter(|&id| !g.is_input(id) && g.aggregate_members(id).is_none())
+                .collect();
+            if calculated.is_empty() {
+                break;
+            }
+            let id = rng.pick(&calculated);
+            let ir = if nonsense {
+                random_untyped_expr(&mut rng, &g, 3)
+            } else {
+                random_expr(&mut rng, &g, g.node_type(id), 3)
+            };
+            let cycle = reaches(&g, &ir, id, &staged);
+            match g.redefine_ir(id, ir.clone()) {
+                Ok(()) => {
+                    if cycle {
+                        return Err(format!("{} was allowed to use itself", g.name(id)));
+                    }
+                    let rebuilt = g.expression(id).expect("a calculated node");
+                    if !rebuilt.same_as(&ir) {
+                        return Err("redefining changed the expression".into());
+                    }
+                    redefined.insert(id);
+                }
+                Err(CalcError::Invalid(message)) if message.contains("depend on itself") => {
+                    if !cycle {
+                        return Err(format!("refused without a cycle: {message}"));
+                    }
+                }
+                Err(CalcError::Type(_) | CalcError::TypeMismatch { .. }) if nonsense => {}
+                Err(other) => return Err(format!("redefining failed: {other}")),
             }
         }
 
@@ -355,7 +424,8 @@ fn run(
             let read_a_change = reads_before[id.index()].iter().any(|d| changed.contains(d));
             let was_recalculated = recalculated_set.contains(&id);
             // An aggregate that gained a member is recalculated to count it.
-            let should = read_a_change || joined.contains(&id);
+            // So is a node given a new expression.
+            let should = read_a_change || joined.contains(&id) || redefined.contains(&id);
             if should != was_recalculated {
                 return Err(format!(
                     "{}: read a changed node = {read_a_change}, but recalculated = {was_recalculated}",

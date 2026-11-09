@@ -488,6 +488,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "watershed-build"
+version = "0.1.0"
+dependencies = [
+ "watershed-core",
+]
+
+[[package]]
 name = "watershed-core"
 version = "0.1.0"
 dependencies = [
