@@ -17,6 +17,9 @@ pub enum UnOp {
     Neg,
     Not,
     Abs,
+    /// Any value as text: `3` as `"3"`, `2.0` as `"2.0"`, `true` as `"true"`.
+    /// Text stays as it is.
+    ToText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,7 +38,13 @@ pub enum BinOp {
     Ne,
     And,
     Or,
+    /// Two strings joined. A result over [`MAX_TEXT_BYTES`] is an error.
+    Concat,
 }
+
+/// The longest text a join can produce. Joining a value to itself doubles its
+/// length, so a chain of joins could otherwise ask for more memory than exists.
+pub const MAX_TEXT_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub enum Ir {
@@ -57,6 +66,35 @@ pub(crate) fn out_of_range(index: i64, options: usize) -> Value {
     Value::error(format!(
         "choice {index} is out of range: there are {options} options, numbered from 0"
     ))
+}
+
+/// Two strings joined, or an error if the result would be too long. Shared by
+/// both evaluators so they always agree.
+pub(crate) fn concat(a: &str, b: &str) -> Value {
+    if a.len() + b.len() > MAX_TEXT_BYTES {
+        return Value::error(format!(
+            "text too long: joining these would make more than {MAX_TEXT_BYTES} bytes"
+        ));
+    }
+    let mut joined = String::with_capacity(a.len() + b.len());
+    joined.push_str(a);
+    joined.push_str(b);
+    Value::Str(joined.into())
+}
+
+/// A value as text. Text and errors pass through unchanged. Shared by both
+/// evaluators so they always agree.
+pub(crate) fn to_text(value: Value) -> Value {
+    let text = match value {
+        Value::F64(x) if x == f64::INFINITY => "Infinity".to_string(),
+        Value::F64(x) if x == f64::NEG_INFINITY => "-Infinity".to_string(),
+        // The debug form keeps the `.0` of a whole number, as Kotlin does.
+        Value::F64(x) => format!("{x:?}"),
+        Value::I64(x) => x.to_string(),
+        Value::Bool(x) => x.to_string(),
+        other @ (Value::Str(_) | Value::Error(_)) => return other,
+    };
+    Value::Str(text.into())
 }
 
 /// An expression whose types do not fit together.
@@ -86,6 +124,7 @@ impl Ir {
                 match op {
                     UnOp::Neg | UnOp::Abs if a.is_numeric() => Ok(a),
                     UnOp::Not if a == Type::Bool => Ok(Type::Bool),
+                    UnOp::ToText => Ok(Type::Str),
                     _ => Err(TypeError(format!("{op:?} cannot be applied to {a}"))),
                 }
             }
@@ -103,6 +142,7 @@ impl Ir {
                     Lt | Le | Gt | Ge if a.is_ordered() => Ok(Type::Bool),
                     Eq | Ne => Ok(Type::Bool),
                     And | Or if a == Type::Bool => Ok(Type::Bool),
+                    Concat if a == Type::Str => Ok(Type::Str),
                     _ => Err(TypeError(format!("{op:?} cannot be applied to {a}"))),
                 }
             }
@@ -221,8 +261,18 @@ impl Ir {
             Ir::Unary(UnOp::Neg, a) => format!("-{}", a.render_operand(name)),
             Ir::Unary(UnOp::Not, a) => format!("!{}", a.render_operand(name)),
             Ir::Unary(UnOp::Abs, a) => format!("abs({})", a.render(name)),
+            Ir::Unary(UnOp::ToText, a) => format!("text({})", a.render(name)),
             Ir::Binary(BinOp::Min, a, b) => format!("min({}, {})", a.render(name), b.render(name)),
             Ir::Binary(BinOp::Max, a, b) => format!("max({}, {})", a.render(name), b.render(name)),
+            // Joining is the same however it is bracketed, so a chain reads
+            // left to right with no brackets.
+            Ir::Binary(BinOp::Concat, a, b) => {
+                let left = match &**a {
+                    Ir::Binary(BinOp::Concat, ..) => a.render(name),
+                    _ => a.render_operand(name),
+                };
+                format!("{left} + {}", b.render_operand(name))
+            }
             Ir::Binary(op, a, b) => {
                 let symbol = match op {
                     BinOp::Add => "+",
@@ -237,7 +287,7 @@ impl Ir {
                     BinOp::Ne => "!=",
                     BinOp::And => "&&",
                     BinOp::Or => "||",
-                    BinOp::Min | BinOp::Max => unreachable!("handled above"),
+                    BinOp::Min | BinOp::Max | BinOp::Concat => unreachable!("handled above"),
                 };
                 format!(
                     "{} {symbol} {}",
@@ -288,6 +338,7 @@ fn unary(op: UnOp, a: Value) -> Value {
             .checked_abs()
             .map_or_else(|| Value::error("integer overflow"), Value::I64),
         (UnOp::Not, Value::Bool(x)) => Value::Bool(!x),
+        (UnOp::ToText, a) => to_text(a),
         (op, a) => internal(format!("{op:?} on {a}")),
     }
 }
@@ -316,6 +367,8 @@ fn binary(op: BinOp, a: Value, b: Value) -> Value {
 
         (And, Value::Bool(x), Value::Bool(y)) => Value::Bool(x && y),
         (Or, Value::Bool(x), Value::Bool(y)) => Value::Bool(x || y),
+
+        (Concat, Value::Str(x), Value::Str(y)) => concat(&x, &y),
 
         (op, a, b) => internal(format!("{op:?} on {a} and {b}")),
     }

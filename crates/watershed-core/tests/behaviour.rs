@@ -933,3 +933,112 @@ fn redefining_cannot_change_a_type_or_touch_an_input() -> Result {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------- text
+
+#[test]
+fn concat_joins_two_strings() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", "x".to_string())?;
+    let joined = g.define("joined", a.concat("y"))?;
+    assert_eq!(g.get(joined)?, "xy");
+    g.set(a, "z".to_string())?;
+    g.stabilize();
+    assert_eq!(g.get(joined)?, "zy");
+    Ok(())
+}
+
+#[test]
+fn text_shows_each_type_of_value() -> Result {
+    let mut g = Graph::new();
+    let i = g.input("i", -3_i64)?;
+    let f = g.input("f", 2.0)?;
+    let b = g.input("b", true)?;
+    let s = g.input("s", "plain".to_string())?;
+    let (ti, tf) = (g.define("ti", text(i))?, g.define("tf", text(f))?);
+    let (tb, ts) = (g.define("tb", text(b))?, g.define("ts", text(s))?);
+    assert_eq!(g.get(ti)?, "-3");
+    assert_eq!(g.get(tf)?, "2.0");
+    assert_eq!(g.get(tb)?, "true");
+    assert_eq!(g.get(ts)?, "plain");
+    Ok(())
+}
+
+#[test]
+fn text_names_the_numbers_that_are_not_numbers() -> Result {
+    let mut g = Graph::new();
+    let f = g.input("f", f64::INFINITY)?;
+    let shown = g.define("shown", text(f))?;
+    assert_eq!(g.get(shown)?, "Infinity");
+    g.set(f, f64::NEG_INFINITY)?;
+    g.stabilize();
+    assert_eq!(g.get(shown)?, "-Infinity");
+    g.set(f, f64::NAN)?;
+    g.stabilize();
+    assert_eq!(g.get(shown)?, "NaN");
+    Ok(())
+}
+
+#[test]
+fn an_error_passes_through_concat_and_text() -> Result {
+    let mut g = Graph::new();
+    let n = g.input("n", 0_i64)?;
+    let bad = g.define("bad", 1_i64 / n)?;
+    let shown = g.define("shown", text(bad))?;
+    let joined = g.define("joined", shown.concat("!"))?;
+    assert!(g.value(joined.id()).is_error());
+    Ok(())
+}
+
+#[test]
+fn a_join_that_comes_out_the_same_stops_there() -> Result {
+    let mut g = Graph::new();
+    let n = g.input("n", 1_i64)?;
+    let shown = g.define("shown", text(n.abs()))?;
+    let above = g.define("above", shown.concat("!"))?;
+    g.set(n, -1)?;
+    g.stabilize();
+    assert_eq!(recalculated(&g), ["shown"]);
+    assert_eq!(g.get(above)?, "1!");
+    Ok(())
+}
+
+#[test]
+fn text_that_grows_too_long_becomes_an_error() -> Result {
+    let mut g = Graph::new();
+    let start = g.input("start", "x".repeat(1024))?;
+    let mut last = g.define("v0", start.concat(""))?;
+    for i in 1..40 {
+        last = g.define(&format!("v{i}"), last.concat(last))?;
+    }
+    let value = g.value(last.id()).to_string();
+    assert!(
+        value.contains("too long"),
+        "{}",
+        &value[..value.len().min(80)]
+    );
+    Ok(())
+}
+
+#[test]
+fn concat_needs_strings_on_both_sides() {
+    let mut g = Graph::new();
+    let n = g.input("n", 1_i64).unwrap();
+    let id = n.id();
+    let bad = Ir::Binary(
+        watershed_core::BinOp::Concat,
+        std::sync::Arc::new(g.reference(id)),
+        std::sync::Arc::new(g.reference(id)),
+    );
+    assert!(g.define_ir("bad", bad).is_err());
+}
+
+#[test]
+fn explain_writes_a_chain_of_joins_without_brackets() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", "x".to_string())?;
+    let joined = g.define("joined", a.concat("y").concat(text(1_i64)))?;
+    let why = g.explain(joined);
+    assert!(why.contains("a + \"y\" + text(1)"), "{why}");
+    Ok(())
+}

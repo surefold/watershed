@@ -206,6 +206,8 @@ impl Expr {
         let ok = match op {
             UnOp::Not => a.ty == Type::Bool,
             UnOp::Neg | UnOp::Abs => a.ty.is_numeric(),
+            // Python has no way to ask for this yet.
+            UnOp::ToText => false,
         };
         if !ok {
             return Err(PyTypeError::new_err(format!(
@@ -239,6 +241,7 @@ fn symbol(op: BinOp) -> &'static str {
         BinOp::Ne => "!=",
         BinOp::And => "&",
         BinOp::Or => "|",
+        BinOp::Concat => "+",
     }
 }
 
