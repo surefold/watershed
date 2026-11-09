@@ -69,13 +69,22 @@ impl Value {
     /// node's new value is identical to its old one, nothing above it is
     /// recalculated.
     ///
-    /// Floats compare by their exact bits, so `NaN` is identical to `NaN` and
-    /// `0.0` is not identical to `-0.0`. That is deliberately strict: treating
-    /// two values as the same when they are not would skip work that was
-    /// needed, while the reverse only costs a little extra work.
+    /// Floats compare by their exact bits, except that every NaN is identical
+    /// to every other NaN. So `NaN` is identical to `NaN`, and `0.0` is not
+    /// identical to `-0.0` (dividing by them gives different answers).
+    ///
+    /// NaNs are lumped together because the bits inside a NaN are not
+    /// reliable: hardware, the compiler and WebAssembly may each produce a
+    /// different NaN for the same calculation, and nothing in the engine can
+    /// tell two NaNs apart except by those bits. Otherwise this is
+    /// deliberately strict: treating two values as the same when they are not
+    /// would skip work that was needed, while the reverse only costs a little
+    /// extra work.
     pub fn same_as(&self, other: &Value) -> bool {
         match (self, other) {
-            (Value::F64(a), Value::F64(b)) => a.to_bits() == b.to_bits(),
+            (Value::F64(a), Value::F64(b)) => {
+                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+            }
             (Value::I64(a), Value::I64(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,

@@ -19,6 +19,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::compile::{FloatOp, GeneralProgram, Program, Scratch, eval_float};
 use crate::error::CalcError;
 use crate::expr::IntoExpr;
 use crate::handle::{GraphId, Handle, Input, Node, NodeId, NodeRef};
@@ -29,23 +30,29 @@ static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 
 enum Kind {
     Input,
+    /// The expression as written.
     Calculated(Arc<Ir>),
 }
 
-/// Everything about a node except its value (values are kept in their own
-/// array so a calculation can read them while the rest is being updated).
+/// How to recalculate a node, kept small for the update loop.
+enum Code {
+    Input,
+    /// A pure-float program, stored in `Graph::float_ops[start..start + len]`.
+    Float {
+        start: u32,
+        len: u32,
+    },
+    General(Box<GeneralProgram>),
+}
+
+/// The parts of a node the update loop does not need. What it does need is
+/// kept in separate compact arrays in `Graph`, so the loop reads only those.
 struct Meta {
     name: String,
     kind: Kind,
     ty: Type,
     /// Nodes this one uses, without repeats.
     deps: Vec<NodeId>,
-    /// Nodes that use this one.
-    dependents: Vec<NodeId>,
-    height: usize,
-    dirty: bool,
-    /// The update in which the value last changed (0 = when it was created).
-    changed_in: u64,
 }
 
 /// What one call to [`Graph::stabilize`] did.
@@ -66,7 +73,19 @@ pub struct Report {
 pub struct Graph {
     id: GraphId,
     meta: Vec<Meta>,
+
+    // One entry per node, indexed by node id: what the update loop uses.
     values: Vec<Value>,
+    code: Vec<Code>,
+    /// Nodes that use this one.
+    dependents: Vec<Vec<NodeId>>,
+    height: Vec<u32>,
+    dirty: Vec<bool>,
+    /// The update in which the value last changed (0 = when it was created).
+    changed_in: Vec<u64>,
+    /// The instructions of every pure-float program, back to back.
+    float_ops: Vec<FloatOp>,
+
     by_name: HashMap<String, NodeId>,
     /// Input changes recorded by `set`, applied by `stabilize`. A later `set`
     /// of the same input replaces an earlier one.
@@ -75,6 +94,8 @@ pub struct Graph {
     queue: Vec<Vec<NodeId>>,
     epoch: u64,
     last_recalculated: Vec<NodeId>,
+    /// Scratch space for evaluating programs.
+    scratch: Scratch,
 }
 
 impl Default for Graph {
@@ -89,11 +110,18 @@ impl Graph {
             id: GraphId(NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed)),
             meta: Vec::new(),
             values: Vec::new(),
+            code: Vec::new(),
+            dependents: Vec::new(),
+            height: Vec::new(),
+            dirty: Vec::new(),
+            changed_in: Vec::new(),
+            float_ops: Vec::new(),
             by_name: HashMap::new(),
             pending: BTreeMap::new(),
             queue: Vec::new(),
             epoch: 0,
             last_recalculated: Vec::new(),
+            scratch: Scratch::default(),
         }
     }
 
@@ -105,9 +133,9 @@ impl Graph {
         let id = self.push(
             name,
             Kind::Input,
+            Code::Input,
             T::TYPE,
             Vec::new(),
-            0,
             value.into_value(),
         );
         Ok(Input::new(self.node_ref(id)))
@@ -120,7 +148,7 @@ impl Graph {
         let ty = value
             .type_of()
             .ok_or_else(|| TypeError("an input's starting value cannot be an error".into()))?;
-        Ok(self.push(name, Kind::Input, ty, Vec::new(), 0, value))
+        Ok(self.push(name, Kind::Input, Code::Input, ty, Vec::new(), value))
     }
 
     /// Adds a calculated node. Its value is worked out straight away.
@@ -163,24 +191,27 @@ impl Graph {
         let mut deps: Vec<NodeId> = refs.into_iter().map(|r| r.node).collect();
         deps.sort();
         deps.dedup();
-        let height = deps
-            .iter()
-            .map(|d| self.meta[d.index()].height + 1)
-            .max()
-            .unwrap_or(1);
-
         // Worked out from the values of the last update, like every other node.
-        let value = ir.eval(&self.values);
+        let code = match Program::compile(&ir, &|i| self.meta[i].ty) {
+            Program::Float(ops) => {
+                let start = u32::try_from(self.float_ops.len()).expect("too many instructions");
+                self.float_ops.extend(ops);
+                let len = self.float_ops.len() as u32 - start;
+                Code::Float { start, len }
+            }
+            Program::General(program) => Code::General(Box::new(program)),
+        };
+        let value = evaluate(&code, &self.float_ops, &self.values, &mut self.scratch);
         let id = self.push(
             name,
             Kind::Calculated(Arc::new(ir)),
+            code,
             ty,
             deps.clone(),
-            height,
             value,
         );
         for d in deps {
-            self.meta[d.index()].dependents.push(id);
+            self.dependents[d.index()].push(id);
         }
         Ok(id)
     }
@@ -189,11 +220,21 @@ impl Graph {
         &mut self,
         name: &str,
         kind: Kind,
+        code: Code,
         ty: Type,
         deps: Vec<NodeId>,
-        height: usize,
         value: Value,
     ) -> NodeId {
+        // Inputs have height 0; any other node is one above the highest node
+        // it uses (1 if it uses none).
+        let height = match code {
+            Code::Input => 0,
+            _ => deps
+                .iter()
+                .map(|d| self.height[d.index()] as usize + 1)
+                .max()
+                .unwrap_or(1),
+        };
         let id =
             NodeId(u32::try_from(self.meta.len()).expect("a graph holds at most u32::MAX nodes"));
         self.meta.push(Meta {
@@ -201,12 +242,14 @@ impl Graph {
             kind,
             ty,
             deps,
-            dependents: Vec::new(),
-            height,
-            dirty: false,
-            changed_in: self.epoch,
         });
         self.values.push(value);
+        self.code.push(code);
+        self.dependents.push(Vec::new());
+        self.height
+            .push(u32::try_from(height).expect("graph too deep"));
+        self.dirty.push(false);
+        self.changed_in.push(self.epoch);
         self.by_name.insert(name.to_string(), id);
         if self.queue.len() <= height {
             self.queue.resize_with(height + 1, Vec::new);
@@ -264,7 +307,7 @@ impl Graph {
         for (id, value) in std::mem::take(&mut self.pending) {
             if !self.values[id.index()].same_as(&value) {
                 self.values[id.index()] = value;
-                self.meta[id.index()].changed_in = epoch;
+                self.changed_in[id.index()] = epoch;
                 report.inputs_changed += 1;
                 self.mark_dependents(id);
             }
@@ -276,17 +319,19 @@ impl Graph {
             let level = std::mem::take(&mut self.queue[height]);
             for id in level {
                 let i = id.index();
-                self.meta[i].dirty = false;
-                let Kind::Calculated(ir) = &self.meta[i].kind else {
-                    continue; // inputs are never queued
-                };
-                let new_value = ir.eval(&self.values);
+                self.dirty[i] = false;
+                let new_value = evaluate(
+                    &self.code[i],
+                    &self.float_ops,
+                    &self.values,
+                    &mut self.scratch,
+                );
                 report.recalculated += 1;
                 self.last_recalculated.push(id);
 
                 if !self.values[i].same_as(&new_value) {
                     self.values[i] = new_value;
-                    self.meta[i].changed_in = epoch;
+                    self.changed_in[i] = epoch;
                     report.changed += 1;
                     self.mark_dependents(id);
                 }
@@ -297,12 +342,11 @@ impl Graph {
     }
 
     fn mark_dependents(&mut self, id: NodeId) {
-        for k in 0..self.meta[id.index()].dependents.len() {
-            let dependent = self.meta[id.index()].dependents[k];
-            let meta = &mut self.meta[dependent.index()];
-            if !meta.dirty {
-                meta.dirty = true;
-                self.queue[meta.height].push(dependent);
+        for &dependent in &self.dependents[id.index()] {
+            let d = dependent.index();
+            if !self.dirty[d] {
+                self.dirty[d] = true;
+                self.queue[self.height[d] as usize].push(dependent);
             }
         }
     }
@@ -355,11 +399,11 @@ impl Graph {
 
     /// The nodes that use this node.
     pub fn dependents(&self, id: NodeId) -> &[NodeId] {
-        &self.meta[id.index()].dependents
+        &self.dependents[id.index()]
     }
 
     pub fn height(&self, id: NodeId) -> usize {
-        self.meta[id.index()].height
+        self.height[id.index()] as usize
     }
 
     /// The expression a calculated node computes (`None` for inputs).
@@ -404,6 +448,8 @@ impl Graph {
         for (i, meta) in self.meta.iter().enumerate() {
             let value = match &meta.kind {
                 Kind::Input => self.values[i].clone(),
+                // Deliberately the simple tree evaluator, not the compiled
+                // program, so this check is independent of the fast path.
                 Kind::Calculated(ir) => ir.eval(&fresh),
             };
             if !value.same_as(&self.values[i]) {
@@ -429,10 +475,14 @@ impl Graph {
     /// do without incremental updates; the benchmark compares against it.
     pub fn recalculate_everything(&mut self) -> usize {
         let mut count = 0;
-        for i in 0..self.meta.len() {
-            if let Kind::Calculated(ir) = &self.meta[i].kind {
-                let value = ir.eval(&self.values);
-                self.values[i] = value;
+        for i in 0..self.code.len() {
+            if !matches!(self.code[i], Code::Input) {
+                self.values[i] = evaluate(
+                    &self.code[i],
+                    &self.float_ops,
+                    &self.values,
+                    &mut self.scratch,
+                );
                 count += 1;
             }
         }
@@ -501,7 +551,7 @@ impl Graph {
             Kind::Input => "(input)".to_string(),
             Kind::Calculated(ir) => format!("← {}", self.render(ir)),
         };
-        let changed = if self.epoch > 0 && meta.changed_in == self.epoch {
+        let changed = if self.epoch > 0 && self.changed_in[id.index()] == self.epoch {
             "  [changed]"
         } else {
             ""
@@ -541,7 +591,7 @@ impl Graph {
                 if recalculated.contains(&id) {
                     marks.push('*');
                 }
-                if self.epoch > 0 && meta.changed_in == self.epoch {
+                if self.epoch > 0 && self.changed_in[id.index()] == self.epoch {
                     marks.push('!');
                 }
                 let cells = [
@@ -551,7 +601,7 @@ impl Graph {
                     format!("= {}", self.values[id.index()]),
                     how,
                 ];
-                (meta.height, cells, marks)
+                (self.height[id.index()] as usize, cells, marks)
             })
             .collect();
 
@@ -600,7 +650,7 @@ impl Graph {
         );
         for id in self.node_ids() {
             let meta = &self.meta[id.index()];
-            let changed = self.epoch > 0 && meta.changed_in == self.epoch;
+            let changed = self.epoch > 0 && self.changed_in[id.index()] == self.epoch;
             let (shape, how) = match &meta.kind {
                 Kind::Input => ("box", "input".to_string()),
                 Kind::Calculated(ir) => ("ellipse", self.render(ir)),
@@ -671,4 +721,17 @@ fn escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
+}
+
+/// Recalculates one node from the values of the nodes it uses.
+#[inline]
+fn evaluate(code: &Code, float_ops: &[FloatOp], values: &[Value], scratch: &mut Scratch) -> Value {
+    match code {
+        Code::Float { start, len } => {
+            let start = *start as usize;
+            eval_float(&float_ops[start..start + *len as usize], values, scratch)
+        }
+        Code::General(program) => program.eval(values, scratch),
+        Code::Input => unreachable!("inputs are never recalculated"),
+    }
 }

@@ -76,56 +76,34 @@ fn main() -> Result<(), CalcError> {
     );
     println!();
 
-    // Recalculating everything, as you would without incremental updates.
-    let runs = 5;
-    let started = Instant::now();
-    let mut count = 0;
-    for _ in 0..runs {
-        count = g.recalculate_everything();
-    }
-    let full = started.elapsed() / runs;
-    println!("{:<44} {:>12} {:>16}", "", "time", "recalculated");
+    // Each scenario is timed many times and the median reported, because a
+    // single timing on a busy machine can be far off.
     println!(
         "{:<44} {:>12} {:>16}",
-        "recalculate everything",
-        ms(full),
-        count
+        "median of many runs", "time", "recalculated"
     );
 
-    // One price changes.
-    let updates = 1_000;
-    let mut recalculated = 0;
-    let started = Instant::now();
-    for _ in 0..updates {
+    let (full, count) = median(15, || ((), g.recalculate_everything()));
+    row("recalculate everything", ms(full), count);
+
+    let (one, count) = median(2_000, || {
         let p = prices[rng.below(MARKET_PRICES)];
-        g.set(p, 100.0 + rng.unit())?;
-        recalculated += g.stabilize().recalculated;
-    }
-    let one = started.elapsed() / updates as u32;
-    println!(
-        "{:<44} {:>12} {:>16}",
-        "incremental: one price changes",
-        us(one),
-        recalculated / updates
-    );
+        g.set(p, 100.0 + rng.unit()).unwrap();
+        ((), g.stabilize().recalculated)
+    });
+    row("incremental: one price changes", us(one), count);
 
-    // 1% of prices change in one update.
-    let updates = 100;
-    let mut recalculated = 0;
-    let started = Instant::now();
-    for _ in 0..updates {
+    let (batch, count) = median(100, || {
         for _ in 0..MARKET_PRICES / 100 {
             let p = prices[rng.below(MARKET_PRICES)];
-            g.set(p, 100.0 + rng.unit())?;
+            g.set(p, 100.0 + rng.unit()).unwrap();
         }
-        recalculated += g.stabilize().recalculated;
-    }
-    let batch = started.elapsed() / updates as u32;
-    println!(
-        "{:<44} {:>12} {:>16}",
+        ((), g.stabilize().recalculated)
+    });
+    row(
         "incremental: 1% of prices change together",
         ms(batch),
-        recalculated / updates
+        count,
     );
 
     println!();
@@ -146,6 +124,25 @@ fn main() -> Result<(), CalcError> {
         g.get(total)?
     );
     Ok(())
+}
+
+/// Runs `step` `runs` times; returns the median time and the median count it reports.
+fn median(runs: usize, mut step: impl FnMut() -> ((), usize)) -> (Duration, usize) {
+    let mut times = Vec::with_capacity(runs);
+    let mut counts = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let started = Instant::now();
+        let ((), count) = step();
+        times.push(started.elapsed());
+        counts.push(count);
+    }
+    times.sort();
+    counts.sort();
+    (times[runs / 2], counts[runs / 2])
+}
+
+fn row(label: &str, time: String, count: usize) {
+    println!("{label:<44} {time:>12} {count:>16}");
 }
 
 fn ms(d: Duration) -> String {

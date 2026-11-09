@@ -366,3 +366,25 @@ fn to_dot_draws_every_node_and_edge() -> Result {
     let _ = sum;
     Ok(())
 }
+
+#[test]
+fn every_nan_counts_as_the_same_value() -> Result {
+    // Hardware may produce NaNs with different bits for the same calculation.
+    // They must not count as a change, or updates would spread for no reason
+    // (and incremental results could disagree with a full recalculation).
+    let mut g = Graph::new();
+    let x = g.input("x", f64::NAN)?;
+    let y = g.define("y", x + 1.0)?;
+    g.set(x, f64::from_bits(f64::NAN.to_bits() ^ 1))?; // a NaN with different bits
+    let report = g.stabilize();
+    assert_eq!(report.inputs_changed, 0);
+    assert!(g.get(y)?.is_nan());
+
+    // 0.0 and -0.0 are different values: 1/0 is +∞ but 1/-0 is -∞.
+    let z = g.input("z", 0.0)?;
+    let inverse = g.define("inverse", 1.0 / z)?;
+    g.set(z, -0.0)?;
+    g.stabilize();
+    assert_eq!(g.get(inverse)?, f64::NEG_INFINITY);
+    Ok(())
+}
