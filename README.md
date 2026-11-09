@@ -113,26 +113,36 @@ cargo run --release --example benchmark
 ```
 
 On a graph of about a million nodes shaped like a real workload (10,000 market
-prices → 500,000 trades → a tree of totals), on one core:
+prices → 500,000 trades → a tree of totals), on one core, median of many runs:
 
 | | time | nodes recalculated |
 |---|---|---|
-| recalculate everything | 88 ms | 1,000,000 |
-| one price changes | 0.31 ms | ~1,300 |
-| 1% of prices change together | 24 ms | ~68,000 |
+| recalculate everything | 28 ms | 1,000,000 |
+| one price changes | 0.21 ms | ~1,300 |
+| 1% of prices change together | 14 ms | ~68,000 |
 
-One price changing is about 290× faster than recalculating everything. With 1%
-changing it is only about 4×, because changes near the bottom of a tree of
-totals reach a large share of the totals above them. Per node, an incremental
-update costs more than a full pass (finding the work has a price), so the gain
-comes from doing less. There is plenty of room to make it faster: see below.
+One price changing is over 100× faster than recalculating everything. With 1%
+changing it is only about 2×, because changes near the bottom of a tree of
+totals reach a large share of the totals above them.
+
+How it is fast:
+
+- **Expressions are compiled** to a flat list of instructions chosen for the
+  exact types involved. Pure `f64` arithmetic, the most common case, gets its
+  own instructions that work on raw numbers, stored back to back for every
+  node in one array.
+- **What the update loop needs is kept apart** from what it doesn't (names,
+  the original expression), in small arrays indexed by node.
+- The simple tree-walking evaluator is kept as the reference: the tests check
+  the compiled code against it after every update.
 
 ## Layout
 
 ```
 crates/watershed-core/
   src/value.rs    the value types (f64, i64, bool, string, error)
-  src/ir.rs       expressions as data, the type checker and the evaluator
+  src/ir.rs       expressions as data, the type checker and the reference evaluator
+  src/compile.rs  compiles expressions to fast instructions
   src/expr.rs     the typed Rust front end: + - * /, comparisons, when/then/otherwise
   src/handle.rs   typed handles to nodes (Input<T>, Node<T>)
   src/graph.rs    the graph and the incremental update (stabilize)
@@ -143,9 +153,8 @@ crates/watershed-core/
 
 ## Not done yet
 
-- **Speed:** expressions are evaluated by walking a tree; compiling them to a
-  flat list of instructions, and storing numbers without the `Value` wrapper,
-  should help a lot. Recalculating each level in parallel.
+- **Speed:** recalculating each level in parallel; better memory locality for
+  small updates, which are now limited by waiting on memory.
 - **Dynamic dependencies** (a node that changes what it uses), **collections**
   (one node per row, updated per row), **removing nodes**, **pull mode**
   (only calculating what someone is watching).

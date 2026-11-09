@@ -55,6 +55,7 @@
 
 #![forbid(unsafe_code)]
 
+mod compile;
 pub mod error;
 pub mod expr;
 pub mod graph;
