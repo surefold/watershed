@@ -544,6 +544,7 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
     let mut c = Collection::new(&g, "rows");
     let x = c.field::<i64>("x").map_err(|e| e.to_string())?;
     let y = c.field::<i64>("y").map_err(|e| e.to_string())?;
+    let group = c.field::<String>("group").map_err(|e| e.to_string())?;
     let score = c
         .column(&mut g, "score", x * 2 + y + bonus)
         .map_err(|e| e.to_string())?;
@@ -551,7 +552,15 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
     let count = c.count(&mut g, "count").map_err(|e| e.to_string())?;
     let lowest = c.min(&mut g, "lowest", x).map_err(|e| e.to_string())?;
     let highest = c.max(&mut g, "highest", score).map_err(|e| e.to_string())?;
+    let group_totals = c
+        .group_sum(&mut g, "group_total", group, score)
+        .map_err(|e| e.to_string())?;
+    let group_counts = c
+        .group_count(&mut g, "group_count", group)
+        .map_err(|e| e.to_string())?;
     let mut model: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    let mut groups: BTreeMap<String, String> = BTreeMap::new();
+    let names = ["north", "south", "east", "west"];
     let mut bonus_value = 1_i64;
     for step in 0..steps {
         for _ in 0..1 + rng.below(4) {
@@ -561,6 +570,14 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
                 0 => {
                     c.remove(&mut g, &key).map_err(|e| e.to_string())?;
                     model.remove(&key);
+                    groups.remove(&key);
+                }
+                // Move an existing row to another group.
+                3 if model.contains_key(&key) => {
+                    let name = names[rng.below(names.len())].to_string();
+                    c.upsert(&mut g, &key, &[group.is(name.clone())])
+                        .map_err(|e| e.to_string())?;
+                    groups.insert(key, name);
                 }
                 1 if model.contains_key(&key) => {
                     c.upsert(&mut g, &key, &[y.is(vy)])
@@ -568,9 +585,11 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
                     model.get_mut(&key).unwrap().1 = vy;
                 }
                 _ => {
-                    c.upsert(&mut g, &key, &[x.is(vx), y.is(vy)])
+                    let name = names[rng.below(names.len())].to_string();
+                    c.upsert(&mut g, &key, &[x.is(vx), y.is(vy), group.is(name.clone())])
                         .map_err(|e| e.to_string())?;
-                    model.insert(key, (vx, vy));
+                    model.insert(key.clone(), (vx, vy));
+                    groups.insert(key, name);
                 }
             }
         }
@@ -599,6 +618,43 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
         if got != expected {
             return Err(format!(
                 "step {step}: totals {got:?}, but adding up the rows gives {expected:?}"
+            ));
+        }
+        // Every group's total and count against the plain map.
+        let mut expected_keys: Vec<String> = Vec::new();
+        for name in names {
+            let members: Vec<i64> = model
+                .iter()
+                .filter(|(k, _)| groups.get(*k).map(String::as_str) == Some(name))
+                .map(|(_, &(x, y))| x * 2 + y + bonus_value)
+                .collect();
+            if !members.is_empty() {
+                expected_keys.push(name.to_string());
+            }
+            let total = c.group(&g, group_totals, name.to_string());
+            let count = c.group(&g, group_counts, name.to_string());
+            match (total, count) {
+                (Some(total), Some(count)) => {
+                    let got = (
+                        g.get(total).map_err(|e| e.to_string())?,
+                        g.get(count).map_err(|e| e.to_string())?,
+                    );
+                    let want = (members.iter().sum::<i64>(), members.len() as i64);
+                    if got != want {
+                        return Err(format!(
+                            "step {step}: group {name} has {got:?}, expected {want:?}"
+                        ));
+                    }
+                }
+                (None, None) if members.is_empty() => {}
+                _ => return Err(format!("step {step}: group {name} is missing")),
+            }
+        }
+        expected_keys.sort();
+        if c.group_keys(group_totals) != expected_keys {
+            return Err(format!(
+                "step {step}: groups {:?}, expected {expected_keys:?}",
+                c.group_keys(group_totals)
             ));
         }
         if c.len() != model.len() {

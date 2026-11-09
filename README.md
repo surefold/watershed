@@ -64,6 +64,18 @@ and their nodes reused by the next new row.
 cargo run --release --example collection -- 1000000
 ```
 
+Totals per group follow rows as they move between groups:
+
+```rust
+let by_region = orders.group_sum(&mut g, "revenue_by_region", region, line)?;
+let eu = orders.group(&g, by_region, "EU".to_string());   // a node, like any other
+orders.group_keys(by_region);                              // groups that have rows
+```
+
+Each group's total is a node, made when the first row with that key arrives.
+When a row changes group, its old and new groups update by just that row:
+on 1,000 rows in 10 groups, a move recalculates 4 nodes.
+
 Calculations are typed. `qty + region` (a number plus a string) does not
 compile, and neither does setting a calculated node.
 
@@ -269,8 +281,8 @@ web/                    the interactive page and its build script
   they jump between nodes scattered across the graph; placing nodes that
   change together near each other would help. Building is about 1 µs per
   node.
-- **Collections:** grouping by a value (totals per region whose groups come
-  and go), and building rows faster (about 2.4 µs per node today).
+- **Collections:** grouping by a calculated column (groups are by a field
+  today), and building rows faster (about 2.4 µs per node).
 - **Removing nodes** in general (collections reuse rows instead), and **pull
   mode** (only calculating what someone is watching).
 - **Time travel and full lineage** (values as of an earlier update).
