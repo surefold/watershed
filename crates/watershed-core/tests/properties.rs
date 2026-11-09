@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use proptest::prelude::*;
-use watershed_core::{BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
+use watershed_core::{AggregateOp, BinOp, CalcError, Graph, Ir, NodeId, Type, UnOp, Value};
 
 /// A small deterministic random number generator (SplitMix64), seeded by proptest.
 struct Rng(u64);
@@ -162,6 +162,62 @@ fn random_untyped_expr(rng: &mut Rng, g: &Graph, depth: u32) -> Ir {
     }
 }
 
+/// A random member for an aggregate over `value_type`: a value node and a
+/// `bool` presence node, both existing. `None` if the graph has no fit.
+fn random_member(
+    rng: &mut Rng,
+    g: &Graph,
+    op: AggregateOp,
+    value_type: Type,
+) -> Option<(NodeId, NodeId)> {
+    let of =
+        |ty: Type| -> Vec<NodeId> { g.node_ids().filter(|&id| g.node_type(id) == ty).collect() };
+    let presences = of(Type::Bool);
+    if presences.is_empty() {
+        return None;
+    }
+    let present = rng.pick(&presences);
+    if op == AggregateOp::Count {
+        return Some((present, present));
+    }
+    let values = of(value_type);
+    if values.is_empty() {
+        return None;
+    }
+    Some((rng.pick(&values), present))
+}
+
+/// Adds a random aggregate over random members, sitting a little above the
+/// current graph so that later members can sometimes join it. Returns it,
+/// with its operation and value type.
+fn add_random_aggregate(rng: &mut Rng, g: &mut Graph, n: usize) -> (NodeId, AggregateOp, Type) {
+    let op = rng.pick(&[
+        AggregateOp::Sum,
+        AggregateOp::Count,
+        AggregateOp::Min,
+        AggregateOp::Max,
+    ]);
+    let value_type = if op == AggregateOp::Count {
+        Type::I64
+    } else {
+        rng.pick(&[Type::F64, Type::I64])
+    };
+    let members: Vec<(NodeId, NodeId)> = (0..rng.below(12))
+        .filter_map(|_| random_member(rng, g, op, value_type))
+        .collect();
+    let top = g.node_ids().map(|id| g.height(id)).max().unwrap_or(0);
+    let id = g
+        .aggregate(
+            &format!("agg{n}"),
+            op,
+            value_type,
+            top + rng.below(3),
+            &members,
+        )
+        .expect("a valid aggregate must be accepted");
+    (id, op, value_type)
+}
+
 /// Adds a random calculated node. Returns whether it was accepted.
 fn add_random_node(rng: &mut Rng, g: &mut Graph, n: usize, nonsense: bool) -> bool {
     let name = format!("n{n}");
@@ -231,6 +287,10 @@ fn run(
         add_random_node(&mut rng, &mut g, n, nonsense);
         n += 1;
     }
+    // Totals over random members, some of which will grow during the updates.
+    let aggregates: Vec<(NodeId, AggregateOp, Type)> = (0..rng.below(4))
+        .map(|k| add_random_aggregate(&mut rng, &mut g, k))
+        .collect();
     g.check_consistency()?;
 
     for _ in 0..updates {
@@ -249,6 +309,21 @@ fn run(
         if rng.percent(20) {
             add_random_node(&mut rng, &mut g, n, nonsense);
             n += 1;
+        }
+        // Sometimes a member joins an aggregate. It may sit too high, which
+        // must be refused cleanly; if accepted, it counts from this update.
+        let mut joined: HashSet<NodeId> = HashSet::new();
+        if !aggregates.is_empty() && rng.percent(40) {
+            let (aggregate, op, value_type) = rng.pick(&aggregates);
+            if let Some((value, present)) = random_member(&mut rng, &g, op, value_type) {
+                match g.extend_aggregate(aggregate, value, present) {
+                    Ok(()) => {
+                        joined.insert(aggregate);
+                    }
+                    Err(CalcError::Invalid(_)) => {}
+                    Err(other) => return Err(format!("extending an aggregate failed: {other}")),
+                }
+            }
         }
 
         let before: Vec<Value> = g.node_ids().map(|id| g.value(id).clone()).collect();
@@ -279,7 +354,9 @@ fn run(
         for id in g.node_ids() {
             let read_a_change = reads_before[id.index()].iter().any(|d| changed.contains(d));
             let was_recalculated = recalculated_set.contains(&id);
-            if read_a_change != was_recalculated {
+            // An aggregate that gained a member is recalculated to count it.
+            let should = read_a_change || joined.contains(&id);
+            if should != was_recalculated {
                 return Err(format!(
                     "{}: read a changed node = {read_a_change}, but recalculated = {was_recalculated}",
                     g.name(id)
@@ -333,6 +410,64 @@ fn run(
                         g.name(dep)
                     ));
                 }
+            }
+        }
+
+        // Rule 7: min, max and count give the same answer in any order, so
+        // they must equal a plain calculation over the present members,
+        // exactly. (This does not share the aggregate's own combining code.)
+        for &(id, _, _) in &aggregates {
+            let (op, members) = g.aggregate_members(id).expect("an aggregate");
+            let mut naive: Option<Value> = None;
+            for (value, present) in members {
+                let contribution = match (g.value(present), g.value(value)) {
+                    (Value::Bool(false), _) => continue,
+                    (Value::Error(e), _) => Value::Error(e.clone()),
+                    (_, Value::Error(e)) if op != AggregateOp::Count => Value::Error(e.clone()),
+                    (_, _) if op == AggregateOp::Count => Value::I64(1),
+                    (_, v) => v.clone(),
+                };
+                naive = Some(match (naive, contribution) {
+                    (None, c) => c,
+                    (Some(Value::Error(e)), _) => Value::Error(e),
+                    (Some(_), Value::Error(e)) => Value::Error(e),
+                    // A NaN among the present values makes min and max NaN.
+                    (Some(Value::F64(a)), Value::F64(_)) if a.is_nan() => Value::F64(a),
+                    (Some(Value::F64(_)), Value::F64(b)) if b.is_nan() => Value::F64(b),
+                    (Some(Value::F64(a)), Value::F64(b)) if op == AggregateOp::Min => {
+                        Value::F64(a.min(b))
+                    }
+                    (Some(Value::F64(a)), Value::F64(b)) if op == AggregateOp::Max => {
+                        Value::F64(a.max(b))
+                    }
+                    (Some(Value::I64(a)), Value::I64(b)) if op == AggregateOp::Min => {
+                        Value::I64(a.min(b))
+                    }
+                    (Some(Value::I64(a)), Value::I64(b)) if op == AggregateOp::Max => {
+                        Value::I64(a.max(b))
+                    }
+                    (Some(Value::I64(a)), Value::I64(b)) if op == AggregateOp::Count => {
+                        Value::I64(a + b)
+                    }
+                    (Some(a), _) => a, // sums are checked by the consistency rule instead
+                });
+            }
+            if op == AggregateOp::Sum {
+                continue;
+            }
+            let naive = naive.unwrap_or_else(|| match (op, g.node_type(id)) {
+                (AggregateOp::Count, _) => Value::I64(0),
+                (AggregateOp::Min, Type::F64) => Value::F64(f64::INFINITY),
+                (AggregateOp::Max, Type::F64) => Value::F64(f64::NEG_INFINITY),
+                (AggregateOp::Min, _) => Value::I64(i64::MAX),
+                _ => Value::I64(i64::MIN),
+            });
+            if !naive.same_as(g.value(id)) {
+                return Err(format!(
+                    "{} is {}, but over its members it is {naive}",
+                    g.name(id),
+                    g.value(id)
+                ));
             }
         }
 
@@ -392,5 +527,107 @@ fn larger_random_graphs_always_match_a_full_recalculation() {
     for seed in 0..20 {
         run(seed, 30, 2000, 50, false, seed % 2 == 1)
             .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+    }
+}
+
+/// Random inserts, updates and removals on a collection, checked after every
+/// update against a plain map added up from scratch.
+fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    use watershed_core::Collection;
+    let mut rng = Rng(seed);
+    let mut g = Graph::new();
+    if parallel {
+        g.set_parallel_threshold(1);
+    }
+    let bonus = g.input("bonus", 1_i64).map_err(|e| e.to_string())?;
+    let mut c = Collection::new(&g, "rows");
+    let x = c.field::<i64>("x").map_err(|e| e.to_string())?;
+    let y = c.field::<i64>("y").map_err(|e| e.to_string())?;
+    let score = c
+        .column(&mut g, "score", x * 2 + y + bonus)
+        .map_err(|e| e.to_string())?;
+    let total = c.sum(&mut g, "total", score).map_err(|e| e.to_string())?;
+    let count = c.count(&mut g, "count").map_err(|e| e.to_string())?;
+    let lowest = c.min(&mut g, "lowest", x).map_err(|e| e.to_string())?;
+    let highest = c.max(&mut g, "highest", score).map_err(|e| e.to_string())?;
+    let mut model: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    let mut bonus_value = 1_i64;
+    for step in 0..steps {
+        for _ in 0..1 + rng.below(4) {
+            let key = format!("k{}", rng.below(keys));
+            let (vx, vy) = (rng.below(21) as i64 - 10, rng.below(21) as i64 - 10);
+            match rng.below(4) {
+                0 => {
+                    c.remove(&mut g, &key).map_err(|e| e.to_string())?;
+                    model.remove(&key);
+                }
+                1 if model.contains_key(&key) => {
+                    c.upsert(&mut g, &key, &[y.is(vy)])
+                        .map_err(|e| e.to_string())?;
+                    model.get_mut(&key).unwrap().1 = vy;
+                }
+                _ => {
+                    c.upsert(&mut g, &key, &[x.is(vx), y.is(vy)])
+                        .map_err(|e| e.to_string())?;
+                    model.insert(key, (vx, vy));
+                }
+            }
+        }
+        if rng.percent(15) {
+            bonus_value = rng.below(5) as i64;
+            g.set(bonus, bonus_value).map_err(|e| e.to_string())?;
+        }
+        g.stabilize();
+        g.check_consistency()?;
+        let scores: Vec<i64> = model
+            .values()
+            .map(|&(x, y)| x * 2 + y + bonus_value)
+            .collect();
+        let expected = (
+            scores.iter().sum::<i64>(),
+            model.len() as i64,
+            model.values().map(|v| v.0).min().unwrap_or(i64::MAX),
+            scores.iter().copied().max().unwrap_or(i64::MIN),
+        );
+        let got = (
+            g.get(total).map_err(|e| e.to_string())?,
+            g.get(count).map_err(|e| e.to_string())?,
+            g.get(lowest).map_err(|e| e.to_string())?,
+            g.get(highest).map_err(|e| e.to_string())?,
+        );
+        if got != expected {
+            return Err(format!(
+                "step {step}: totals {got:?}, but adding up the rows gives {expected:?}"
+            ));
+        }
+        if c.len() != model.len() {
+            return Err(format!(
+                "step {step}: {} rows, expected {}",
+                c.len(),
+                model.len()
+            ));
+        }
+        for (key, &(vx, vy)) in &model {
+            let s = c.get(&g, key, score).map_err(|e| e.to_string())?;
+            if s != vx * 2 + vy + bonus_value {
+                return Err(format!("step {step}: row {key} has score {s}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    #[test]
+    fn collections_match_a_plain_map_added_up_from_scratch(
+        seed in any::<u64>(),
+        keys in 1usize..40,
+        steps in 1usize..30,
+        parallel in any::<bool>(),
+    ) {
+        run_collection(seed, keys, steps, parallel).map_err(TestCaseError::fail)?;
     }
 }

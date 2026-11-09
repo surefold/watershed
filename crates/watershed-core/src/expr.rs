@@ -18,6 +18,7 @@ use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, Div, Mul, Neg, Not, Sub};
 use std::sync::Arc;
 
+use crate::collection::{Column, Field};
 use crate::handle::{Input, Node};
 use crate::ir::{BinOp, Ir, UnOp};
 use crate::value::{CalcType, Numeric, Ordered};
@@ -152,7 +153,7 @@ macro_rules! arithmetic {
         }
     };
 }
-arithmetic!(Expr, Node, Input);
+arithmetic!(Expr, Node, Input, Field, Column);
 
 // A constant on the left, as in `1.0 + rate`.
 macro_rules! constant_on_the_left {
@@ -160,6 +161,8 @@ macro_rules! constant_on_the_left {
         constant_on_the_left!(@handle $t, Expr);
         constant_on_the_left!(@handle $t, Node);
         constant_on_the_left!(@handle $t, Input);
+        constant_on_the_left!(@handle $t, Field);
+        constant_on_the_left!(@handle $t, Column);
     )*};
     (@handle $t:ty, $handle:ident) => {
         constant_on_the_left!(@op $t, $handle, Add, add, BinOp::Add);
@@ -222,7 +225,7 @@ macro_rules! methods {
         }
     )*};
 }
-methods!(Expr, Node, Input);
+methods!(Expr, Node, Input, Field, Column);
 
 // ---- Conditionals: when(cond).then(a).otherwise(b) ----
 
