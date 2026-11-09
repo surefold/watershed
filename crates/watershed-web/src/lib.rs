@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use wasm_bindgen::prelude::*;
 use watershed_core::prelude::*;
-use watershed_core::{NodeId, Value};
+use watershed_core::{Groups, NodeId, Value};
 
 /// The example models. Each is a file of ordinary watershed code; the page
 /// shows the same file as the source of the graph it draws.
@@ -275,6 +275,179 @@ impl Benchmark {
     }
 }
 
+/// A rolling window of recent Wikipedia edits, kept as a collection: each
+/// edit is a row, totalled overall and per wiki. A new edit adds a row and
+/// pushes out the oldest, so only the totals those two rows touch change.
+#[wasm_bindgen]
+pub struct Edits {
+    graph: Graph,
+    edits: Collection,
+    wiki: Field<String>,
+    bytes: Field<f64>,
+    bot: Field<bool>,
+    rows: Node<i64>,
+    bots: Node<f64>,
+    bot_share: Node<f64>,
+    added: Node<f64>,
+    removed: Node<f64>,
+    per_wiki: Groups<String, i64>,
+    bytes_per_wiki: Groups<String, f64>,
+    order: std::collections::VecDeque<String>,
+    window: usize,
+}
+
+#[wasm_bindgen]
+impl Edits {
+    /// Keeps the latest `window` edits.
+    #[wasm_bindgen(constructor)]
+    pub fn new(window: u32) -> Result<Edits, JsError> {
+        let mut g = Graph::new();
+        let mut edits = Collection::new(&g, "edits");
+        let wiki = edits.field::<String>("wiki").map_err(js_error)?;
+        let bytes = edits.field::<f64>("bytes").map_err(js_error)?;
+        let bot = edits.field::<bool>("bot").map_err(js_error)?;
+        let is_bot = edits
+            .column(&mut g, "is_bot", when(bot).then(1.0).otherwise(0.0))
+            .map_err(js_error)?;
+        let grew = edits
+            .column(&mut g, "grew", bytes.max(0.0))
+            .map_err(js_error)?;
+        let shrank = edits
+            .column(&mut g, "shrank", bytes.min(0.0))
+            .map_err(js_error)?;
+        let rows = edits.count(&mut g, "edits").map_err(js_error)?;
+        let bots = edits.sum(&mut g, "bot_edits", is_bot).map_err(js_error)?;
+        let added = edits.sum(&mut g, "bytes_added", grew).map_err(js_error)?;
+        let removed = edits
+            .sum(&mut g, "bytes_removed", shrank)
+            .map_err(js_error)?;
+        // Counts are whole numbers; the share needs a float, so each row
+        // also counts 1.0 into a float total.
+        let one = edits.column::<f64>(&mut g, "one", 1.0).map_err(js_error)?;
+        let rows_f = edits.sum(&mut g, "edits_f", one).map_err(js_error)?;
+        let bot_share = g
+            .define(
+                "bot_share",
+                when(rows_f.gt(0.0)).then(bots / rows_f).otherwise(0.0),
+            )
+            .map_err(js_error)?;
+        let per_wiki = edits
+            .group_count(&mut g, "edits_by_wiki", wiki)
+            .map_err(js_error)?;
+        let bytes_per_wiki = edits
+            .group_sum(&mut g, "bytes_by_wiki", wiki, bytes)
+            .map_err(js_error)?;
+        Ok(Edits {
+            graph: g,
+            edits,
+            wiki,
+            bytes,
+            bot,
+            rows,
+            bots,
+            bot_share,
+            added,
+            removed,
+            per_wiki,
+            bytes_per_wiki,
+            order: std::collections::VecDeque::new(),
+            window: window.max(1) as usize,
+        })
+    }
+
+    /// Adds an edit; once the window is full, the oldest one is removed.
+    /// Takes effect at the next `update`.
+    pub fn add(&mut self, id: &str, wiki: &str, bytes: f64, bot: bool) -> Result<(), JsError> {
+        if self.edits.contains(id) {
+            return Ok(());
+        }
+        self.edits
+            .upsert(
+                &mut self.graph,
+                id,
+                &[
+                    self.wiki.is(wiki.to_string()),
+                    self.bytes.is(bytes),
+                    self.bot.is(bot),
+                ],
+            )
+            .map_err(js_error)?;
+        self.order.push_back(id.to_string());
+        while self.order.len() > self.window {
+            let oldest = self.order.pop_front().expect("not empty");
+            self.edits
+                .remove(&mut self.graph, &oldest)
+                .map_err(js_error)?;
+        }
+        Ok(())
+    }
+
+    /// Applies the recorded edits: `{epoch, recalculated, nodes}`.
+    pub fn update(&mut self) -> String {
+        let r = self.graph.stabilize();
+        format!(
+            r#"{{"epoch":{},"recalculated":{},"nodes":{}}}"#,
+            r.epoch,
+            r.recalculated,
+            self.graph.len()
+        )
+    }
+
+    /// The totals, and the `top` wikis by edits in the window:
+    /// `{rows, bots, botShare, added, removed, wikis, top: [[wiki, edits, bytes]]}`.
+    pub fn summary(&self, top: u32) -> String {
+        let g = &self.graph;
+        let mut wikis: Vec<(String, i64, f64)> = self
+            .edits
+            .group_keys(self.per_wiki)
+            .into_iter()
+            .filter_map(|w| {
+                let n = self.edits.group(g, self.per_wiki, w.clone())?;
+                let b = self.edits.group(g, self.bytes_per_wiki, w.clone())?;
+                Some((w, g.get(n).ok()?, g.get(b).ok()?))
+            })
+            .collect();
+        wikis.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let total_wikis = wikis.len();
+        let top: Vec<String> = wikis
+            .into_iter()
+            .take(top as usize)
+            .map(|(w, n, b)| format!("[{},{n},{}]", json_str(&w), finite(b)))
+            .collect();
+        format!(
+            r#"{{"rows":{},"bots":{},"botShare":{},"added":{},"removed":{},"wikis":{total_wikis},"top":[{}]}}"#,
+            g.get(self.rows).unwrap_or(0),
+            finite(g.get(self.bots).unwrap_or(0.0)),
+            finite(g.get(self.bot_share).unwrap_or(0.0)),
+            finite(g.get(self.added).unwrap_or(0.0)),
+            finite(g.get(self.removed).unwrap_or(0.0)),
+            top.join(",")
+        )
+    }
+
+    /// Why one wiki's edit count has its value.
+    pub fn explain_wiki(&self, wiki: &str) -> Option<String> {
+        let node = self
+            .edits
+            .group(&self.graph, self.per_wiki, wiki.to_string())?;
+        Some(self.graph.explain(node))
+    }
+
+    /// Checks the incremental values against a full recalculation.
+    pub fn check(&self) -> Option<String> {
+        self.graph.check_consistency().err()
+    }
+}
+
+fn finite(x: f64) -> String {
+    if x.is_finite() {
+        // `+ 0.0` turns -0 (an empty float sum) into 0.
+        (x + 0.0).to_string()
+    } else {
+        "0".into()
+    }
+}
+
 fn next(seed: &mut u64) -> u64 {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 7;
@@ -321,4 +494,44 @@ fn value_json(v: &Value) -> String {
         r#"{{"kind":"{kind}","value":{value},"text":{}}}"#,
         json_str(&v.to_string())
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edits_keep_a_rolling_window_and_total_it() {
+        let mut e = Edits::new(3).unwrap();
+        e.add("1", "en.wikipedia.org", 120.0, false).unwrap();
+        e.add("2", "de.wikipedia.org", -40.0, true).unwrap();
+        e.add("3", "en.wikipedia.org", 10.0, false).unwrap();
+        e.add("3", "en.wikipedia.org", 999.0, false).unwrap(); // a repeat is ignored
+        e.update();
+        assert_eq!(
+            e.summary(5),
+            r#"{"rows":3,"bots":1,"botShare":0.3333333333333333,"added":130,"removed":-40,"wikis":2,"top":[["en.wikipedia.org",2,130],["de.wikipedia.org",1,-40]]}"#
+        );
+        // A fourth edit pushes out the first.
+        e.add("4", "fr.wikipedia.org", 5.0, true).unwrap();
+        let r = e.update();
+        assert!(r.contains(r#""epoch":"#), "{r}");
+        assert_eq!(
+            e.summary(1),
+            r#"{"rows":3,"bots":2,"botShare":0.6666666666666666,"added":15,"removed":-40,"wikis":3,"top":[["de.wikipedia.org",1,-40]]}"#
+        );
+        assert!(
+            e.explain_wiki("en.wikipedia.org")
+                .unwrap()
+                .contains("edits_by_wiki")
+        );
+        assert_eq!(e.check(), None);
+    }
+
+    #[test]
+    fn an_empty_window_has_no_bot_share() {
+        let mut e = Edits::new(10).unwrap();
+        e.update();
+        assert!(e.summary(3).contains(r#""rows":0,"bots":0,"botShare":0"#));
+    }
 }
