@@ -13,11 +13,9 @@ concurrency:
 permissions:
   contents: read
 
-# Every job runs on the surefold organisation's self-hosted machine (DESKTOP-BVAR25E), the
-# same one Doorlist uses. Two runner instances live on it (DESKTOP-BVAR25E and
-# DESKTOP-BVAR25E-2), so two jobs can run at the same time under one user account.
-# Each job therefore starts with the `rust-homes` step below, which gives its runner
-# instance its own copy of Rust and the downloaded crates.
+# Every job runs on the surefold organisation's self-hosted Mac (macbook-air), one at a
+# time. It is someone's own computer, so each job starts with the `rust-homes` step below,
+# which gives CI its own copy of Rust and the downloaded crates, away from theirs.
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,7 +24,7 @@ env:
 jobs:
   format:
     name: Formatting
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
       # Written out once here; the other jobs reuse it as `*rust-homes`. It runs first
       # because the toolchain and cache steps read these variables. In a shared
@@ -52,7 +50,7 @@ jobs:
 
   lint:
     name: Lint (clippy)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
       - *rust-homes
       - uses: actions/checkout@v4
@@ -66,7 +64,7 @@ jobs:
 
   test:
     name: Tests (Rust ${{ matrix.rust }})
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     strategy:
       fail-fast: false
       matrix:
@@ -87,7 +85,7 @@ jobs:
 
   docs:
     name: Docs
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
       - *rust-homes
       - uses: actions/checkout@v4
@@ -99,7 +97,7 @@ jobs:
 
   examples:
     name: Examples
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
       - *rust-homes
       - uses: actions/checkout@v4
@@ -118,7 +116,7 @@ jobs:
 
   web:
     name: Web demo (WebAssembly)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
       - *rust-homes
       - uses: actions/checkout@v4
@@ -130,7 +128,7 @@ jobs:
 
   python:
     name: Python bindings (uv)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
       - *rust-homes
       - uses: actions/checkout@v4
