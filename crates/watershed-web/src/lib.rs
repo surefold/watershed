@@ -488,6 +488,10 @@ fn value_json(v: &Value) -> String {
         Value::I64(x) => ("i64", x.to_string()),
         Value::Bool(b) => ("bool", b.to_string()),
         Value::Str(s) => ("string", json_str(s)),
+        Value::List(items) => {
+            let parts: Vec<String> = items.iter().map(|s| json_str(s)).collect();
+            ("list", format!("[{}]", parts.join(",")))
+        }
         Value::Error(e) => ("error", json_str(e)),
     };
     format!(

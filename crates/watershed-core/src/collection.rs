@@ -1037,6 +1037,7 @@ impl Collection {
             Ir::Binary(op, a, b) => Ir::Binary(*op, re(a), re(b)),
             Ir::If(c, t, e) => Ir::If(re(c), re(t), re(e)),
             Ir::Choose(i, options) => Ir::Choose(re(i), options.iter().map(re).collect()),
+            Ir::List(items) => Ir::List(items.iter().map(re).collect()),
         }
     }
 

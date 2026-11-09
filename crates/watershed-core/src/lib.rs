@@ -68,16 +68,16 @@ pub mod value;
 pub use aggregate::AggregateOp;
 pub use collection::{Collection, Column, Field, Groups, Part, Set};
 pub use error::CalcError;
-pub use expr::{Expr, IntoExpr, choose, text, when};
+pub use expr::{Expr, IntoExpr, choose, list, text, when};
 pub use graph::{Graph, Report};
 pub use handle::{Handle, Input, Node, NodeId};
-pub use ir::{BinOp, Ir, MAX_TEXT_BYTES, TypeError, UnOp};
-pub use value::{CalcType, Numeric, Ordered, Text, Type, Value};
+pub use ir::{BinOp, Ir, MAX_LIST_ITEMS, MAX_TEXT_BYTES, TypeError, UnOp};
+pub use value::{CalcType, Numeric, Ordered, Text, TextList, Type, Value};
 
 /// Everything you need to build and use a graph: `use watershed_core::prelude::*;`
 pub mod prelude {
     pub use crate::{
         CalcError, Collection, Column, Expr, Field, Graph, Input, IntoExpr, Node, Report, choose,
-        text, when,
+        list, text, when,
     };
 }

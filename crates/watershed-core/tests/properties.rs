@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use proptest::prelude::*;
-use watershed_core::{AggregateOp, BinOp, CalcError, Graph, Ir, NodeId, Type, UnOp, Value};
+use watershed_core::{AggregateOp, BinOp, CalcError, Graph, Ir, NodeId, Text, Type, UnOp, Value};
 
 /// A small deterministic random number generator (SplitMix64), seeded by proptest.
 struct Rng(u64);
@@ -36,7 +36,7 @@ impl Rng {
     }
 }
 
-const TYPES: [Type; 4] = [Type::F64, Type::I64, Type::Bool, Type::Str];
+const TYPES: [Type; 5] = [Type::F64, Type::I64, Type::Bool, Type::Str, Type::StrList];
 
 /// A random value. The choices are deliberately small, so that values often
 /// repeat (which exercises cutoff), with awkward ones mixed in: NaN, -0.0,
@@ -57,6 +57,12 @@ fn random_value(rng: &mut Rng, ty: Type) -> Value {
         Type::I64 => Value::I64(rng.pick(&[-2, -1, 0, 1, 2, 3, i64::MAX, i64::MIN])),
         Type::Bool => Value::Bool(rng.percent(50)),
         Type::Str => Value::Str(rng.pick(&["", "a", "b", "ab"]).into()),
+        Type::StrList => {
+            let items = (0..rng.below(3))
+                .map(|_| Text::from(rng.pick(&["", "a", "b"])))
+                .collect::<Vec<_>>();
+            Value::List(items.into())
+        }
     }
 }
 
@@ -95,6 +101,10 @@ fn random_expr(rng: &mut Rng, g: &Graph, ty: Type, depth: u32) -> Ir {
         Type::Bool => match rng.below(4) {
             0 => {
                 let operand = rng.pick(&[Type::F64, Type::I64, Type::Str]);
+                if rng.percent(25) {
+                    let op = rng.pick(&[BinOp::Eq, BinOp::Ne]);
+                    return Ir::Binary(op, sub(rng, Type::StrList), sub(rng, Type::StrList));
+                }
                 let op = rng.pick(&[
                     BinOp::Lt,
                     BinOp::Le,
@@ -117,8 +127,22 @@ fn random_expr(rng: &mut Rng, g: &Graph, ty: Type, depth: u32) -> Ir {
                 sub(rng, Type::Bool),
             ),
         },
-        Type::Str => match rng.below(3) {
+        Type::StrList => match rng.below(3) {
+            0 => Ir::Binary(
+                BinOp::Concat,
+                sub(rng, Type::StrList),
+                sub(rng, Type::StrList),
+            ),
+            1 => Ir::List((0..rng.below(3)).map(|_| sub(rng, Type::Str)).collect()),
+            _ => Ir::If(
+                sub(rng, Type::Bool),
+                sub(rng, Type::StrList),
+                sub(rng, Type::StrList),
+            ),
+        },
+        Type::Str => match rng.below(4) {
             0 => Ir::Binary(BinOp::Concat, sub(rng, Type::Str), sub(rng, Type::Str)),
+            2 => Ir::Binary(BinOp::Join, sub(rng, Type::StrList), sub(rng, Type::Str)),
             1 => {
                 let operand = rng.pick(&TYPES);
                 Ir::Unary(UnOp::ToText, sub(rng, operand))
@@ -140,7 +164,8 @@ fn random_untyped_expr(rng: &mut Rng, g: &Graph, depth: u32) -> Ir {
         return random_expr(rng, g, ty, 0);
     }
     let sub = |rng: &mut Rng| Arc::new(random_untyped_expr(rng, g, depth - 1));
-    match rng.below(4) {
+    match rng.below(5) {
+        4 => Ir::List((0..rng.below(3)).map(|_| sub(rng)).collect()),
         3 => {
             let options = (0..rng.below(3)).map(|_| sub(rng)).collect();
             Ir::Choose(sub(rng), options)
@@ -166,6 +191,7 @@ fn random_untyped_expr(rng: &mut Rng, g: &Graph, depth: u32) -> Ir {
                 BinOp::And,
                 BinOp::Or,
                 BinOp::Concat,
+                BinOp::Join,
             ]);
             Ir::Binary(op, sub(rng), sub(rng))
         }

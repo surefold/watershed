@@ -1042,3 +1042,162 @@ fn explain_writes_a_chain_of_joins_without_brackets() -> Result {
     assert!(why.contains("a + \"y\" + text(1)"), "{why}");
     Ok(())
 }
+
+// ---------------------------------------------------------------- lists
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn a_list_holds_its_items_in_order_and_follows_them() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", "x".to_string())?;
+    let l = g.define("l", list([a.into_expr(), "y".into_expr()]))?;
+    assert_eq!(g.get(l)?, strings(&["x", "y"]));
+    g.set(a, "z".to_string())?;
+    g.stabilize();
+    assert_eq!(g.get(l)?, strings(&["z", "y"]));
+    Ok(())
+}
+
+#[test]
+fn an_empty_list_is_a_list() -> Result {
+    let mut g = Graph::new();
+    let none: [Expr<String>; 0] = [];
+    let l = g.define("l", list(none))?;
+    assert!(g.get(l)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn concat_puts_one_list_after_another() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", strings(&["1", "2"]))?;
+    let b = g.input("b", strings(&["3"]))?;
+    let both = g.define("both", a.concat(b))?;
+    assert_eq!(g.get(both)?, strings(&["1", "2", "3"]));
+    Ok(())
+}
+
+#[test]
+fn join_makes_one_string_from_a_list() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", strings(&["x", "y", "z"]))?;
+    let line = g.define("line", a.join(":"))?;
+    assert_eq!(g.get(line)?, "x:y:z");
+    g.set(a, Vec::new())?;
+    g.stabilize();
+    assert_eq!(g.get(line)?, "");
+    Ok(())
+}
+
+#[test]
+fn text_shows_a_list_as_kotlin_does() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", strings(&["x", "y"]))?;
+    let shown = g.define("shown", text(a))?;
+    assert_eq!(g.get(shown)?, "[x, y]");
+    Ok(())
+}
+
+#[test]
+fn an_error_in_an_item_makes_the_whole_list_an_error() -> Result {
+    let mut g = Graph::new();
+    let n = g.input("n", 0_i64)?;
+    let bad = g.define("bad", text(1_i64 / n))?;
+    let l = g.define("l", list([bad.into_expr(), "ok".into_expr()]))?;
+    assert!(g.value(l.id()).is_error());
+    g.set(n, 1)?;
+    g.stabilize();
+    assert_eq!(g.get(l)?, strings(&["1", "ok"]));
+    Ok(())
+}
+
+#[test]
+fn a_list_that_comes_out_the_same_stops_there() -> Result {
+    let mut g = Graph::new();
+    let n = g.input("n", 1_i64)?;
+    let l = g.define("l", list([text(n.abs())]))?;
+    let line = g.define("line", l.join(","))?;
+    g.set(n, -1)?;
+    g.stabilize();
+    assert_eq!(recalculated(&g), ["l"]);
+    assert_eq!(g.get(line)?, "1");
+    Ok(())
+}
+
+#[test]
+fn lists_can_be_compared_for_equality() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", strings(&["x"]))?;
+    let same = g.define("same", a.equals(strings(&["x"])))?;
+    assert!(g.get(same)?);
+    g.set(a, strings(&["y"]))?;
+    g.stabilize();
+    assert!(!g.get(same)?);
+    Ok(())
+}
+
+#[test]
+fn a_list_that_grows_too_long_becomes_an_error() -> Result {
+    let mut g = Graph::new();
+    let start = g.input("start", vec!["x".to_string(); 1024])?;
+    let mut last = g.define("v0", start.concat(Vec::new()))?;
+    for i in 1..40 {
+        last = g.define(&format!("v{i}"), last.concat(last))?;
+    }
+    assert!(g.value(last.id()).to_string().contains("too long"));
+    Ok(())
+}
+
+#[test]
+fn joining_a_huge_list_of_huge_strings_is_an_error_not_a_crash() -> Result {
+    let mut g = Graph::new();
+    let big = "x".repeat(1 << 19);
+    let start = g.input("start", vec![big; 8])?;
+    let line = g.define("line", start.join(""))?;
+    let shown = g.define("shown", text(start))?;
+    assert!(g.value(line.id()).to_string().contains("too long"));
+    assert!(g.value(shown.id()).to_string().contains("too long"));
+    Ok(())
+}
+
+#[test]
+fn a_list_item_must_be_a_string() {
+    let mut g = Graph::new();
+    let n = g.input("n", 1_i64).unwrap();
+    let bad = Ir::List(vec![std::sync::Arc::new(g.reference(n.id()))]);
+    assert!(g.define_ir("bad", bad).is_err());
+}
+
+#[test]
+fn join_needs_a_list_and_a_string() {
+    let mut g = Graph::new();
+    let s = g.input("s", "x".to_string()).unwrap();
+    let bad = Ir::Binary(
+        watershed_core::BinOp::Join,
+        std::sync::Arc::new(g.reference(s.id())),
+        std::sync::Arc::new(g.reference(s.id())),
+    );
+    assert!(g.define_ir("bad", bad).is_err());
+}
+
+#[test]
+fn explain_writes_lists_the_way_they_were_built() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", "x".to_string())?;
+    let l = g.define("l", list([a.into_expr(), "y".into_expr()]))?;
+    let line = g.define("line", l.join(" "))?;
+    assert!(
+        g.explain(l).contains("listOf(a, \"y\")"),
+        "{}",
+        g.explain(l)
+    );
+    assert!(
+        g.explain(line).contains("join(l, \" \")"),
+        "{}",
+        g.explain(line)
+    );
+    Ok(())
+}

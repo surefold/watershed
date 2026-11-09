@@ -294,7 +294,7 @@ How it is fast and small:
 
 ```
 crates/watershed-core/
-  src/value.rs    the value types (f64, i64, bool, string, error)
+  src/value.rs    the value types (f64, i64, bool, string, list, error)
   src/ir.rs       expressions as data, the type checker and the reference evaluator
   src/compile.rs  compiles expressions to fast instructions
   src/expr.rs     the typed Rust front end: + - * /, comparisons, when/then/otherwise
