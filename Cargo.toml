@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/watershed-core"]
+members = ["crates/watershed-core", "crates/watershed-web"]
 
 [workspace.package]
 edition = "2024"

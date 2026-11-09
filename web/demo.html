@@ -1,0 +1,589 @@
+<title>Watershed Playground</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a survey sheet. Controls on the left, the graph as a catchment in the
+   middle (rain falls on inputs at the bottom, results drain to the top), notes
+   on the right; the million-node run sits below as its own plate. */
+:root {
+  --paper: #f2f5f4;
+  --surface: #ffffff;
+  --ink: #13242c;
+  --muted: #56676e;
+  --rule: #d3dcdc;
+  --water: #1d6c88;
+  --rain: #2c8c58;
+  --sediment: #c45f27;
+  --still: #8c999e;
+  --code-bg: #e8eeee;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "Figtree", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e161a; --surface: #142026; --ink: #e2eaeb; --muted: #94a4a9; --rule: #26363c;
+    --water: #63b4d0; --rain: #5bc68b; --sediment: #f0894a; --still: #6d7c81; --code-bg: #101c21;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e161a; --surface: #142026; --ink: #e2eaeb; --muted: #94a4a9; --rule: #26363c;
+  --water: #63b4d0; --rain: #5bc68b; --sediment: #f0894a; --still: #6d7c81; --code-bg: #101c21;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--paper); color: var(--ink);
+  font: 15px/1.55 var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.page { max-width: 1240px; margin: 0 auto; padding-block: 28px 56px; display: grid; gap: 40px; }
+
+header { display: grid; gap: 10px; max-width: 70ch; }
+h1 { font: 700 clamp(2rem, 4vw, 2.9rem)/1.05 var(--display); letter-spacing: -0.02em; margin: 0; text-wrap: balance; }
+h1 span { color: var(--water); }
+h2 { font: 700 1.45rem/1.2 var(--display); margin: 0; text-wrap: balance; }
+h3 { font: 600 0.72rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
+p { margin: 0; }
+.lede { font-size: 1.08rem; color: var(--muted); }
+.lede strong { color: var(--ink); }
+code, pre { font-family: var(--mono); font-size: 0.82rem; }
+a { color: var(--water); }
+
+.plate { display: grid; gap: 18px; }
+.plate-head { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; justify-content: space-between; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tab {
+  font: 600 0.85rem var(--body); color: var(--ink); background: transparent;
+  border: 1px solid var(--rule); border-radius: 999px; padding: 6px 14px; cursor: pointer;
+}
+.tab[aria-selected="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.tab:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, .node:focus-visible { outline: 2px solid var(--water); outline-offset: 2px; }
+
+.workbench { display: grid; grid-template-columns: 250px minmax(0, 1fr) 320px; gap: 20px; align-items: start; }
+@media (max-width: 1080px) { .workbench { grid-template-columns: 250px minmax(0, 1fr); } .notes { grid-column: 1 / -1; } }
+@media (max-width: 720px) { .workbench { grid-template-columns: minmax(0, 1fr); } }
+
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: grid; gap: 14px; min-width: 0; }
+
+.inputs { display: grid; gap: 14px; }
+.field { display: grid; gap: 4px; }
+.field-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.field label { font: 600 0.8rem var(--mono); }
+.field output { font: 600 0.9rem var(--mono); font-variant-numeric: tabular-nums; color: var(--rain); }
+input[type="range"] { width: 100%; accent-color: var(--rain); }
+.switch { display: flex; align-items: center; gap: 8px; font: 600 0.8rem var(--mono); cursor: pointer; }
+.switch input { width: 18px; height: 18px; accent-color: var(--rain); }
+
+.catchment { padding: 0; overflow: hidden; }
+.catchment-scroll { overflow-x: auto; }
+.catchment svg { display: block; width: 100%; min-width: 620px; height: auto; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 16px; border-top: 1px solid var(--rule); font-size: 0.8rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 14px; height: 10px; border-radius: 2px; border: 1.5px solid var(--still); background: var(--surface); }
+.swatch.rain { background: color-mix(in srgb, var(--rain) 30%, var(--surface)); border-color: var(--rain); }
+.swatch.sediment { background: color-mix(in srgb, var(--sediment) 28%, var(--surface)); border-color: var(--sediment); }
+.swatch.still { border-style: dashed; }
+
+.edge { fill: none; stroke: var(--rule); stroke-width: 1.5; transition: stroke 0.25s; }
+.edge.flow { stroke: var(--sediment); stroke-width: 2.2; }
+.node { cursor: pointer; }
+.node rect { fill: var(--surface); stroke: var(--still); stroke-width: 1.4; transition: fill 0.25s, stroke 0.25s; }
+.node.input rect { stroke: var(--ink); }
+.node .name { font: 600 11px var(--mono); fill: var(--muted); }
+.node .val { font: 600 14px var(--mono); fill: var(--ink); font-variant-numeric: tabular-nums; }
+.node.selected rect { stroke: var(--water); stroke-width: 2.6; }
+.node.rain rect { fill: color-mix(in srgb, var(--rain) 26%, var(--surface)); stroke: var(--rain); }
+.node.sediment rect { fill: color-mix(in srgb, var(--sediment) 24%, var(--surface)); stroke: var(--sediment); }
+.node.still rect { stroke-dasharray: 5 4; stroke: var(--muted); fill: color-mix(in srgb, var(--still) 14%, var(--surface)); }
+.node.error .val { fill: var(--sediment); }
+.level-label { font: 600 10px var(--mono); fill: var(--muted); letter-spacing: 0.08em; }
+
+.notes { display: grid; gap: 16px; }
+.log { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.log li { display: grid; gap: 2px; padding-bottom: 8px; border-bottom: 1px dashed var(--rule); font-size: 0.85rem; }
+.log li:last-child { border-bottom: 0; padding-bottom: 0; }
+.log .epoch { font: 600 0.72rem var(--mono); color: var(--muted); }
+.log .numbers { font-variant-numeric: tabular-nums; }
+.log .stopped { color: var(--muted); }
+.empty { color: var(--muted); font-size: 0.85rem; }
+pre.tree, pre.source { margin: 0; padding: 12px; background: var(--code-bg); border-radius: 4px; overflow-x: auto; line-height: 1.5; }
+.formula { font: 600 0.82rem var(--mono); color: var(--water); overflow-wrap: anywhere; }
+details summary { cursor: pointer; font-weight: 700; }
+details[open] summary { margin-bottom: 10px; }
+.tok-kw { color: var(--water); font-weight: 600; }
+.tok-str { color: var(--rain); }
+.tok-num { color: var(--sediment); }
+.tok-com { color: var(--muted); font-style: italic; }
+
+.bench { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 820px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+.choices { display: grid; gap: 8px; }
+.choice { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; padding: 10px; border: 1px solid var(--rule); border-radius: 6px; cursor: pointer; }
+.choice input { margin-top: 4px; accent-color: var(--water); }
+.choice small { grid-column: 2; color: var(--muted); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+button.primary, button.secondary {
+  font: 700 0.9rem var(--body); border-radius: 6px; padding: 9px 16px; cursor: pointer; border: 1px solid var(--water);
+}
+button.primary { background: var(--water); color: var(--surface); }
+button.secondary { background: transparent; color: var(--water); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.status { font-size: 0.88rem; color: var(--muted); min-height: 1.4em; }
+.status.ok { color: var(--rain); }
+.status.bad { color: var(--sediment); }
+
+.results { display: grid; gap: 14px; }
+.result { display: grid; gap: 6px; }
+.result-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; }
+.result-top strong { font-weight: 700; }
+.result-top span { font: 600 0.85rem var(--mono); font-variant-numeric: tabular-nums; }
+.bar { height: 12px; background: var(--code-bg); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--water); min-width: 3px; transition: width 0.6s ease-out; }
+.bar i.full { background: var(--still); }
+.result small { color: var(--muted); font-variant-numeric: tabular-nums; }
+.speedup { font: 700 2.2rem/1 var(--display); color: var(--water); }
+
+.failed { border-color: var(--sediment); }
+footer { color: var(--muted); font-size: 0.85rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+
+<div class="page">
+  <header>
+    <h3>Incremental calculation engine · Rust → WebAssembly</h3>
+    <h1>Change one input. <span>Only what depends on it is recalculated.</span></h1>
+    <p class="lede">This is <strong>watershed</strong>, running in your browser: the same Rust engine its tests check, compiled to WebAssembly. Move a slider and watch the change flow up the graph. Where a recalculated value comes out the same as before, the update stops.</p>
+  </header>
+
+  <section class="plate" aria-labelledby="models-title">
+    <div class="plate-head">
+      <h2 id="models-title">Try a model</h2>
+      <div class="tabs" role="tablist" aria-label="Example models" id="tabs"></div>
+    </div>
+
+    <div class="workbench">
+      <div class="panel">
+        <h3>Inputs</h3>
+        <div class="inputs" id="inputs"><p class="empty">Starting the engine…</p></div>
+      </div>
+
+      <div class="panel catchment">
+        <div class="catchment-scroll"><svg id="graph" role="img" aria-label="The calculation graph"></svg></div>
+        <div class="legend">
+          <span><i class="swatch rain"></i>input changed</span>
+          <span><i class="swatch sediment"></i>recalculated, new value</span>
+          <span><i class="swatch still"></i>recalculated, same value: the update stopped here</span>
+          <span><i class="swatch"></i>not touched</span>
+        </div>
+      </div>
+
+      <div class="notes">
+        <div class="panel">
+          <h3>Updates</h3>
+          <ul class="log" id="log"><li class="empty">Move a slider to start an update.</li></ul>
+        </div>
+        <div class="panel">
+          <h3>Why does <span id="explain-name">this node</span> have its value?</h3>
+          <div class="formula" id="explain-formula"></div>
+          <pre class="tree" id="explain"></pre>
+          <p class="empty">Click any node in the graph to explain it.</p>
+        </div>
+        <details class="panel">
+          <summary>The Rust code that builds this graph</summary>
+          <pre class="source" id="source"></pre>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="plate" aria-labelledby="bench-title">
+    <div class="plate-head">
+      <h2 id="bench-title">A big graph, in your browser</h2>
+    </div>
+    <p class="lede" style="max-width: 70ch">Market prices feed trades, and trades add up through a tree of totals to one figure. Build it here, then compare changing a few prices with recalculating every node.</p>
+
+    <div class="bench">
+      <div class="panel">
+        <h3>Size</h3>
+        <div class="choices" id="sizes">
+          <label class="choice"><input type="radio" name="size" id="size-small" value="20000"><span><strong>Small</strong> · about 50,000 nodes</span><small>10,000 prices, 20,000 trades</small></label>
+          <label class="choice"><input type="radio" name="size" id="size-medium" value="100000" checked><span><strong>Medium</strong> · about 210,000 nodes</span><small>10,000 prices, 100,000 trades</small></label>
+          <label class="choice"><input type="radio" name="size" id="size-large" value="500000"><span><strong>Large</strong> · about 1,000,000 nodes</span><small>10,000 prices, 500,000 trades. Takes a few seconds to build and a few hundred MB of memory.</small></label>
+        </div>
+        <div class="actions">
+          <button class="primary" id="build" type="button">Build and compare</button>
+        </div>
+        <p class="status" id="bench-status" role="status">Nothing built yet.</p>
+      </div>
+
+      <div class="panel results" id="results" aria-live="polite">
+        <p class="empty">Results appear here: the time for each kind of update, measured in this browser.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>Timings are measured in this browser on this device, as the median of several runs. Nothing is sent anywhere: the engine runs entirely on your machine.</footer>
+</div>
+
+<script type="module">
+import init, { Model, Benchmark } from "./pkg/watershed_web.js";
+
+const PRESETS = [
+  { id: "order", label: "Online order" },
+  { id: "thermostat", label: "Greenhouse" },
+  { id: "portfolio", label: "Trading book" },
+];
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const $ = (id) => document.getElementById(id);
+const SVG = "http://www.w3.org/2000/svg";
+// Graph drawing: node size, gaps, padding, and room for the level labels.
+const W = 150, H = 48, GAP_X = 22, GAP_Y = 54, PAD = 28, LABEL = 40;
+
+let model = null, nodes = [], values = [], selected = 0, preset = "order";
+let elements = new Map(), edges = [], timers = [];
+const log = [];
+
+// ---------------------------------------------------------------- start
+
+try {
+  await init();
+} catch (error) {
+  for (const id of ["inputs", "results"]) {
+    $(id).innerHTML = "";
+    const p = document.createElement("p");
+    p.className = "status bad";
+    p.textContent = "The engine could not start in this browser: " + (error?.message ?? error) + ". It needs WebAssembly, which every current browser supports.";
+    $(id).append(p);
+    $(id).closest(".panel").classList.add("failed");
+  }
+  $("build").disabled = true;
+  throw error;
+}
+
+for (const p of PRESETS) {
+  const b = document.createElement("button");
+  b.className = "tab"; b.type = "button"; b.role = "tab"; b.id = "tab-" + p.id;
+  b.textContent = p.label;
+  b.addEventListener("click", () => load(p.id));
+  $("tabs").append(b);
+}
+load("order");
+
+// ---------------------------------------------------------------- models
+
+function load(name) {
+  preset = name;
+  for (const b of $("tabs").children) b.setAttribute("aria-selected", String(b.id === "tab-" + name));
+  model?.free();
+  model = new Model(name);
+  nodes = JSON.parse(model.nodes());
+  values = JSON.parse(model.values());
+  selected = nodes.reduce((best, n) => (n.height >= nodes[best].height ? n.id : best), 0);
+  log.length = 0;
+  renderLog();
+  renderInputs();
+  renderGraph();
+  renderExplain();
+  $("source").innerHTML = highlight(Model.source(name) ?? "");
+}
+
+function sliderRange(v) {
+  const max = v > 0 ? v * 2 : 10;
+  const min = v < 0 ? v * 2 : 0;
+  const raw = (max - min) / 200;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw);
+  return { min, max, step };
+}
+
+function renderInputs() {
+  const box = $("inputs");
+  box.innerHTML = "";
+  for (const n of nodes.filter((n) => n.input)) {
+    const v = values[n.id];
+    const field = document.createElement("div");
+    field.className = "field";
+    const id = "in-" + preset + "-" + n.name;
+    if (n.type === "bool") {
+      field.innerHTML = `<label class="switch"><input type="checkbox" id="${id}"> ${n.name}</label>`;
+      const box2 = field.querySelector("input");
+      box2.checked = v.value;
+      box2.addEventListener("change", () => { model.set_bool(n.id, box2.checked); update(); });
+    } else {
+      const { min, max, step } = sliderRange(v.value);
+      field.innerHTML = `<div class="field-top"><label for="${id}">${n.name}</label><output for="${id}"></output></div>
+        <input type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${v.value}">`;
+      const slider = field.querySelector("input");
+      const out = field.querySelector("output");
+      out.textContent = format(v.value);
+      slider.addEventListener("input", () => {
+        const x = Number(slider.value);
+        out.textContent = format(x);
+        model.set_number(n.id, x);
+        update();
+      });
+    }
+    box.append(field);
+  }
+}
+
+function update() {
+  const report = JSON.parse(model.update());
+  values = JSON.parse(model.values());
+  const changed = new Set(report.changed);
+  const stopped = report.recalculated.filter((id) => !changed.has(id));
+  if (report.inputsChanged > 0) {
+    log.unshift({ ...report, stopped });
+    log.length = Math.min(log.length, 6);
+  }
+  renderLog();
+  animate(report, changed);
+  renderExplain();
+  const problem = model.check();
+  if (problem) console.error("incremental result differs from a full recalculation:", problem);
+}
+
+function renderLog() {
+  const ul = $("log");
+  ul.innerHTML = "";
+  if (!log.length) {
+    ul.innerHTML = '<li class="empty">Move a slider to start an update.</li>';
+    return;
+  }
+  for (const r of log) {
+    const li = document.createElement("li");
+    const total = nodes.filter((n) => !n.input).length;
+    const names = (ids) => ids.map((id) => nodes[id].name).join(", ");
+    li.innerHTML = `<span class="epoch">update ${r.epoch}</span>
+      <span class="numbers"><strong>${r.recalculated.length}</strong> of ${total} calculated nodes recalculated, ${r.changed.length - r.inputsChanged} changed</span>`;
+    if (r.stopped.length) {
+      const s = document.createElement("span");
+      s.className = "stopped";
+      s.textContent = "stopped at " + names(r.stopped);
+      li.append(s);
+    }
+    ul.append(li);
+  }
+}
+
+// ---------------------------------------------------------------- the graph
+
+
+function layout() {
+  const maxH = Math.max(...nodes.map((n) => n.height));
+  const rows = Array.from({ length: maxH + 1 }, () => []);
+  for (const n of nodes) rows[n.height].push(n);
+  const x = new Map();
+  const widest = Math.max(...rows.map((r) => r.length));
+  const width = widest * (W + GAP_X) - GAP_X + PAD * 2 + LABEL;
+  rows.forEach((row, h) => {
+    // Order each level by where the nodes it uses sit, so lines cross less.
+    if (h > 0) {
+      const centre = (n) => n.deps.reduce((s, d) => s + x.get(d), 0) / Math.max(1, n.deps.length);
+      row.sort((a, b) => centre(a) - centre(b) || a.id - b.id);
+    }
+    const rowWidth = row.length * (W + GAP_X) - GAP_X;
+    const start = LABEL + PAD + (width - LABEL - PAD * 2 - rowWidth) / 2;
+    row.forEach((n, i) => x.set(n.id, start + i * (W + GAP_X) + W / 2));
+  });
+  const height = (maxH + 1) * (H + GAP_Y) - GAP_Y + PAD * 2;
+  const y = (n) => PAD + (maxH - n.height) * (H + GAP_Y) + H / 2;
+  return { x, y, width, height, maxH };
+}
+
+function renderGraph() {
+  const svg = $("graph");
+  svg.innerHTML = "";
+  elements = new Map(); edges = [];
+  const { x, y, width, height, maxH } = layout();
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+  for (let h = 0; h <= maxH; h++) {
+    const t = document.createElementNS(SVG, "text");
+    t.setAttribute("class", "level-label");
+    t.setAttribute("x", 8);
+    t.setAttribute("y", PAD + (maxH - h) * (H + GAP_Y) + H / 2 + 4);
+    t.textContent = h === 0 ? "INPUTS" : "L" + h;
+    svg.append(t);
+  }
+  for (const n of nodes) {
+    for (const d of n.deps) {
+      const path = document.createElementNS(SVG, "path");
+      const x1 = x.get(d), y1 = y(nodes[d]) - H / 2, x2 = x.get(n.id), y2 = y(n) + H / 2;
+      const my = (y1 + y2) / 2;
+      path.setAttribute("d", `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`);
+      path.setAttribute("class", "edge");
+      svg.append(path);
+      edges.push({ from: d, to: n.id, path });
+    }
+  }
+  for (const n of nodes) {
+    const g = document.createElementNS(SVG, "g");
+    g.setAttribute("class", "node" + (n.input ? " input" : ""));
+    g.setAttribute("tabindex", "0");
+    g.setAttribute("transform", `translate(${x.get(n.id) - W / 2},${y(n) - H / 2})`);
+    g.innerHTML = `<rect width="${W}" height="${H}" rx="${n.input ? 2 : 10}"></rect>
+      <text class="name" x="10" y="17"></text><text class="val" x="10" y="37"></text>`;
+    g.querySelector(".name").textContent = n.name;
+    const choose = () => { selected = n.id; renderExplain(); };
+    g.addEventListener("click", choose);
+    g.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(); } });
+    svg.append(g);
+    elements.set(n.id, g);
+  }
+  paintValues();
+}
+
+function paintValues() {
+  for (const n of nodes) {
+    const g = elements.get(n.id);
+    const v = values[n.id];
+    g.querySelector(".val").textContent = v.kind === "error" ? "error" : v.kind === "f64" ? format(v.value) : String(v.value);
+    g.classList.toggle("error", v.kind === "error");
+    g.classList.toggle("selected", n.id === selected);
+    g.setAttribute("aria-label", `${n.name} = ${v.text}`);
+  }
+}
+
+function animate(report, changed) {
+  timers.forEach(clearTimeout); timers = [];
+  for (const g of elements.values()) g.classList.remove("rain", "sediment", "still");
+  for (const e of edges) e.path.classList.remove("flow");
+  for (const id of report.changed) if (nodes[id].input) elements.get(id).classList.add("rain");
+  const step = reduceMotion ? 0 : 70;
+  report.recalculated.forEach((id, k) => {
+    const apply = () => {
+      elements.get(id).classList.add(changed.has(id) ? "sediment" : "still");
+      for (const e of edges) if (e.to === id && changed.has(e.from)) e.path.classList.add("flow");
+      paintValues();
+    };
+    if (step) timers.push(setTimeout(apply, (k + 1) * step)); else apply();
+  });
+  paintValues();
+}
+
+function renderExplain() {
+  const n = nodes[selected];
+  $("explain-name").textContent = n.name;
+  $("explain-formula").textContent = n.input ? `${n.name} is an input (${n.type})` : `${n.name} = ${n.formula}`;
+  $("explain").textContent = model.explain(selected);
+  if (elements.size) paintValues();
+}
+
+// ---------------------------------------------------------------- benchmark
+
+let bench = null;
+$("build").addEventListener("click", async () => {
+  const trades = Number(document.querySelector('input[name="size"]:checked').value);
+  const button = $("build");
+  button.disabled = true;
+  const status = $("bench-status");
+  status.className = "status";
+  try {
+    bench?.free(); bench = null;
+    status.textContent = "Building the graph…";
+    await frame();
+    let t = performance.now();
+    bench = new Benchmark(10000, trades);
+    const buildMs = performance.now() - t;
+    const count = bench.nodes();
+    status.textContent = `Built ${count.toLocaleString()} nodes in ${fmtMs(buildMs)}. Measuring…`;
+    await frame();
+
+    const fullTimes = [];
+    let full = 0;
+    for (let i = 0; i < 5; i++) {
+      t = performance.now(); full = bench.recalculate_everything(); fullTimes.push(performance.now() - t);
+      await frame();
+    }
+    const fullMs = median(fullTimes);
+
+    // Many updates per timing, because browsers round the clock to 0.1 ms or so.
+    const one = await perUpdate(1, 300, 5);
+    const batch = await perUpdate(100, 10, 5);
+    const problem = bench.check();
+
+    showResults(count, { ms: fullMs, nodes: full }, one, batch, problem);
+    status.className = problem ? "status bad" : "status ok";
+    status.textContent = problem
+      ? "The incremental result did not match a full recalculation: " + problem
+      : `Built ${count.toLocaleString()} nodes in ${fmtMs(buildMs)}. Checked: the incremental result matches a full recalculation.`;
+  } catch (error) {
+    status.className = "status bad";
+    status.textContent = "That size did not fit in this browser's memory. Try a smaller one. (" + (error?.message ?? error) + ")";
+    bench = null;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function perUpdate(perUpdate, updates, runs) {
+  const times = [], counts = [];
+  for (let i = 0; i < runs; i++) {
+    const t = performance.now();
+    const recalculated = bench.change_prices(perUpdate, updates);
+    times.push((performance.now() - t) / updates);
+    counts.push(recalculated / updates);
+    await frame();
+  }
+  return { ms: median(times), nodes: median(counts) };
+}
+
+function showResults(count, full, one, batch, problem) {
+  const box = $("results");
+  box.innerHTML = "";
+  const head = document.createElement("div");
+  head.innerHTML = `<h3>One price changing, compared with recalculating everything</h3><div class="speedup">${Math.round(full.ms / one.ms).toLocaleString()}× faster</div>`;
+  box.append(head);
+  const rows = [
+    ["Recalculate everything", full, true],
+    ["Incremental: one price changes", one, false],
+    ["Incremental: 1% of prices change together", batch, false],
+  ];
+  for (const [label, r, isFull] of rows) {
+    const div = document.createElement("div");
+    div.className = "result";
+    const pct = Math.max(0.3, (r.ms / full.ms) * 100);
+    div.innerHTML = `<div class="result-top"><strong>${label}</strong><span>${fmtMs(r.ms)}</span></div>
+      <div class="bar"><i class="${isFull ? "full" : ""}" style="width: 0%"></i></div>
+      <small>${Math.round(r.nodes).toLocaleString()} of ${count.toLocaleString()} nodes recalculated${isFull ? "" : " · " + (full.ms / r.ms).toFixed(full.ms / r.ms < 10 ? 1 : 0) + "× faster"}</small>`;
+    box.append(div);
+    requestAnimationFrame(() => requestAnimationFrame(() => { div.querySelector("i").style.width = pct + "%"; }));
+  }
+}
+
+// ---------------------------------------------------------------- helpers
+
+function frame() { return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0))); }
+function median(xs) { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; }
+function fmtMs(ms) { return ms >= 100 ? `${Math.round(ms)} ms` : ms >= 1 ? `${ms.toFixed(1)} ms` : `${(ms * 1000).toFixed(0)} µs`; }
+function format(x) {
+  if (x === null) return "NaN";
+  if (Number.isInteger(x)) return x.toLocaleString("en-GB");
+  const abs = Math.abs(x);
+  return x.toLocaleString("en-GB", { maximumFractionDigits: abs >= 100 ? 1 : abs >= 1 ? 2 : 3 });
+}
+function highlight(src) {
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return src.split("\n").map((line) => {
+    const c = line.indexOf("//");
+    const code = c >= 0 ? line.slice(0, c) : line;
+    const comment = c >= 0 ? `<span class="tok-com">${esc(line.slice(c))}</span>` : "";
+    const body = esc(code)
+      .replace(/("[^"]*")/g, '<span class="tok-str">$1</span>')
+      .replace(/\b(let|pub|fn|use|mut|when|then|otherwise)\b(?![^<]*<\/span>)/g, '<span class="tok-kw">$1</span>')
+      .replace(/(?<![\w#">-])(-?\d+(?:\.\d+)?)(?![^<]*<\/span>)/g, '<span class="tok-num">$1</span>');
+    return body + comment;
+  }).join("\n");
+}
+</script>
