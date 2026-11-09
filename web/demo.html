@@ -162,6 +162,31 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .result small { color: var(--muted); font-variant-numeric: tabular-nums; }
 .speedup { font: 700 2.2rem/1 var(--display); color: var(--water); }
 
+.explainer { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px 40px; align-items: start; }
+@media (max-width: 860px) { .explainer { grid-template-columns: minmax(0, 1fr); } }
+.explainer > div { display: grid; gap: 14px; min-width: 0; }
+.explainer p, .explainer li { max-width: 66ch; }
+.explainer h3 { margin-top: 6px; }
+.explainer code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+.levels { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.levels li { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr); gap: 2px 12px; padding-bottom: 6px; border-bottom: 1px dashed var(--rule); }
+@media (max-width: 480px) { .levels li { grid-template-columns: minmax(0, 1fr); } }
+.levels li:last-child { border-bottom: 0; }
+.levels b { font: 600 0.8rem var(--mono); padding-top: 2px; }
+.steps { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; counter-reset: step; }
+.steps li { position: relative; padding-left: 2.4rem; counter-increment: step; }
+.steps li::before {
+  content: counter(step); position: absolute; left: 0; top: 0;
+  width: 1.6rem; height: 1.6rem; border-radius: 50%; display: grid; place-items: center;
+  font: 700 0.8rem var(--mono); color: var(--surface); background: var(--water);
+}
+.chip { display: inline-block; padding: 0 6px; border-radius: 3px; font: 600 0.78rem var(--mono); border: 1.5px solid var(--still); }
+.chip.rain { background: color-mix(in srgb, var(--rain) 26%, var(--surface)); border-color: var(--rain); }
+.chip.sediment { background: color-mix(in srgb, var(--sediment) 24%, var(--surface)); border-color: var(--sediment); }
+.chip.still { border-style: dashed; }
+.try { margin: 0; padding-left: 1.2rem; display: grid; gap: 8px; }
+.log .moved { font: 600 0.78rem var(--mono); color: var(--rain); }
+
 .failed { border-color: var(--sediment); }
 footer { color: var(--muted); font-size: 0.85rem; }
 
@@ -219,6 +244,48 @@ footer { color: var(--muted); font-size: 0.85rem; }
           <summary>The Rust code that builds this graph</summary>
           <pre class="source" id="source"></pre>
         </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="plate" aria-labelledby="how-title">
+    <div class="plate-head">
+      <h2 id="how-title">How to read the live crypto book</h2>
+    </div>
+    <div class="explainer">
+      <div>
+        <p class="lede">The crypto book is a small trading portfolio: eight coins held across three desks. Its prices come from Coinbase as trades happen, many times a second. Each price is an input at the bottom of the graph, and everything above it is calculated from those prices.</p>
+        <ul class="levels">
+          <li><b>prices</b><span><code>btc</code> <code>eth</code> <code>sol</code> <code>avax</code> <code>link</code> <code>ada</code> <code>xrp</code> <code>doge</code>, in US dollars, live from Coinbase. <code>risk_limit</code> is yours to set.</span></li>
+          <li><b>desks</b><span>What each desk's holdings are worth. Majors holds BTC and ETH; alts holds SOL, AVAX, LINK and ADA; payments holds XRP and DOGE.</span></li>
+          <li><b>book_value, pnl</b><span>The three desks added up, and profit or loss against the $400,000 the book cost.</span></li>
+          <li><b>majors_share</b><span>How much of the book sits in BTC and ETH.</span></li>
+          <li><b>within_limit, concentrated</b><span>Two yes-or-no checks: is the book under the risk limit, and is more than 60% of it in BTC and ETH?</span></li>
+          <li><b>status</b><span><code>ok</code>, <code>too concentrated</code> or <code>over limit</code>.</span></li>
+        </ul>
+
+        <h3>What happens on each price tick</h3>
+        <ol class="steps">
+          <li>Coinbase reports a trade, say SOL at $88.31. The <code>sol</code> input turns <span class="chip rain">green</span>.</li>
+          <li>The engine recalculates only what depends on SOL: the alts desk, then the book value, P&amp;L and majors share. They turn <span class="chip sediment">orange</span>. The majors and payments desks don't use SOL, so they are left alone.</li>
+          <li>Next come the two checks. Usually a small price move doesn't change them: the book is still under the limit, and still more than 60% in BTC and ETH. They are recalculated, come out the same, and show as <span class="chip still">dashed</span>.</li>
+          <li>Because neither check changed, <code>status</code> is not recalculated at all. The update stops as soon as nothing above it can change. The Updates panel records which coin moved and where each update stopped.</li>
+        </ol>
+      </div>
+
+      <div>
+        <h3>The numbers in the live bar</h3>
+        <p><strong>Ticks</strong> are prices received from Coinbase. <strong>Updates</strong> are runs of the engine: prices that arrive within the same screen refresh are applied together in one update, so there are fewer updates than ticks. <strong>Engine time</strong> is how long the engine itself took per update, typically tens of microseconds in a browser.</p>
+
+        <h3>Things to try</h3>
+        <ul class="try">
+          <li>Drag <code>risk_limit</code> below the book value. <code>within_limit</code> turns false and the status changes to "over limit". Drag it back up.</li>
+          <li>Click any node to see why it has its value, traced back to the prices it came from.</li>
+          <li>Pause the feed and move the prices yourself.</li>
+        </ul>
+
+        <h3>Why this matters</h3>
+        <p>This book has only 18 nodes, so recalculating everything on every tick would be instant too. Real books have thousands of positions and risk measures on top of them, where recalculating everything for every tick is too slow. The rule is the same at any size: recalculate what depends on the change, and stop where nothing changes. The benchmark below builds a graph of up to a million nodes in your browser and compares the two approaches.</p>
       </div>
     </div>
   </section>
@@ -302,7 +369,10 @@ function load(name) {
   renderExplain();
   $("source").innerHTML = highlight(Model.source(name) ?? "");
   const p = PRESETS.find((p) => p.id === name);
-  if (p.feed) startFeed(p.feed);
+  if (p.feed) {
+    startFeed(p.feed);
+    renderLog();
+  }
 }
 
 function sliderRange(v) {
@@ -373,15 +443,20 @@ function renderLog() {
   const ul = $("log");
   ul.innerHTML = "";
   if (!log.length) {
-    ul.innerHTML = '<li class="empty">Move a slider to start an update.</li>';
+    ul.innerHTML = feed
+      ? '<li class="empty">Waiting for the first price from Coinbase…</li>'
+      : '<li class="empty">Move a slider to start an update.</li>';
     return;
   }
   for (const r of log) {
     const li = document.createElement("li");
     const total = nodes.filter((n) => !n.input).length;
     const names = (ids) => ids.map((id) => nodes[id].name).join(", ");
+    const moved = r.changed.filter((id) => nodes[id].input);
     li.innerHTML = `<span class="epoch">update ${r.epoch}</span>
+      <span class="moved"></span>
       <span class="numbers"><strong>${r.recalculated.length}</strong> of ${total} calculated nodes recalculated, ${r.changed.length - r.inputsChanged} changed</span>`;
+    li.querySelector(".moved").textContent = names(moved) + (moved.length === 1 ? " changed" : " changed together");
     if (r.stopped.length) {
       const s = document.createElement("span");
       s.className = "stopped";
