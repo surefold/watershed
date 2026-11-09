@@ -13,8 +13,9 @@ concurrency:
 permissions:
   contents: read
 
-# Every job runs on the surefold organisation's self-hosted runner (DESKTOP-BVAR25E), the
-# same one Doorlist uses. With one runner instance the jobs run one after another.
+# Every job runs on the surefold organisation's self-hosted Mac (macbook-air), one at a
+# time. It is someone's own computer, so each job starts with the `rust-homes` step below,
+# which gives CI its own copy of Rust and the downloaded crates, away from theirs.
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,8 +24,24 @@ env:
 jobs:
   format:
     name: Formatting
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
+      # Written out once here; the other jobs reuse it as `*rust-homes`. It runs first
+      # because the toolchain and cache steps read these variables. In a shared
+      # ~/.cargo, one job's cache clean-up deletes crate sources another job is
+      # compiling; in a shared ~/.rustup, `rustup default` switches another job's Rust.
+      # Installing rustup here means dtolnay/rust-toolchain skips its own install, which
+      # would add these folders to the machine's shell start-up files.
+      - &rust-homes
+        name: Use this runner's own Rust folders
+        shell: bash
+        run: |
+          export CARGO_HOME="$RUNNER_WORKSPACE/.cargo"
+          export RUSTUP_HOME="$RUNNER_WORKSPACE/.rustup"
+          curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none --no-modify-path -y
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,8 +50,9 @@ jobs:
 
   lint:
     name: Lint (clippy)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
+      - *rust-homes
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,7 +64,7 @@ jobs:
 
   test:
     name: Tests (Rust ${{ matrix.rust }})
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +72,7 @@ jobs:
         # (rust-version in Cargo.toml).
         rust: [stable, "1.85"]
     steps:
+      - *rust-homes
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -66,8 +85,9 @@ jobs:
 
   docs:
     name: Docs
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
+      - *rust-homes
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -77,8 +97,9 @@ jobs:
 
   examples:
     name: Examples
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
+      - *rust-homes
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -95,8 +116,9 @@ jobs:
 
   web:
     name: Web demo (WebAssembly)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
+      - *rust-homes
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -106,8 +128,9 @@ jobs:
 
   python:
     name: Python bindings (uv)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, macOS]
     steps:
+      - *rust-homes
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v6
