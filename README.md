@@ -30,6 +30,20 @@ println!("{}", g.explain(total));
 Calculations are typed. `qty + region` (a number plus a string) does not
 compile, and neither does setting a calculated node.
 
+## Try it in your browser
+
+`web/` is an interactive page running the real engine, compiled to
+WebAssembly: move inputs and watch only the dependent nodes recalculate, ask
+any node why it has its value, and time a graph of up to a million nodes on
+your own machine.
+
+```bash
+cargo install wasm-bindgen-cli --version 0.2.130   # once
+rustup target add wasm32-unknown-unknown            # once
+web/build.sh
+python3 -m http.server -d web/dist 8000             # then open http://localhost:8000
+```
+
 ## Seeing what it does
 
 ```bash
@@ -149,6 +163,8 @@ crates/watershed-core/
   src/error.rs    errors
   tests/          behaviour and property tests
   examples/       tour and benchmark
+crates/watershed-web/   the engine as WebAssembly, with three example models
+web/                    the interactive page and its build script
 ```
 
 ## Not done yet

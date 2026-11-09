@@ -1,3 +1,4 @@
 /target
 *.dot
 *.proptest-regressions
+web/dist

@@ -82,3 +82,14 @@ jobs:
       # checks the benchmark runs and that its million-node result matches a
       # full recalculation.
       - run: cargo run --locked --release --example benchmark
+
+  web:
+    name: Web demo (WebAssembly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release --target wasm32-unknown-unknown -p watershed-web

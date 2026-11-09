@@ -504,12 +504,20 @@ impl Graph {
     /// ```
     pub fn explain<T>(&self, node: impl Handle<T>) -> String {
         let at = node.node_ref();
-        if at.graph != self.id || at.node.index() >= self.meta.len() {
+        if at.graph != self.id {
+            return "(not a node of this graph)".into();
+        }
+        self.explain_node(at.node)
+    }
+
+    /// [`explain`](Self::explain) for a node given by id, for the untyped API.
+    pub fn explain_node(&self, id: NodeId) -> String {
+        if id.index() >= self.meta.len() {
             return "(not a node of this graph)".into();
         }
         let mut out = String::new();
         let mut shown = HashSet::new();
-        self.explain_into(at.node, "", "", &mut shown, &mut out);
+        self.explain_into(id, "", "", &mut shown, &mut out);
         out
     }
 
