@@ -93,7 +93,7 @@ macro_rules! constants {
         }
     )*};
 }
-constants!(f64, i64, bool, String);
+constants!(f64, i64, bool, String, Vec<String>);
 
 impl IntoExpr<String> for &str {
     fn into_expr(self) -> Expr<String> {
@@ -220,6 +220,22 @@ macro_rules! methods {
             }
         }
 
+        impl $handle<Vec<String>> {
+            /// This list followed by `rhs`. A result over
+            /// [`MAX_LIST_ITEMS`](crate::MAX_LIST_ITEMS) is an error.
+            pub fn concat(self, rhs: impl IntoExpr<Vec<String>>) -> Expr<Vec<String>> {
+                binary(BinOp::Concat, self.into_expr(), rhs.into_expr())
+            }
+            /// The items as one string, with `separator` between them.
+            pub fn join(self, separator: impl IntoExpr<String>) -> Expr<String> {
+                Expr::from_ir(Ir::Binary(
+                    BinOp::Join,
+                    self.into_expr().ir,
+                    separator.into_expr().ir,
+                ))
+            }
+        }
+
         impl<T: Numeric> $handle<T> {
             pub fn min(self, rhs: impl IntoExpr<T>) -> Expr<T> {
                 binary(BinOp::Min, self.into_expr(), rhs.into_expr())
@@ -247,6 +263,23 @@ methods!(Expr, Node, Input, Field, Column);
 /// ```
 pub fn text<T>(value: impl IntoExpr<T>) -> Expr<String> {
     unary(UnOp::ToText, value.into_expr())
+}
+
+/// A list of these strings.
+///
+/// ```
+/// use watershed_core::prelude::*;
+///
+/// let mut g = Graph::new();
+/// let flag = g.input("flag", "-progressive".to_string()).unwrap();
+/// let args = g.define("args", list([flag.into_expr(), "-Werror".into_expr()])).unwrap();
+/// let line = g.define("line", args.join(" ")).unwrap();
+/// assert_eq!(g.get(line).unwrap(), "-progressive -Werror");
+/// ```
+pub fn list<O: IntoExpr<String>>(items: impl IntoIterator<Item = O>) -> Expr<Vec<String>> {
+    Expr::from_ir(Ir::List(
+        items.into_iter().map(|i| i.into_expr().ir).collect(),
+    ))
 }
 
 // ---- Conditionals: when(cond).then(a).otherwise(b) ----

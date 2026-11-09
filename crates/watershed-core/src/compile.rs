@@ -49,11 +49,15 @@ pub(crate) enum Op {
     CmpI(Cmp),
     CmpS(Cmp),
     CmpB(Cmp),
+    CmpL(Cmp),
     And,
     Or,
     Not,
     ToText,
     Concat,
+    Join,
+    /// Pop this many strings and push them as a list.
+    MakeList(u32),
     /// Pop a condition. True: carry on. False: jump to `otherwise`. An error:
     /// push it and jump to `end`, skipping both branches.
     Branch {
@@ -314,6 +318,11 @@ fn decompile_general(ops: &[Op], constants: &[Value], tables: &[u32], graph: Gra
                     node: NodeId(n),
                 })),
                 Op::Const(i) => stack.push(Ir::Const(constants[i as usize].clone())),
+                Op::MakeList(count) => {
+                    let at = stack.len() - count as usize;
+                    let items = stack.split_off(at).into_iter().map(Arc::new).collect();
+                    stack.push(Ir::List(items));
+                }
                 Op::Jump(_) => unreachable!("jumps only end a `then` branch"),
                 op => {
                     let unary = match op {
@@ -339,14 +348,17 @@ fn decompile_general(ops: &[Op], constants: &[Value], tables: &[u32], graph: Gra
                             Op::And => BinOp::And,
                             Op::Or => BinOp::Or,
                             Op::Concat => BinOp::Concat,
-                            Op::CmpF(c) | Op::CmpI(c) | Op::CmpS(c) | Op::CmpB(c) => match c {
-                                Cmp::Lt => BinOp::Lt,
-                                Cmp::Le => BinOp::Le,
-                                Cmp::Gt => BinOp::Gt,
-                                Cmp::Ge => BinOp::Ge,
-                                Cmp::Eq => BinOp::Eq,
-                                Cmp::Ne => BinOp::Ne,
-                            },
+                            Op::Join => BinOp::Join,
+                            Op::CmpF(c) | Op::CmpI(c) | Op::CmpS(c) | Op::CmpB(c) | Op::CmpL(c) => {
+                                match c {
+                                    Cmp::Lt => BinOp::Lt,
+                                    Cmp::Le => BinOp::Le,
+                                    Cmp::Gt => BinOp::Gt,
+                                    Cmp::Ge => BinOp::Ge,
+                                    Cmp::Eq => BinOp::Eq,
+                                    Cmp::Ne => BinOp::Ne,
+                                }
+                            }
                             _ => unreachable!("every other instruction is handled above"),
                         };
                         stack.push(Ir::Binary(binary, Arc::new(a), Arc::new(b)));
@@ -515,7 +527,9 @@ fn eval_general(
                 other => other,
             }),
 
-            Op::CmpF(cmp) | Op::CmpI(cmp) | Op::CmpS(cmp) | Op::CmpB(cmp) => compare(stack, cmp),
+            Op::CmpF(cmp) | Op::CmpI(cmp) | Op::CmpS(cmp) | Op::CmpB(cmp) | Op::CmpL(cmp) => {
+                compare(stack, cmp)
+            }
 
             Op::And => logic(stack, |x, y| x && y),
             Op::Or => logic(stack, |x, y| x || y),
@@ -528,10 +542,26 @@ fn eval_general(
             Op::Concat => {
                 let result = match pop2(stack) {
                     Ok((Value::Str(x), Value::Str(y))) => crate::ir::concat(&x, &y),
+                    Ok((Value::List(x), Value::List(y))) => crate::ir::concat_lists(&x, &y),
                     Ok((a, b)) => internal(format!("join of {a} and {b}")),
                     Err(e) => e,
                 };
                 stack.push(result);
+            }
+            Op::Join => {
+                let result = match pop2(stack) {
+                    Ok((Value::List(x), Value::Str(y))) => crate::ir::join(&x, &y),
+                    Ok((a, b)) => internal(format!("list join of {a} and {b}")),
+                    Err(e) => e,
+                };
+                stack.push(result);
+            }
+            Op::MakeList(count) => {
+                let Some(at) = stack.len().checked_sub(count as usize) else {
+                    return internal("stack underflow".into());
+                };
+                let items = stack.split_off(at);
+                stack.push(crate::ir::make_list(items));
             }
 
             Op::Branch { otherwise, end } => match stack.pop() {
@@ -613,6 +643,7 @@ impl Compiler<'_> {
                     Type::I64 => Op::CmpI(c),
                     Type::Str => Op::CmpS(c),
                     Type::Bool => Op::CmpB(c),
+                    Type::StrList => Op::CmpL(c),
                 };
                 let f = ty == Type::F64;
                 self.ops.push(match op {
@@ -667,7 +698,15 @@ impl Compiler<'_> {
                     BinOp::And => Op::And,
                     BinOp::Or => Op::Or,
                     BinOp::Concat => Op::Concat,
+                    BinOp::Join => Op::Join,
                 });
+            }
+            Ir::List(items) => {
+                for item in items {
+                    self.emit(item);
+                }
+                let count = u32::try_from(items.len()).expect("too many list items");
+                self.ops.push(Op::MakeList(count));
             }
             Ir::If(c, t, e) => {
                 self.emit(c);
@@ -782,6 +821,7 @@ fn compare(stack: &mut Vec<Value>, cmp: Cmp) {
                 (Value::I64(x), Value::I64(y)) => Some(x.cmp(y)),
                 (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
                 (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
+                (Value::List(x), Value::List(y)) => Some(x.cmp(y)),
                 _ => {
                     stack.push(internal(format!("comparison of {a} and {b}")));
                     return;

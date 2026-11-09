@@ -24,7 +24,7 @@ use std::sync::Arc;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::{PyException, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyString, PyType};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyType};
 use watershed_core::{
     AggregateOp, BinOp, CalcError as CoreError, Collection as CoreCollection, Graph as CoreGraph,
     Ir, NodeId, Type, UnOp, Value,
@@ -51,6 +51,7 @@ fn type_name(ty: Type) -> &'static str {
         Type::I64 => "int",
         Type::Bool => "bool",
         Type::Str => "str",
+        Type::StrList => "list",
     }
 }
 
@@ -82,6 +83,9 @@ fn to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
         Value::I64(x) => x.into_pyobject(py)?.into_any().unbind(),
         Value::Bool(b) => PyBool::new(py, *b).to_owned().into_any().unbind(),
         Value::Str(s) => PyString::new(py, s).into_any().unbind(),
+        Value::List(items) => PyList::new(py, items.iter().map(|s| &**s))?
+            .into_any()
+            .unbind(),
         Value::Error(e) => return Err(CalcError::new_err(e.to_string())),
     })
 }
@@ -242,6 +246,7 @@ fn symbol(op: BinOp) -> &'static str {
         BinOp::And => "&",
         BinOp::Or => "|",
         BinOp::Concat => "+",
+        BinOp::Join => "join",
     }
 }
 
@@ -934,6 +939,8 @@ impl Groups {
                 Type::I64 => Value::I64(key.parse().unwrap_or_default()),
                 Type::Bool => Value::Bool(key == "true"),
                 Type::F64 => Value::F64(key.parse().unwrap_or_default()),
+                // A Python field cannot be a list, so no group has this key.
+                Type::StrList => continue,
             };
             if let Some(id) = c.inner.group_node(self.index, &value) {
                 dict.set_item(to_py(py, &value)?, to_py(py, graph.inner.value(id))?)?;

@@ -10,6 +10,8 @@ pub enum Type {
     I64,
     Bool,
     Str,
+    /// A list of strings.
+    StrList,
 }
 
 impl Type {
@@ -31,6 +33,7 @@ impl fmt::Display for Type {
             Type::I64 => "i64",
             Type::Bool => "bool",
             Type::Str => "string",
+            Type::StrList => "list",
         })
     }
 }
@@ -46,6 +49,7 @@ pub enum Value {
     I64(i64),
     Bool(bool),
     Str(Text),
+    List(TextList),
     Error(Text),
 }
 
@@ -87,6 +91,32 @@ impl fmt::Display for Text {
     }
 }
 
+/// A shared, immutable list of strings, as held by a [`Value`].
+///
+/// Like [`Text`] it is a single pointer, so cloning one only bumps a reference
+/// count.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TextList(Arc<Vec<Text>>);
+
+impl From<Vec<Text>> for TextList {
+    fn from(items: Vec<Text>) -> Self {
+        TextList(Arc::new(items))
+    }
+}
+
+impl std::ops::Deref for TextList {
+    type Target = [Text];
+    fn deref(&self) -> &[Text] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for TextList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
 impl Value {
     /// The type of this value, or `None` for an error (which can stand in for any type).
     pub fn type_of(&self) -> Option<Type> {
@@ -95,6 +125,7 @@ impl Value {
             Value::I64(_) => Some(Type::I64),
             Value::Bool(_) => Some(Type::Bool),
             Value::Str(_) => Some(Type::Str),
+            Value::List(_) => Some(Type::StrList),
             Value::Error(_) => None,
         }
     }
@@ -126,6 +157,7 @@ impl Value {
             (Value::I64(a), Value::I64(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
             (Value::Error(a), Value::Error(b)) => a == b,
             _ => false,
         }
@@ -144,6 +176,7 @@ impl fmt::Display for Value {
             Value::I64(x) => write!(f, "{x}"),
             Value::Bool(x) => write!(f, "{x}"),
             Value::Str(s) => write!(f, "{:?}", &**s),
+            Value::List(items) => write!(f, "{items:?}"),
             Value::Error(e) => write!(f, "error: {e}"),
         }
     }
@@ -155,9 +188,11 @@ mod sealed {
     impl Sealed for i64 {}
     impl Sealed for bool {}
     impl Sealed for String {}
+    impl Sealed for Vec<String> {}
 }
 
-/// A Rust type that a node can hold: `f64`, `i64`, `bool` or `String`.
+/// A Rust type that a node can hold: `f64`, `i64`, `bool`, `String` or
+/// `Vec<String>`.
 pub trait CalcType: sealed::Sealed + Sized + 'static {
     const TYPE: Type;
     fn into_value(self) -> Value;
@@ -222,6 +257,20 @@ impl CalcType for String {
     fn from_value(value: &Value) -> Option<Self> {
         match value {
             Value::Str(s) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+}
+
+impl CalcType for Vec<String> {
+    const TYPE: Type = Type::StrList;
+    fn into_value(self) -> Value {
+        let items: Vec<Text> = self.into_iter().map(Text::from).collect();
+        Value::List(items.into())
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::List(items) => Some(items.iter().map(|s| s.to_string()).collect()),
             _ => None,
         }
     }
