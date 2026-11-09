@@ -131,18 +131,18 @@ tree of totals), on a 4-core machine, median of many runs:
 
 | about 1,000,000 nodes | 1 core | 4 cores | nodes recalculated |
 |---|---|---|---|
-| recalculate everything | 18.6 ms | 9–11 ms | 1,000,000 |
-| one price changes | 0.16 ms | 0.16 ms | ~1,300 |
-| 1% of prices change together | 7.4 ms | 7.7 ms | ~68,000 |
-| 10% of prices change together | 24 ms | 25 ms | ~353,000 |
+| recalculate everything | 18 ms | 9.6 ms | 1,000,000 |
+| one price changes | 0.13 ms | 0.13 ms | ~1,300 |
+| 1% of prices change together | 5.3 ms | 5.5 ms | ~68,000 |
+| 10% of prices change together | 16 ms | 15 ms | ~353,000 |
 
-It scales to very large graphs, at about 170–190 bytes per node:
+It scales to very large graphs, at about 170–210 bytes per node:
 
-| nodes | memory | build | recalculate everything (4 cores) | one price changes |
+| nodes | peak memory | build | recalculate everything (4 cores) | one price changes |
 |---|---|---|---|---|
-| 1,000,000 | 184 MB | 0.8 s | 11 ms | 0.16 ms |
+| 1,000,000 | 213 MB | 0.7 s | 9.6 ms | 0.13 ms |
 | 10,000,000 | 1.8 GB | 10 s | 93 ms | 2.5 ms |
-| 50,000,000 | 8.5 GB | 59 s | 444 ms | 17 ms |
+| 50,000,000 | 9.9 GB | 57 s | 462 ms | 14 ms |
 
 (One price changing costs more in bigger graphs because each of the 10,000
 prices then feeds more trades.)
@@ -161,11 +161,18 @@ How it is fast and small:
   16-byte record per node, names (one shared string) and the links between
   nodes (linked lists in flat arrays) all live in a few large arrays.
   Expressions are not stored; `explain` rebuilds them from the compiled code.
+- **Passing an update on reads one array.** Each node's users are packed back
+  to back, and each link carries its user's level, so queuing the users of a
+  changed node is one sweep through memory. (Links added since the last pack
+  wait in a small side list; the graph repacks once that list reaches a
+  quarter of the packed links.) A user reached through several changed nodes
+  is queued several times, and the repeats are removed when its level is
+  sorted.
 - **Levels are processed in node-id order**, which reads memory roughly front
   to back.
 - **Large levels run on all cores** (the `parallel` feature, on by default).
-  Nodes on one level never use each other, so they are recalculated at once;
-  marking the nodes above uses atomic flags, so each is queued exactly once.
+  Nodes on one level never use each other, so they are recalculated at once,
+  and their users are queued from all cores too.
   Below about 30,000 nodes a level stays on one core: the threads would spend
   longer waiting for each other than working. So parallelism speeds up
   recalculating everything, but small and medium updates, which mostly wait

@@ -6,7 +6,7 @@
 //!    returning the values from the last update, so what you read is always
 //!    consistent with itself.
 //! 2. [`Graph::stabilize`] applies every recorded change at once. Each input
-//!    whose value really changed marks the nodes that use it as dirty.
+//!    whose value really changed queues the nodes that use it.
 //! 3. Dirty nodes are recalculated in order of *height* (an input has height
 //!    0, and every other node is one higher than the highest node it uses).
 //!    So a node is only ever recalculated after everything it uses is up to
@@ -18,7 +18,7 @@ use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::compile::{
     FloatOp, GeneralProgram, Program, Scratch, compile, decompile_float, eval_float, float_loads,
@@ -153,20 +153,22 @@ pub struct Graph {
     values: Vec<Value>,
     hot: Vec<Hot>,
     types: Vec<Type>,
-    /// Whether a node is waiting to be recalculated. Atomic so that threads
-    /// passing on an update can mark nodes at the same time: exactly one of
-    /// them sees the flag go from false to true and queues the node.
-    dirty: Vec<AtomicBool>,
     /// The update in which the value last changed (0 = when it was created).
     changed_in: Vec<u64>,
     names: Names,
 
-    /// Who uses each node, as linked lists in flat arrays: `first_user[n]` is
-    /// the first edge from node n, and each edge has a target and a next edge.
+    /// Who uses each node, packed back to back so that passing on an update
+    /// reads them in one sweep: node n's users are
+    /// `packed[packed_start[n]..packed_start[n + 1]]`. This covers the links
+    /// that existed at the last repack (see `Graph::repack`).
+    packed_start: Vec<u32>,
+    packed: Vec<Use>,
+    /// Links added since the last repack, as linked lists in one flat array:
+    /// `first_user[n]` is node n's first such edge, and each edge holds its
+    /// user and the next edge.
     first_user: Vec<u32>,
     last_user: Vec<u32>,
-    edge_to: Vec<u32>,
-    edge_next: Vec<u32>,
+    edges: Vec<Edge>,
 
     /// The instructions and constants of every pure-float program, back to back.
     float_ops: Vec<FloatOp>,
@@ -214,13 +216,13 @@ impl Graph {
             values: Vec::new(),
             hot: Vec::new(),
             types: Vec::new(),
-            dirty: Vec::new(),
             changed_in: Vec::new(),
             names: Names::default(),
+            packed_start: vec![0],
+            packed: Vec::new(),
             first_user: Vec::new(),
             last_user: Vec::new(),
-            edge_to: Vec::new(),
-            edge_next: Vec::new(),
+            edges: Vec::new(),
             float_ops: Vec::new(),
             float_consts: Vec::new(),
             general: Vec::new(),
@@ -245,14 +247,13 @@ impl Graph {
         self.values.reserve(nodes);
         self.hot.reserve(nodes);
         self.types.reserve(nodes);
-        self.dirty.reserve(nodes);
         self.changed_in.reserve(nodes);
         self.first_user.reserve(nodes);
         self.last_user.reserve(nodes);
         self.names.starts.reserve(nodes + 1);
         self.names.index.reserve(nodes);
-        self.edge_to.reserve(edges);
-        self.edge_next.reserve(edges);
+        self.edges.reserve(edges);
+        self.packed_start.reserve(nodes);
     }
 
     /// Adds an input with a starting value.
@@ -367,7 +368,6 @@ impl Graph {
         self.values.push(value);
         self.hot.push(hot);
         self.types.push(ty);
-        self.dirty.push(AtomicBool::new(false));
         self.changed_in.push(self.epoch);
         self.names.push(name, id);
         self.first_user.push(NONE);
@@ -385,13 +385,16 @@ impl Graph {
 
     /// Records that `user` uses `node`, at the end of `node`'s list of users.
     fn add_user(&mut self, node: NodeId, user: NodeId) {
-        let edge = u32::try_from(self.edge_to.len()).expect("a graph holds at most u32::MAX edges");
-        self.edge_to.push(user.0);
-        self.edge_next.push(NONE);
+        let edge = u32::try_from(self.edges.len()).expect("a graph holds at most u32::MAX edges");
+        self.edges.push(Edge {
+            user: user.0,
+            height: self.hot[user.index()].height,
+            next: NONE,
+        });
         let n = node.index();
         match self.last_user[n] {
             NONE => self.first_user[n] = edge,
-            last => self.edge_next[last as usize] = edge,
+            last => self.edges[last as usize].next = edge,
         }
         self.last_user[n] = edge;
     }
@@ -446,6 +449,9 @@ impl Graph {
         self.epoch += 1;
         let epoch = self.epoch;
         self.last_recalculated.clear();
+        if self.edges.len() * 4 > self.packed.len() {
+            self.repack();
+        }
         let mut report = Report {
             epoch,
             inputs_changed: 0,
@@ -466,9 +472,11 @@ impl Graph {
         // are higher, so they are always still ahead of us in this loop.
         for height in 0..self.queue.len() {
             let mut level = std::mem::take(&mut self.queue[height]);
-            // In id order: the same order however the level was filled, and
-            // kinder to memory.
+            // A node is queued once for each changed node it uses, so remove
+            // repeats. Sorting first also puts the level in id order: the
+            // same order however it was filled, and kinder to memory.
             level.sort_unstable();
+            level.dedup();
             if self.recalculate_in_parallel(&level) {
                 // Nodes on one level never use each other, so they were all
                 // worked out at once. Store the changed values, then pass the
@@ -478,7 +486,6 @@ impl Graph {
                 changed_ids.clear();
                 for (&id, change) in level.iter().zip(changes.drain(..)) {
                     let i = id.index();
-                    *self.dirty[i].get_mut() = false;
                     report.recalculated += 1;
                     self.last_recalculated.push(id);
                     if let Some(new_value) = change {
@@ -511,7 +518,6 @@ impl Graph {
     #[inline]
     fn apply(&mut self, id: NodeId, change: Option<Value>, report: &mut Report) {
         let i = id.index();
-        *self.dirty[i].get_mut() = false;
         report.recalculated += 1;
         self.last_recalculated.push(id);
         if let Some(new_value) = change {
@@ -568,17 +574,55 @@ impl Graph {
         self.parallel_threshold = nodes.max(1);
     }
 
+    /// Queues every node that uses `id`. Each edge already holds its user's
+    /// height, so this reads only the edges: no lookups in other arrays. A
+    /// user can be queued more than once; the level removes repeats.
     fn mark_dependents(&mut self, id: NodeId) {
-        let mut edge = self.first_user[id.index()];
-        while edge != NONE {
-            let user = self.edge_to[edge as usize];
-            let dirty = self.dirty[user as usize].get_mut();
-            if !*dirty {
-                *dirty = true;
-                self.queue[self.hot[user as usize].height as usize].push(NodeId(user));
+        let n = id.index();
+        if n + 1 < self.packed_start.len() {
+            let range = self.packed_start[n] as usize..self.packed_start[n + 1] as usize;
+            for &Use { user, height } in &self.packed[range] {
+                self.queue[height as usize].push(NodeId(user));
             }
-            edge = self.edge_next[edge as usize];
         }
+        let mut edge = self.first_user[n];
+        while edge != NONE {
+            let Edge { user, height, next } = self.edges[edge as usize];
+            self.queue[height as usize].push(NodeId(user));
+            edge = next;
+        }
+    }
+
+    /// Packs every link into `packed`, the users of each node back to back.
+    ///
+    /// Links added since the last repack sit in linked lists, which are cheap
+    /// to add to but slow to follow: each step waits for the memory read
+    /// before it. `stabilize` repacks once those links reach a quarter of the
+    /// packed ones, so each link is copied a constant number of times on
+    /// average, however the graph is built.
+    fn repack(&mut self) {
+        let nodes = self.hot.len();
+        let mut start = Vec::with_capacity(nodes + 1);
+        let mut packed = Vec::with_capacity(self.packed.len() + self.edges.len());
+        start.push(0);
+        for n in 0..nodes {
+            if n + 1 < self.packed_start.len() {
+                let range = self.packed_start[n] as usize..self.packed_start[n + 1] as usize;
+                packed.extend_from_slice(&self.packed[range]);
+            }
+            let mut edge = self.first_user[n];
+            while edge != NONE {
+                let Edge { user, height, next } = self.edges[edge as usize];
+                packed.push(Use { user, height });
+                edge = next;
+            }
+            start.push(u32::try_from(packed.len()).expect("a graph holds at most u32::MAX links"));
+        }
+        self.packed = packed;
+        self.packed_start = start;
+        self.edges.clear();
+        self.first_user.fill(NONE);
+        self.last_user.fill(NONE);
     }
 
     /// Marks the users of every node in `changed`, on all cores if there are
@@ -592,28 +636,30 @@ impl Graph {
             }
             return;
         }
-        let (first_user, edge_to, edge_next, dirty) = (
+        let (packed_start, packed, first_user, edges) = (
+            &self.packed_start,
+            &self.packed,
             &self.first_user,
-            &self.edge_to,
-            &self.edge_next,
-            &self.dirty,
+            &self.edges,
         );
-        let marked: Vec<u32> = changed
+        let marked: Vec<Use> = changed
             .par_iter()
             .with_min_len(512)
             .flat_map_iter(|id| {
-                Users {
-                    edge: first_user[id.index()],
-                    edge_to,
-                    edge_next,
-                }
-                // `swap` returns the old flag: only the first thread to
-                // mark a node sees false, so each node is queued once.
-                .filter(|&user| !dirty[user as usize].swap(true, Ordering::Relaxed))
+                let n = id.index();
+                let packed: &[Use] = if n + 1 < packed_start.len() {
+                    &packed[packed_start[n] as usize..packed_start[n + 1] as usize]
+                } else {
+                    &[]
+                };
+                packed.iter().copied().chain(Users {
+                    edge: first_user[n],
+                    edges,
+                })
             })
             .collect();
-        for user in marked {
-            self.queue[self.hot[user as usize].height as usize].push(NodeId(user));
+        for Use { user, height } in marked {
+            self.queue[height as usize].push(NodeId(user));
         }
     }
 
@@ -681,11 +727,16 @@ impl Graph {
 
     /// The nodes that use this node, in the order they were added.
     pub fn dependents(&self, id: NodeId) -> Vec<NodeId> {
+        let n = id.index();
         let mut users = Vec::new();
-        let mut edge = self.first_user[id.index()];
+        if n + 1 < self.packed_start.len() {
+            let range = self.packed_start[n] as usize..self.packed_start[n + 1] as usize;
+            users.extend(self.packed[range].iter().map(|u| NodeId(u.user)));
+        }
+        let mut edge = self.first_user[n];
         while edge != NONE {
-            users.push(NodeId(self.edge_to[edge as usize]));
-            edge = self.edge_next[edge as usize];
+            users.push(NodeId(self.edges[edge as usize].user));
+            edge = self.edges[edge as usize].next;
         }
         users
     }
@@ -1088,24 +1139,40 @@ fn evaluate(
     }
 }
 
-/// Walks the list of a node's users in the edge arrays.
+/// One "is used by" link: `user` uses the node whose list this edge is on.
+/// The user's height is kept here too, so passing on an update can queue the
+/// user without looking anything else up.
+#[derive(Debug, Clone, Copy)]
+struct Edge {
+    user: u32,
+    height: u32,
+    next: u32,
+}
+
+/// A packed "is used by" link, with the user's height.
+#[derive(Debug, Clone, Copy)]
+struct Use {
+    user: u32,
+    height: u32,
+}
+
+/// Walks a node's links added since the last repack.
 #[cfg(feature = "parallel")]
 struct Users<'a> {
     edge: u32,
-    edge_to: &'a [u32],
-    edge_next: &'a [u32],
+    edges: &'a [Edge],
 }
 
 #[cfg(feature = "parallel")]
 impl Iterator for Users<'_> {
-    type Item = u32;
-    fn next(&mut self) -> Option<u32> {
+    type Item = Use;
+    fn next(&mut self) -> Option<Use> {
         if self.edge == NONE {
             return None;
         }
-        let user = self.edge_to[self.edge as usize];
-        self.edge = self.edge_next[self.edge as usize];
-        Some(user)
+        let Edge { user, height, next } = self.edges[self.edge as usize];
+        self.edge = next;
+        Some(Use { user, height })
     }
 }
 

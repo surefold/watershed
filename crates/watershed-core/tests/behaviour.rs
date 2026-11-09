@@ -388,3 +388,26 @@ fn every_nan_counts_as_the_same_value() -> Result {
     assert_eq!(g.get(inverse)?, f64::NEG_INFINITY);
     Ok(())
 }
+
+#[test]
+fn dependents_lists_each_user_once_in_the_order_added() -> Result {
+    // Nodes are added before and after updates, so some links have been
+    // packed together and some have not.
+    let mut g = Graph::new();
+    let a = g.input("a", 1.0)?;
+    let b = g.define("b", a + 1.0)?;
+    let c = g.define("c", a * 2.0)?;
+    g.set(a, 2.0)?;
+    g.stabilize();
+    let d = g.define("d", a - 1.0)?;
+    g.set(a, 3.0)?;
+    g.stabilize();
+    let e = g.define("e", b + a)?;
+    g.set(a, 4.0)?;
+    g.stabilize();
+
+    assert_eq!(g.dependents(a.id()), [b.id(), c.id(), d.id(), e.id()]);
+    assert_eq!(g.dependents(b.id()), [e.id()]);
+    assert_eq!(g.get(e)?, 9.0);
+    Ok(())
+}
