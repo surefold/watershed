@@ -1,5 +1,7 @@
 # watershed
 
+[![CI](https://github.com/matthewjones372/watershed/actions/workflows/ci.yml/badge.svg)](https://github.com/matthewjones372/watershed/actions/workflows/ci.yml)
+
 An incremental calculation engine, in Rust. You build a graph of inputs and
 calculated nodes. When inputs change, only the nodes that depend on them are
 recalculated, and an update stops spreading wherever a recalculated value comes
