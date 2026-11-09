@@ -55,6 +55,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aggregate;
+pub mod collection;
 mod compile;
 pub mod error;
 pub mod expr;
@@ -63,6 +65,8 @@ pub mod handle;
 pub mod ir;
 pub mod value;
 
+pub use aggregate::AggregateOp;
+pub use collection::{Collection, Column, Field, Part, Set};
 pub use error::CalcError;
 pub use expr::{Expr, IntoExpr, choose, when};
 pub use graph::{Graph, Report};
@@ -72,5 +76,8 @@ pub use value::{CalcType, Numeric, Ordered, Text, Type, Value};
 
 /// Everything you need to build and use a graph: `use watershed_core::prelude::*;`
 pub mod prelude {
-    pub use crate::{CalcError, Expr, Graph, Input, IntoExpr, Node, Report, choose, when};
+    pub use crate::{
+        CalcError, Collection, Column, Expr, Field, Graph, Input, IntoExpr, Node, Report, choose,
+        when,
+    };
 }

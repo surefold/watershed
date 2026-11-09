@@ -35,6 +35,35 @@ position, like a spreadsheet's `CHOOSE`, and waits only on the one it picked.
 `g.reads(node)` says what a node read last time, and `explain` follows only
 those.
 
+### Collections
+
+A collection is a keyed table of rows, with typed fields, calculated columns
+and totals:
+
+```rust
+let mut orders = Collection::new(&g, "orders");
+let qty = orders.field::<f64>("qty")?;
+let price = orders.field::<f64>("price")?;
+let line = orders.column(&mut g, "line_total", qty * price * fx)?;
+let revenue = orders.sum(&mut g, "revenue", line)?;   // also count, min, max
+
+orders.upsert(&mut g, "o-1042", &[qty.is(5.0), price.is(9.99)])?;
+orders.remove(&mut g, "o-7")?;
+g.stabilize();
+```
+
+Each row is a set of ordinary nodes, so changing one row recalculates that
+row's columns and the totals it feeds, and nothing else: on a million rows,
+16 µs and 4 nodes per changed row. Totals keep a balanced tree of partial
+results, so they update by only the changed rows' paths to the root, and give
+exactly, bit for bit, what adding every row up from scratch gives (a running
+total that subtracted and added would drift). Removed rows are marked absent
+and their nodes reused by the next new row.
+
+```bash
+cargo run --release --example collection -- 1000000
+```
+
 Calculations are typed. `qty + region` (a number plus a string) does not
 compile, and neither does setting a calculated node.
 
@@ -199,6 +228,8 @@ crates/watershed-core/
   src/expr.rs     the typed Rust front end: + - * /, comparisons, when/then/otherwise
   src/handle.rs   typed handles to nodes (Input<T>, Node<T>)
   src/graph.rs    the graph and the incremental update (stabilize)
+  src/aggregate.rs  totals over many nodes, kept as a tree of partial results
+  src/collection.rs keyed tables of rows with columns and totals
   src/error.rs    errors
   tests/          behaviour and property tests
   examples/       tour and benchmark
@@ -212,9 +243,10 @@ web/                    the interactive page and its build script
   they jump between nodes scattered across the graph; placing nodes that
   change together near each other would help. Building is about 1 µs per
   node.
-- **Collections**
-  (one node per row, updated per row), **removing nodes**, **pull mode**
-  (only calculating what someone is watching).
+- **Collections:** grouping by a value (totals per region whose groups come
+  and go), and building rows faster (about 2.4 µs per node today).
+- **Removing nodes** in general (collections reuse rows instead), and **pull
+  mode** (only calculating what someone is watching).
 - **Time travel and full lineage** (values as of an earlier update).
 - **Bindings** for Python and the JVM, a formula parser for end users, and the
   cluster.

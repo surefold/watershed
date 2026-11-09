@@ -508,3 +508,249 @@ fn explain_follows_only_what_a_node_read() -> Result {
     let _ = end_of_day;
     Ok(())
 }
+
+// ---------------------------------------------------------------- collections
+
+/// An orders table: qty × price per row, with revenue, count and largest line.
+struct Orders {
+    table: Collection,
+    qty: Field<f64>,
+    price: Field<f64>,
+    line: Column<f64>,
+    revenue: Node<f64>,
+    count: Node<i64>,
+    largest: Node<f64>,
+}
+
+fn orders(g: &mut Graph, rows: usize) -> std::result::Result<Orders, CalcError> {
+    let mut table = Collection::new(g, "orders");
+    let qty = table.field::<f64>("qty")?;
+    let price = table.field::<f64>("price")?;
+    let line = table.column(g, "line", qty * price)?;
+    let revenue = table.sum(g, "revenue", line)?;
+    let count = table.count(g, "count")?;
+    let largest = table.max(g, "largest", line)?;
+    for i in 0..rows {
+        table.upsert(
+            g,
+            &format!("o{i}"),
+            &[qty.is(1.0 + i as f64), price.is(2.0)],
+        )?;
+    }
+    g.stabilize();
+    Ok(Orders {
+        table,
+        qty,
+        price,
+        line,
+        revenue,
+        count,
+        largest,
+    })
+}
+
+#[test]
+fn changing_one_row_recalculates_that_row_and_the_totals_it_feeds() -> Result {
+    let mut g = Graph::new();
+    let Orders {
+        table: mut orders,
+        qty,
+        revenue,
+        count,
+        ..
+    } = orders(&mut g, 1000)?;
+    assert_eq!(g.get(revenue)?, 1001000.0);
+    assert_eq!(g.get(count)?, 1000);
+
+    orders.upsert(&mut g, "o500", &[qty.is(0.0)])?;
+    g.stabilize();
+    // The row's line, the revenue and the largest line: not the count, and
+    // none of the other 999 rows.
+    assert_eq!(recalculated(&g), ["orders[500].line", "revenue", "largest"]);
+    assert_eq!(g.get(revenue)?, 1001000.0 - 1002.0);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn removed_rows_leave_the_totals_and_their_nodes_are_reused() -> Result {
+    let mut g = Graph::new();
+    let Orders {
+        table: mut orders,
+        qty,
+        price,
+        line,
+        revenue,
+        count,
+        largest,
+    } = orders(&mut g, 3)?;
+    // Lines: 2, 4, 6.
+    assert_eq!(g.get(largest)?, 6.0);
+
+    assert!(orders.remove(&mut g, "o2")?);
+    g.stabilize();
+    assert_eq!(
+        (g.get(revenue)?, g.get(count)?, g.get(largest)?),
+        (6.0, 2, 4.0)
+    );
+    assert!(!orders.contains("o2"));
+
+    let nodes = g.len();
+    orders.upsert(&mut g, "new", &[qty.is(10.0), price.is(1.0)])?;
+    g.stabilize();
+    assert_eq!(g.len(), nodes, "the removed row's nodes were reused");
+    assert_eq!(orders.get(&g, "new", line)?, 10.0);
+    assert_eq!(
+        (g.get(revenue)?, g.get(count)?, g.get(largest)?),
+        (16.0, 3, 10.0)
+    );
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn a_column_can_use_other_columns_and_any_node_in_the_graph() -> Result {
+    let mut g = Graph::new();
+    let fx = g.input("fx", 2.0)?;
+    let mut trades = Collection::new(&g, "trades");
+    let notional = trades.field::<f64>("notional")?;
+    let side = trades.field::<String>("side")?;
+    let signed = trades.column(
+        &mut g,
+        "signed",
+        when(side.equals("sell"))
+            .then(-notional)
+            .otherwise(notional),
+    )?;
+    let converted = trades.column(&mut g, "converted", signed * fx)?;
+    let net = trades.sum(&mut g, "net", converted)?;
+    trades.upsert(
+        &mut g,
+        "t1",
+        &[notional.is(100.0), side.is("buy".to_string())],
+    )?;
+    trades.upsert(
+        &mut g,
+        "t2",
+        &[notional.is(30.0), side.is("sell".to_string())],
+    )?;
+    g.stabilize();
+    assert_eq!(g.get(net)?, 140.0);
+
+    // The exchange rate is used by every row.
+    g.set(fx, 3.0)?;
+    g.stabilize();
+    assert_eq!(g.get(net)?, 210.0);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn totals_and_columns_added_after_rows_include_them() -> Result {
+    let mut g = Graph::new();
+    let mut c = Collection::new(&g, "c");
+    let x = c.field::<i64>("x")?;
+    c.upsert(&mut g, "a", &[x.is(3)])?;
+    c.upsert(&mut g, "b", &[x.is(4)])?;
+    g.stabilize();
+    let doubled = c.column(&mut g, "doubled", x * 2)?;
+    let total = c.sum(&mut g, "total", doubled)?;
+    let smallest = c.min(&mut g, "smallest", x)?;
+    g.stabilize();
+    assert_eq!((g.get(total)?, g.get(smallest)?), (14, 3));
+    Ok(())
+}
+
+#[test]
+fn rows_are_checked() -> Result {
+    let mut g = Graph::new();
+    let mut c = Collection::new(&g, "c");
+    let x = c.field::<f64>("x")?;
+    let y = c.field::<f64>("y")?;
+    assert!(
+        matches!(
+            c.upsert(&mut g, "a", &[x.is(1.0)]),
+            Err(CalcError::Invalid(_))
+        ),
+        "a new row needs every field"
+    );
+    c.upsert(&mut g, "a", &[x.is(1.0), y.is(2.0)])?;
+    assert!(
+        matches!(c.field::<f64>("z"), Err(CalcError::Invalid(_))),
+        "fields come before rows"
+    );
+    assert!(!c.remove(&mut g, "nope")?);
+    let other = Graph::new();
+    assert!(matches!(
+        c.upsert(&mut Graph::new(), "a", &[x.is(1.0)]),
+        Err(CalcError::ForeignNode)
+    ));
+    let _ = other;
+    Ok(())
+}
+
+#[test]
+fn totals_of_no_rows() -> Result {
+    let mut g = Graph::new();
+    let mut c = Collection::new(&g, "c");
+    let x = c.field::<f64>("x")?;
+    let (sum, count, min) = (
+        c.sum(&mut g, "sum", x)?,
+        c.count(&mut g, "count")?,
+        c.min(&mut g, "min", x)?,
+    );
+    assert_eq!(
+        (g.get(sum)?, g.get(count)?, g.get(min)?),
+        (0.0, 0, f64::INFINITY)
+    );
+    Ok(())
+}
+
+#[test]
+fn explain_lists_the_first_rows_of_a_big_total() -> Result {
+    let mut g = Graph::new();
+    let Orders { revenue, .. } = orders(&mut g, 50)?;
+    let text = g.explain(revenue);
+    assert!(
+        text.starts_with("revenue = 2550  ← sum of 50 members"),
+        "{text}"
+    );
+    assert!(text.contains("… and 90 more"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn a_float_sum_keeps_the_sign_of_zero_like_adding_the_rows() -> Result {
+    // In IEEE arithmetic, -0.0 + -0.0 + -0.0 is -0.0. The tree's empty room
+    // must not turn it into +0.0.
+    let mut g = Graph::new();
+    let mut c = Collection::new(&g, "c");
+    let x = c.field::<f64>("x")?;
+    let sum = c.sum(&mut g, "sum", x)?;
+    for key in ["a", "b", "c"] {
+        c.upsert(&mut g, key, &[x.is(-0.0)])?;
+    }
+    g.stabilize();
+    assert_eq!(g.get(sum)?.to_bits(), (-0.0_f64).to_bits());
+    Ok(())
+}
+
+#[test]
+fn a_nan_row_makes_min_and_max_nan_however_many_rows_were_removed() -> Result {
+    let mut g = Graph::new();
+    let mut c = Collection::new(&g, "c");
+    let x = c.field::<f64>("x")?;
+    let largest = c.max(&mut g, "largest", x)?;
+    c.upsert(&mut g, "a", &[x.is(1.0)])?;
+    c.upsert(&mut g, "b", &[x.is(f64::NAN)])?;
+    g.stabilize();
+    assert!(g.get(largest)?.is_nan());
+    // With "a" gone, the tree has empty room next to the NaN; still NaN.
+    c.remove(&mut g, "a")?;
+    g.stabilize();
+    assert!(g.get(largest)?.is_nan());
+    c.upsert(&mut g, "b", &[x.is(2.0)])?;
+    g.stabilize();
+    assert_eq!(g.get(largest)?, 2.0);
+    Ok(())
+}

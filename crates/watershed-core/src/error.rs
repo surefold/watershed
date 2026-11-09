@@ -23,6 +23,9 @@ pub enum CalcError {
     },
     /// An expression's types do not fit together.
     Type(TypeError),
+    /// A request that does not fit the graph's structure, such as adding to
+    /// an aggregate a member that sits above it.
+    Invalid(String),
     /// The node's current value is an error, for example a division by zero
     /// in it or in something it depends on.
     Evaluation { node: String, message: String },
@@ -47,6 +50,7 @@ impl fmt::Display for CalcError {
                 None => write!(f, "{node:?} holds {expected}, not an error"),
             },
             CalcError::Type(e) => write!(f, "type error: {e}"),
+            CalcError::Invalid(message) => f.write_str(message),
             CalcError::Evaluation { node, message } => {
                 write!(f, "{node:?} could not be calculated: {message}")
             }

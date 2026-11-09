@@ -26,6 +26,7 @@ use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::aggregate::{Aggregate, AggregateOp};
 use crate::compile::{
     FloatOp, GeneralProgram, Program, Scratch, compile, decompile_float, eval_float, float_loads,
 };
@@ -37,6 +38,12 @@ use crate::value::{CalcType, Type, Value};
 
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A fresh id, never used by any graph (collections use them for their
+/// placeholders).
+pub(crate) fn next_graph_id() -> GraphId {
+    GraphId(NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed))
+}
+
 /// Marks the end of a list in the edge arrays.
 const NONE: u32 = u32::MAX;
 
@@ -47,7 +54,13 @@ enum Kind {
     Float,
     /// `general[code]`.
     General,
+    /// `aggregates[code]`.
+    Aggregate,
 }
+
+/// Set in a link's height when its user is an aggregate, so passing on an
+/// update can tell the aggregate which member changed. Heights stay below it.
+const AGGREGATE: u32 = 1 << 31;
 
 /// What the update loop needs about a node, packed into 16 bytes so that
 /// visiting a node touches as little memory as possible.
@@ -181,6 +194,11 @@ pub struct Graph {
     float_consts: Vec<f64>,
     /// Programs that are not pure float arithmetic.
     general: Vec<GeneralProgram>,
+    /// Totals over many nodes (see the `aggregate` module).
+    aggregates: Vec<Aggregate>,
+    /// Members added to aggregates since the last update: (aggregate,
+    /// value, presence). Like `set`, they count from the next update.
+    pending_members: Vec<(NodeId, NodeId, NodeId)>,
     /// For each general program that is dynamic, the nodes its last
     /// evaluation read (sorted); empty otherwise.
     reads: Vec<Box<[u32]>>,
@@ -221,7 +239,7 @@ impl Default for Graph {
 impl Graph {
     pub fn new() -> Self {
         Graph {
-            id: GraphId(NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed)),
+            id: next_graph_id(),
             values: Vec::new(),
             hot: Vec::new(),
             types: Vec::new(),
@@ -235,6 +253,8 @@ impl Graph {
             float_ops: Vec::new(),
             float_consts: Vec::new(),
             general: Vec::new(),
+            aggregates: Vec::new(),
+            pending_members: Vec::new(),
             reads: Vec::new(),
             pending: BTreeMap::new(),
             queue: Vec::new(),
@@ -387,6 +407,7 @@ impl Graph {
             self.add_user(*d, id);
         }
         self.levels = None;
+        assert!(hot.height < AGGREGATE, "graph too deep");
         let height = hot.height as usize;
         if self.queue.len() <= height {
             self.queue.resize_with(height + 1, Vec::new);
@@ -397,9 +418,15 @@ impl Graph {
     /// Records that `user` uses `node`, at the end of `node`'s list of users.
     fn add_user(&mut self, node: NodeId, user: NodeId) {
         let edge = u32::try_from(self.edges.len()).expect("a graph holds at most u32::MAX edges");
+        let hot = self.hot[user.index()];
+        let flag = if hot.kind == Kind::Aggregate {
+            AGGREGATE
+        } else {
+            0
+        };
         self.edges.push(Edge {
             user: user.0,
-            height: self.hot[user.index()].height,
+            height: hot.height | flag,
             next: NONE,
         });
         let n = node.index();
@@ -412,6 +439,9 @@ impl Graph {
 
     #[inline]
     fn evaluate(&mut self, hot: Hot) -> Value {
+        if hot.kind == Kind::Aggregate {
+            return self.aggregates[hot.code as usize].recalculate_everything(&self.values);
+        }
         let value = evaluate(
             hot,
             &self.float_ops,
@@ -446,9 +476,165 @@ impl Graph {
         if self.reads_unchanged(hot) {
             return;
         }
-        let new_value = self.evaluate(hot);
+        let new_value = if hot.kind == Kind::Aggregate {
+            // Only the members that changed, which marking passed on.
+            self.aggregates[hot.code as usize].recalculate(&self.values)
+        } else {
+            self.evaluate(hot)
+        };
         let change = (!self.values[i].same_as(&new_value)).then_some(new_value);
         self.apply(id, change, report);
+    }
+
+    /// Adds an aggregate: the `op` (sum, count, min or max) of a set of
+    /// members, each a value node and a `bool` node saying whether the
+    /// member is present. It updates by only the members that change, and
+    /// gives exactly the result of folding all of them from scratch (see the
+    /// `aggregate` module).
+    ///
+    /// `value_type` is the members' value type (`f64` or `i64`), and the
+    /// aggregate sits above `height`, so members up to that height can join
+    /// later. Collections use this; most code uses [`Collection`](crate::Collection).
+    pub fn aggregate(
+        &mut self,
+        name: &str,
+        op: AggregateOp,
+        value_type: Type,
+        height: usize,
+        members: &[(NodeId, NodeId)],
+    ) -> Result<NodeId, CalcError> {
+        self.check_name(name)?;
+        if !value_type.is_numeric() {
+            return Err(CalcError::Invalid(format!(
+                "{name:?}: an aggregate's values must be f64 or i64, not {value_type}"
+            )));
+        }
+        let mut height = height + 1;
+        for &(value, present) in members {
+            self.check_member(name, value_type, value, present)?;
+            height = height
+                .max(self.height(value) + 1)
+                .max(self.height(present) + 1);
+        }
+        let code = u32::try_from(self.aggregates.len()).expect("too many aggregates");
+        let mut aggregate = Aggregate::new(op, value_type);
+        for &(value, present) in members {
+            aggregate.push(value.0, present.0);
+        }
+        let value = aggregate.recalculate_everything(&self.values);
+        let nodes: Vec<NodeId> = {
+            let mut nodes: Vec<NodeId> = members.iter().flat_map(|&(v, p)| [v, p]).collect();
+            nodes.sort();
+            nodes.dedup();
+            nodes
+        };
+        self.aggregates.push(aggregate);
+        let hot = Hot {
+            code,
+            len: 0,
+            height: u32::try_from(height).expect("graph too deep"),
+            kind: Kind::Aggregate,
+        };
+        Ok(self.push(name, hot, op.result_type(value_type), &nodes, value))
+    }
+
+    /// An aggregate's operation and members (value node, presence node), in
+    /// order; `None` if the node is not an aggregate. Members added since the
+    /// last update are not included yet.
+    pub fn aggregate_members(&self, id: NodeId) -> Option<(AggregateOp, Vec<(NodeId, NodeId)>)> {
+        let hot = *self.hot.get(id.index())?;
+        if hot.kind != Kind::Aggregate {
+            return None;
+        }
+        let a = &self.aggregates[hot.code as usize];
+        Some((
+            a.op,
+            a.members
+                .iter()
+                .map(|&(v, p)| (NodeId(v), NodeId(p)))
+                .collect(),
+        ))
+    }
+
+    /// Adds a member to an aggregate. Like [`set`](Self::set), it counts
+    /// from the next update. The member's nodes must be below the aggregate.
+    pub fn extend_aggregate(
+        &mut self,
+        aggregate: NodeId,
+        value: NodeId,
+        present: NodeId,
+    ) -> Result<(), CalcError> {
+        let hot = *self
+            .hot
+            .get(aggregate.index())
+            .ok_or(CalcError::UnknownNode(aggregate))?;
+        if hot.kind != Kind::Aggregate {
+            return Err(CalcError::Invalid(format!(
+                "{:?} is not an aggregate",
+                self.name(aggregate)
+            )));
+        }
+        let value_type = self.aggregates[hot.code as usize].value_type;
+        let name = self.name(aggregate).to_string();
+        self.check_member(&name, value_type, value, present)?;
+        let top = self.height(value).max(self.height(present));
+        if top >= hot.height as usize {
+            return Err(CalcError::Invalid(format!(
+                "{name:?} sits at height {}, so a member at height {top} cannot join it",
+                hot.height
+            )));
+        }
+        self.pending_members.push((aggregate, value, present));
+        Ok(())
+    }
+
+    fn check_member(
+        &self,
+        name: &str,
+        value_type: Type,
+        value: NodeId,
+        present: NodeId,
+    ) -> Result<(), CalcError> {
+        for id in [value, present] {
+            if id.index() >= self.hot.len() {
+                return Err(CalcError::UnknownNode(id));
+            }
+        }
+        if self.types[present.index()] != Type::Bool {
+            return Err(CalcError::Invalid(format!(
+                "{name:?}: a member's presence must be bool, and {:?} is {}",
+                self.name(present),
+                self.types[present.index()]
+            )));
+        }
+        if value != present && self.types[value.index()] != value_type {
+            return Err(CalcError::Invalid(format!(
+                "{name:?} adds up {value_type}, and {:?} is {}",
+                self.name(value),
+                self.types[value.index()]
+            )));
+        }
+        Ok(())
+    }
+
+    /// Adds a member staged by `extend_aggregate`: links it and queues the
+    /// aggregate for this update.
+    fn join_aggregate(&mut self, aggregate: NodeId, value: NodeId, present: NodeId) {
+        let hot = self.hot[aggregate.index()];
+        let code = hot.code as usize;
+        // One link per node, even when the value and presence are the same
+        // node (as in a count) or the node is already part of a member.
+        let mut nodes = vec![value];
+        if present != value {
+            nodes.push(present);
+        }
+        for node in nodes {
+            if !self.aggregates[code].has_node(node.0) {
+                self.add_user(node, aggregate);
+            }
+        }
+        self.aggregates[code].push(value.0, present.0);
+        self.queue[hot.height as usize].push(aggregate);
     }
 
     // ---------------------------------------------------------------- updating
@@ -491,6 +677,9 @@ impl Graph {
         self.last_recalculated.clear();
         if self.edges.len() * 4 > self.packed.len() {
             self.repack();
+        }
+        for (aggregate, value, present) in std::mem::take(&mut self.pending_members) {
+            self.join_aggregate(aggregate, value, present);
         }
         let mut report = Report {
             epoch,
@@ -599,9 +788,12 @@ impl Graph {
             .map_init(Scratch::default, |scratch, id| {
                 let i = id.index();
                 let h = hot[i];
-                // Dynamic nodes record what they read, so they are left for
-                // this thread to do afterwards (they are rare in big levels).
-                if h.kind == Kind::General && general[h.code as usize].is_dynamic() {
+                // Dynamic nodes record what they read, and aggregates update
+                // their own state, so both are left for this thread to do
+                // afterwards (they are rare in big levels).
+                if h.kind == Kind::Aggregate
+                    || (h.kind == Kind::General && general[h.code as usize].is_dynamic())
+                {
                     return Outcome::Later;
                 }
                 let new_value = evaluate(h, float_ops, float_consts, general, values, scratch);
@@ -636,13 +828,21 @@ impl Graph {
         if n + 1 < self.packed_start.len() {
             let range = self.packed_start[n] as usize..self.packed_start[n + 1] as usize;
             for &Use { user, height } in &self.packed[range] {
-                self.queue[height as usize].push(NodeId(user));
+                if height & AGGREGATE != 0 {
+                    let code = self.hot[user as usize].code as usize;
+                    self.aggregates[code].changed.push(id.0);
+                }
+                self.queue[(height & !AGGREGATE) as usize].push(NodeId(user));
             }
         }
         let mut edge = self.first_user[n];
         while edge != NONE {
             let Edge { user, height, next } = self.edges[edge as usize];
-            self.queue[height as usize].push(NodeId(user));
+            if height & AGGREGATE != 0 {
+                let code = self.hot[user as usize].code as usize;
+                self.aggregates[code].changed.push(id.0);
+            }
+            self.queue[(height & !AGGREGATE) as usize].push(NodeId(user));
             edge = next;
         }
     }
@@ -696,7 +896,9 @@ impl Graph {
             &self.first_user,
             &self.edges,
         );
-        let marked: Vec<Use> = changed
+        // Each link, with the changed node it came from (an aggregate needs to
+        // know which member changed).
+        let marked: Vec<(Use, u32)> = changed
             .par_iter()
             .with_min_len(512)
             .flat_map_iter(|id| {
@@ -706,14 +908,22 @@ impl Graph {
                 } else {
                     &[]
                 };
-                packed.iter().copied().chain(Users {
-                    edge: first_user[n],
-                    edges,
-                })
+                packed
+                    .iter()
+                    .copied()
+                    .chain(Users {
+                        edge: first_user[n],
+                        edges,
+                    })
+                    .map(move |u| (u, id.0))
             })
             .collect();
-        for Use { user, height } in marked {
-            self.queue[height as usize].push(NodeId(user));
+        for (Use { user, height }, from) in marked {
+            if height & AGGREGATE != 0 {
+                let code = self.hot[user as usize].code as usize;
+                self.aggregates[code].changed.push(from);
+            }
+            self.queue[(height & !AGGREGATE) as usize].push(NodeId(user));
         }
     }
 
@@ -773,6 +983,12 @@ impl Graph {
             Kind::Input => {}
             Kind::Float => float_loads(self.float_program(hot), &mut deps),
             Kind::General => self.general[hot.code as usize].loads(&mut deps),
+            Kind::Aggregate => {
+                for &(value, present) in &self.aggregates[hot.code as usize].members {
+                    deps.push(NodeId(value));
+                    deps.push(NodeId(present));
+                }
+            }
         }
         deps.sort();
         deps.dedup();
@@ -827,6 +1043,7 @@ impl Graph {
                 self.id,
             )),
             Kind::General => Some(self.general[hot.code as usize].decompile(self.id)),
+            Kind::Aggregate => None,
         }
     }
 
@@ -862,18 +1079,27 @@ impl Graph {
     /// compares the result with the values the incremental updates produced.
     /// They must always agree. The tests call this after every update.
     pub fn check_consistency(&self) -> Result<(), String> {
-        let mut fresh: Vec<Value> = Vec::with_capacity(self.values.len());
-        // Ids are in creation order and a node only uses older nodes, so
-        // going through them in order always has every dependency ready.
-        for id in self.node_ids() {
+        // Lowest height first, so everything a node uses is ready before it.
+        // (Usually that is id order too, but an aggregate can gain members
+        // created after it.)
+        let mut order: Vec<NodeId> = self.node_ids().collect();
+        order.sort_by_key(|&id| (self.hot[id.index()].height, id));
+        let mut fresh: Vec<Value> = vec![Value::Bool(false); self.values.len()];
+        for id in order {
             let i = id.index();
-            let value = match self.expression(id) {
-                None => self.values[i].clone(),
+            let hot = self.hot[i];
+            let value = match hot.kind {
+                Kind::Input => self.values[i].clone(),
+                // Folded from scratch, without the aggregate's stored tree.
+                Kind::Aggregate => self.aggregates[hot.code as usize].folded_from_scratch(&fresh),
                 // Deliberately the simple tree evaluator, not the compiled
                 // program, so this check is independent of the fast path.
                 // (The tests separately check that rebuilding an expression
                 // from its program gives back exactly what was compiled.)
-                Some(ir) => ir.eval(&fresh),
+                Kind::Float | Kind::General => self
+                    .expression(id)
+                    .expect("a calculated node has an expression")
+                    .eval(&fresh),
             };
             if !value.same_as(&self.values[i]) {
                 return Err(format!(
@@ -893,7 +1119,7 @@ impl Graph {
                     ));
                 }
             }
-            fresh.push(value);
+            fresh[i] = value;
         }
         Ok(())
     }
@@ -901,8 +1127,10 @@ impl Graph {
     /// Recalculates every node from scratch, in place. This is what you would
     /// do without incremental updates; the benchmark compares against it.
     pub fn recalculate_everything(&mut self) -> usize {
-        if !cfg!(feature = "parallel") || self.parallel_threshold == usize::MAX {
-            // One core: in id order, which reads memory front to back.
+        let one_core = !cfg!(feature = "parallel") || self.parallel_threshold == usize::MAX;
+        if one_core && self.aggregates.is_empty() {
+            // One core: in id order, which reads memory front to back. (Not
+            // with aggregates, which can gain members created after them.)
             let mut count = 0;
             for i in 0..self.hot.len() {
                 let hot = self.hot[i];
@@ -997,8 +1225,12 @@ impl Graph {
             return;
         }
         out.push('\n');
+        // A total over many rows lists the first few, then how many more.
+        const SHOWN: usize = 10;
+        let hidden = deps.len().saturating_sub(SHOWN);
+        let deps = &deps[..deps.len().min(SHOWN)];
         for (k, &dep) in deps.iter().enumerate() {
-            let last = k + 1 == deps.len();
+            let last = k + 1 == deps.len() && hidden == 0;
             let (branch, indent) = if last {
                 ("└── ", "    ")
             } else {
@@ -1012,12 +1244,15 @@ impl Graph {
                 out,
             );
         }
+        if hidden > 0 {
+            let _ = writeln!(out, "{rest}└── … and {hidden} more");
+        }
     }
 
     fn summary(&self, id: NodeId) -> String {
-        let how = match self.expression(id) {
+        let how = match self.formula(id) {
             None => "(input)".to_string(),
-            Some(ir) => format!("← {}", self.render(&ir)),
+            Some(formula) => format!("← {formula}"),
         };
         let changed = if self.epoch > 0 && self.changed_in[id.index()] == self.epoch {
             "  [changed]"
@@ -1029,6 +1264,19 @@ impl Graph {
             self.name(id),
             self.values[id.index()]
         )
+    }
+
+    /// How a node is calculated, for people to read; `None` for an input.
+    fn formula(&self, id: NodeId) -> Option<String> {
+        let hot = self.hot[id.index()];
+        match hot.kind {
+            Kind::Input => None,
+            Kind::Aggregate => {
+                let a = &self.aggregates[hot.code as usize];
+                Some(format!("{} of {} members", a.op, a.members.len()))
+            }
+            Kind::Float | Kind::General => self.expression(id).map(|ir| self.render(&ir)),
+        }
     }
 
     fn render(&self, ir: &Ir) -> String {
@@ -1050,10 +1298,7 @@ impl Graph {
         let rows: Vec<(usize, [String; 5], String)> = self
             .node_ids()
             .map(|id| {
-                let how = match self.expression(id) {
-                    None => "input".to_string(),
-                    Some(ir) => self.render(&ir),
-                };
+                let how = self.formula(id).unwrap_or_else(|| "input".to_string());
                 let mut marks = String::new();
                 if recalculated.contains(&id) {
                     marks.push('*');
@@ -1117,9 +1362,9 @@ impl Graph {
         );
         for id in self.node_ids() {
             let changed = self.epoch > 0 && self.changed_in[id.index()] == self.epoch;
-            let (shape, how) = match self.expression(id) {
+            let (shape, how) = match self.formula(id) {
                 None => ("box", "input".to_string()),
-                Some(ir) => ("ellipse", self.render(&ir)),
+                Some(formula) => ("ellipse", formula),
             };
             let style = match (self.is_input(id), recalculated.contains(&id), changed) {
                 (true, _, true) => ", fillcolor=\"#b2f2bb\"",
@@ -1160,7 +1405,11 @@ impl Graph {
 
     // ---------------------------------------------------------------- helpers
 
-    fn node_ref(&self, node: NodeId) -> NodeRef {
+    pub(crate) fn id(&self) -> GraphId {
+        self.id
+    }
+
+    pub(crate) fn node_ref(&self, node: NodeId) -> NodeRef {
         NodeRef {
             graph: self.id,
             node,
@@ -1219,6 +1468,7 @@ fn evaluate(
         }
         Kind::General => general[hot.code as usize].eval(values, scratch),
         Kind::Input => unreachable!("inputs are never recalculated"),
+        Kind::Aggregate => unreachable!("aggregates are recalculated by the graph"),
     }
 }
 
