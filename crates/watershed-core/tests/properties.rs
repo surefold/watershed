@@ -11,8 +11,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use watershed_core::{BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
 use proptest::prelude::*;
+use watershed_core::{BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
 
 /// A small deterministic random number generator (SplitMix64), seeded by proptest.
 struct Rng(u64);
