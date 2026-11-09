@@ -187,6 +187,26 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .try { margin: 0; padding-left: 1.2rem; display: grid; gap: 8px; }
 .log .moved { font: 600 0.78rem var(--mono); color: var(--rain); }
 
+.wiki { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 820px) { .wiki { grid-template-columns: minmax(0, 1fr); } }
+.figures { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.figures div { display: grid; gap: 2px; }
+.figures dt { font-size: 0.78rem; color: var(--muted); }
+.figures dd { margin: 0; font: 700 1.35rem/1.1 var(--display); font-variant-numeric: tabular-nums; }
+.figures dd.grew { color: var(--rain); }
+.figures dd.shrank { color: var(--sediment); }
+.wikis { width: 100%; border-collapse: collapse; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.wikis th { text-align: left; font: 600 0.72rem var(--mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 0 8px 6px 0; }
+.wikis td { padding: 5px 8px 5px 0; border-top: 1px dashed var(--rule); vertical-align: middle; }
+.wikis td.num, .wikis th.num { text-align: right; white-space: nowrap; }
+.wikis td.name { font: 600 0.8rem var(--mono); overflow-wrap: anywhere; }
+.wikis tr { cursor: pointer; }
+.wikis tr[aria-selected="true"] td { background: color-mix(in srgb, var(--water) 10%, transparent); }
+.wikis .share { width: 30%; }
+.wikis .share .bar { height: 8px; }
+.wiki .panel > * { min-width: 0; }
+#wiki-explain { max-height: 22rem; overflow: auto; }
+
 .failed { border-color: var(--sediment); }
 footer { color: var(--muted); font-size: 0.85rem; }
 
@@ -316,11 +336,62 @@ footer { color: var(--muted); font-size: 0.85rem; }
     </div>
   </section>
 
+  <section class="plate" aria-labelledby="wiki-title">
+    <div class="plate-head">
+      <h2 id="wiki-title">Live: every Wikipedia edit, as it happens</h2>
+    </div>
+    <p class="lede" style="max-width: 70ch">Not everything is prices. Wikimedia publishes every edit to every wiki as it is saved, a few dozen a second. Here each edit becomes a row in a watershed <strong>collection</strong>, which keeps totals over its rows and a total per wiki. The table holds the latest <span id="wiki-window">5,000</span> edits: each new edit adds a row and pushes out the oldest, and only the totals those two rows belong to are recalculated.</p>
+
+    <div class="wiki">
+      <div class="panel">
+        <div class="live" id="wiki-live" data-state="idle">
+          <div class="live-top">
+            <span class="live-dot" aria-hidden="true"></span>
+            <strong id="wiki-state" role="status">Starts when you scroll here</strong>
+            <button class="secondary small" id="wiki-toggle" type="button">Start</button>
+          </div>
+          <p class="live-stats" id="wiki-stats">–</p>
+          <p class="live-note" id="wiki-note">Edits stream from stream.wikimedia.org. Nothing is sent back.</p>
+        </div>
+        <dl class="figures">
+          <div><dt>Edits in the window</dt><dd id="wiki-rows">–</dd></div>
+          <div><dt>Made by bots</dt><dd id="wiki-bots">–</dd></div>
+          <div><dt>Bytes added</dt><dd class="grew" id="wiki-added">–</dd></div>
+          <div><dt>Bytes removed</dt><dd class="shrank" id="wiki-removed">–</dd></div>
+        </dl>
+        <p class="status" id="wiki-work">Each update's work appears here.</p>
+      </div>
+
+      <div class="panel">
+        <h3>Busiest wikis right now <span id="wiki-count"></span></h3>
+        <table class="wikis">
+          <thead><tr><th>Wiki</th><th class="num">Edits</th><th class="share">Share</th><th class="num">Bytes</th></tr></thead>
+          <tbody id="wiki-top"><tr><td colspan="4" class="empty">Waiting for edits.</td></tr></tbody>
+        </table>
+        <details id="wiki-explain-box">
+          <summary>Why does <span id="wiki-explain-name">a wiki</span> have this count?</summary>
+          <pre class="tree" id="wiki-explain">Pick a wiki in the table.</pre>
+        </details>
+      </div>
+    </div>
+
+    <div class="explainer">
+      <div>
+        <h3>What the engine holds</h3>
+        <p>Each edit is a row with three fields: the wiki, the change in size in bytes, and whether a bot made it. Each row also has calculated columns: <code>is_bot</code>, <code>grew</code> (bytes added, or 0) and <code>shrank</code> (bytes removed, or 0). Over the rows sit totals (the count, bot edits, bytes added and removed, the bot share) and, for each wiki, its own count and byte total.</p>
+      </div>
+      <div>
+        <h3>What one edit costs</h3>
+        <p>A new edit for English Wikipedia changes the overall totals and English Wikipedia's totals. The edit it pushes out changes the overall totals and its own wiki's. Every other wiki's totals are left alone. Each total updates only its path through a tree of partial sums, so the work stays small however many rows the window holds, and the totals are the same, to the last bit, as adding the rows up from scratch.</p>
+      </div>
+    </div>
+  </section>
+
   <footer>Timings are measured in this browser on this device, as the median of several runs. Nothing is sent anywhere: the engine runs entirely on your machine.</footer>
 </div>
 
 <script type="module">
-import init, { Model, Benchmark } from "./pkg/watershed_web.js";
+import init, { Model, Benchmark, Edits } from "./pkg/watershed_web.js";
 
 const PRESETS = [
   {
@@ -790,6 +861,142 @@ function stopFeed() {
   $("live").hidden = true;
 }
 
+// ---------------------------------------------------------------- wikipedia edits
+
+const WIKI_URL = "https://stream.wikimedia.org/v2/stream/recentchange";
+const WIKI_WINDOW = 5000;
+const WIKI_TOP = 12;
+let wiki = null;
+
+function wikiStart() {
+  if (wiki) return;
+  const w = {
+    edits: new Edits(WIKI_WINDOW), source: null, paused: false, opened: false, frame: 0, timer: 0,
+    seen: 0, updates: 0, engineTotal: 0, recalculated: 0, nodes: 0, since: performance.now(),
+    lastPaint: 0, selected: null,
+  };
+  wiki = w;
+  $("wiki-toggle").textContent = "Pause";
+  wikiConnect(w);
+}
+
+function wikiConnect(w) {
+  if (wiki !== w || w.paused) return;
+  wikiState("connecting", "Connecting to Wikimedia…");
+  let source;
+  try {
+    source = new EventSource(WIKI_URL);
+  } catch (error) {
+    console.error("could not open the edit stream:", error);
+    return wikiUnreachable(w);
+  }
+  w.source = source;
+  source.onopen = () => { w.opened = true; wikiState("live", "Live · Wikimedia"); };
+  source.onmessage = (event) => {
+    let e;
+    try { e = JSON.parse(event.data); } catch { return; }
+    if (e.type !== "edit" && e.type !== "new") return;
+    if (e.meta?.domain === "canary") return;
+    const id = e.meta?.id ?? String(e.id);
+    const name = e.server_name ?? e.wiki;
+    const bytes = (e.length?.new ?? 0) - (e.length?.old ?? 0);
+    if (!id || !name || !Number.isFinite(bytes)) return;
+    w.edits.add(id, name, bytes, Boolean(e.bot));
+    w.seen++;
+    if (!w.frame) w.frame = requestAnimationFrame(() => wikiFlush(w));
+  };
+  source.onerror = () => {
+    if (wiki !== w || w.paused) return;
+    if (!w.opened) { source.close(); return wikiUnreachable(w); }
+    // EventSource reconnects by itself after a dropped connection.
+    wikiState("offline", "Connection lost. Reconnecting…");
+  };
+}
+
+function wikiUnreachable(w) {
+  if (wiki !== w) return;
+  wikiState("offline", "The edit stream can't connect here");
+  const note = $("wiki-note");
+  note.innerHTML = "";
+  note.append("This page couldn't reach stream.wikimedia.org. Some viewers, including claude.ai, block connections to other sites. See it live at ");
+  const a = document.createElement("a");
+  a.href = "https://surefold.dev/watershed/";
+  a.textContent = "surefold.dev/watershed";
+  note.append(a, ".");
+  $("wiki-toggle").hidden = true;
+}
+
+function wikiFlush(w) {
+  w.frame = 0;
+  if (wiki !== w) return;
+  const t = performance.now();
+  const report = JSON.parse(w.edits.update());
+  w.engineTotal += performance.now() - t;
+  w.updates++;
+  w.recalculated = report.recalculated;
+  w.nodes = report.nodes;
+  // The engine keeps up with every edit; the page redraws a few times a second.
+  if (t - w.lastPaint > 250) { w.lastPaint = t; wikiPaint(w); }
+}
+
+function wikiPaint(w) {
+  const s = JSON.parse(w.edits.summary(WIKI_TOP));
+  const seconds = Math.max(1, (performance.now() - w.since) / 1000);
+  $("wiki-rows").textContent = s.rows.toLocaleString("en-GB");
+  $("wiki-bots").textContent = `${Math.round(s.botShare * 100)}%`;
+  $("wiki-added").textContent = "+" + Math.round(s.added).toLocaleString("en-GB");
+  $("wiki-removed").textContent = "−" + Math.round(-s.removed).toLocaleString("en-GB");
+  $("wiki-stats").textContent =
+    `${w.seen.toLocaleString("en-GB")} edits (${(w.seen / seconds).toFixed(1)}/s) · ${w.updates.toLocaleString("en-GB")} updates · engine ${w.updates ? fmtMs(w.engineTotal / w.updates) : "–"} per update`;
+  $("wiki-work").textContent =
+    `Last update recalculated ${w.recalculated.toLocaleString("en-GB")} of ${w.nodes.toLocaleString("en-GB")} nodes.`;
+  $("wiki-count").textContent = `· ${s.wikis.toLocaleString("en-GB")} wikis in the window`;
+
+  const body = $("wiki-top");
+  body.innerHTML = "";
+  for (const [name, edits, bytes] of s.top) {
+    const tr = document.createElement("tr");
+    tr.tabIndex = 0;
+    tr.setAttribute("aria-selected", String(name === w.selected));
+    const pct = s.rows ? (edits / s.rows) * 100 : 0;
+    tr.innerHTML = `<td class="name"></td><td class="num">${edits.toLocaleString("en-GB")}</td>` +
+      `<td class="share"><div class="bar"><i style="width:${Math.max(0.5, pct).toFixed(1)}%"></i></div></td>` +
+      `<td class="num">${bytes >= 0 ? "+" : "−"}${Math.abs(Math.round(bytes)).toLocaleString("en-GB")}</td>`;
+    tr.firstChild.textContent = name.replace(/\.org$/, "");
+    const pick = () => { w.selected = name; $("wiki-explain-box").open = true; wikiPaint(w); };
+    tr.addEventListener("click", pick);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+    body.append(tr);
+  }
+  if (w.selected) wikiExplain(w);
+}
+
+function wikiExplain(w) {
+  $("wiki-explain-name").textContent = w.selected;
+  $("wiki-explain").textContent = w.edits.explain_wiki(w.selected) ?? `${w.selected} has no edits in the window any more.`;
+}
+
+function wikiState(state, text) {
+  $("wiki-live").dataset.state = state;
+  $("wiki-state").textContent = text;
+}
+
+function wikiToggle() {
+  if (!wiki) return wikiStart();
+  const w = wiki;
+  w.paused = !w.paused;
+  $("wiki-toggle").textContent = w.paused ? "Resume" : "Pause";
+  if (w.paused) {
+    if (w.source) { w.source.close(); w.source = null; }
+    if (w.frame) { cancelAnimationFrame(w.frame); wikiFlush(w); }
+    wikiPaint(w);
+    wikiState("offline", "Paused");
+  } else {
+    w.opened = false;
+    wikiConnect(w);
+  }
+}
+
 // ---------------------------------------------------------------- helpers
 
 function frame() { return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0))); }
@@ -831,6 +1038,7 @@ async function start() {
       $(id).closest(".panel").classList.add("failed");
     }
     $("build").disabled = true;
+    $("wiki-toggle").disabled = true;
     throw error;
   }
 
@@ -854,6 +1062,12 @@ async function start() {
       connect();
     }
   });
+  $("wiki-window").textContent = WIKI_WINDOW.toLocaleString("en-GB");
+  $("wiki-toggle").addEventListener("click", wikiToggle);
+  // The stream starts once the section is on screen, so the page loads quietly.
+  new IntersectionObserver((entries, observer) => {
+    if (entries.some((e) => e.isIntersecting)) { observer.disconnect(); wikiStart(); }
+  }, { rootMargin: "200px" }).observe($("wiki-live"));
 }
 
 await start();
