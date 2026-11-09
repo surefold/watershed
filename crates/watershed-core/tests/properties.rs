@@ -117,11 +117,18 @@ fn random_expr(rng: &mut Rng, g: &Graph, ty: Type, depth: u32) -> Ir {
                 sub(rng, Type::Bool),
             ),
         },
-        Type::Str => Ir::If(
-            sub(rng, Type::Bool),
-            sub(rng, Type::Str),
-            sub(rng, Type::Str),
-        ),
+        Type::Str => match rng.below(3) {
+            0 => Ir::Binary(BinOp::Concat, sub(rng, Type::Str), sub(rng, Type::Str)),
+            1 => {
+                let operand = rng.pick(&TYPES);
+                Ir::Unary(UnOp::ToText, sub(rng, operand))
+            }
+            _ => Ir::If(
+                sub(rng, Type::Bool),
+                sub(rng, Type::Str),
+                sub(rng, Type::Str),
+            ),
+        },
     }
 }
 
@@ -138,7 +145,10 @@ fn random_untyped_expr(rng: &mut Rng, g: &Graph, depth: u32) -> Ir {
             let options = (0..rng.below(3)).map(|_| sub(rng)).collect();
             Ir::Choose(sub(rng), options)
         }
-        0 => Ir::Unary(rng.pick(&[UnOp::Neg, UnOp::Abs, UnOp::Not]), sub(rng)),
+        0 => Ir::Unary(
+            rng.pick(&[UnOp::Neg, UnOp::Abs, UnOp::Not, UnOp::ToText]),
+            sub(rng),
+        ),
         1 => {
             let op = rng.pick(&[
                 BinOp::Add,
@@ -155,6 +165,7 @@ fn random_untyped_expr(rng: &mut Rng, g: &Graph, depth: u32) -> Ir {
                 BinOp::Ne,
                 BinOp::And,
                 BinOp::Or,
+                BinOp::Concat,
             ]);
             Ir::Binary(op, sub(rng), sub(rng))
         }

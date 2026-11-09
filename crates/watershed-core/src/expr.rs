@@ -212,6 +212,14 @@ macro_rules! methods {
             }
         }
 
+        impl $handle<String> {
+            /// This text followed by `rhs`. A result over
+            /// [`MAX_TEXT_BYTES`](crate::MAX_TEXT_BYTES) is an error.
+            pub fn concat(self, rhs: impl IntoExpr<String>) -> Expr<String> {
+                binary(BinOp::Concat, self.into_expr(), rhs.into_expr())
+            }
+        }
+
         impl<T: Numeric> $handle<T> {
             pub fn min(self, rhs: impl IntoExpr<T>) -> Expr<T> {
                 binary(BinOp::Min, self.into_expr(), rhs.into_expr())
@@ -226,6 +234,20 @@ macro_rules! methods {
     )*};
 }
 methods!(Expr, Node, Input, Field, Column);
+
+/// Any value as text: `3` as `"3"`, `2.0` as `"2.0"`, `true` as `"true"`.
+///
+/// ```
+/// use watershed_core::prelude::*;
+///
+/// let mut g = Graph::new();
+/// let major = g.input("major", 2_i64).unwrap();
+/// let version = g.define("version", text(major).concat(".1")).unwrap();
+/// assert_eq!(g.get(version).unwrap(), "2.1");
+/// ```
+pub fn text<T>(value: impl IntoExpr<T>) -> Expr<String> {
+    unary(UnOp::ToText, value.into_expr())
+}
 
 // ---- Conditionals: when(cond).then(a).otherwise(b) ----
 

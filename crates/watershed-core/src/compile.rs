@@ -52,6 +52,8 @@ pub(crate) enum Op {
     And,
     Or,
     Not,
+    ToText,
+    Concat,
     /// Pop a condition. True: carry on. False: jump to `otherwise`. An error:
     /// push it and jump to `end`, skipping both branches.
     Branch {
@@ -318,6 +320,7 @@ fn decompile_general(ops: &[Op], constants: &[Value], tables: &[u32], graph: Gra
                         Op::NegF | Op::NegI => Some(UnOp::Neg),
                         Op::AbsF | Op::AbsI => Some(UnOp::Abs),
                         Op::Not => Some(UnOp::Not),
+                        Op::ToText => Some(UnOp::ToText),
                         _ => None,
                     };
                     if let Some(u) = unary {
@@ -335,6 +338,7 @@ fn decompile_general(ops: &[Op], constants: &[Value], tables: &[u32], graph: Gra
                             Op::MaxF | Op::MaxI => BinOp::Max,
                             Op::And => BinOp::And,
                             Op::Or => BinOp::Or,
+                            Op::Concat => BinOp::Concat,
                             Op::CmpF(c) | Op::CmpI(c) | Op::CmpS(c) | Op::CmpB(c) => match c {
                                 Cmp::Lt => BinOp::Lt,
                                 Cmp::Le => BinOp::Le,
@@ -520,6 +524,16 @@ fn eval_general(
                 other => other,
             }),
 
+            Op::ToText => unary(stack, crate::ir::to_text),
+            Op::Concat => {
+                let result = match pop2(stack) {
+                    Ok((Value::Str(x), Value::Str(y))) => crate::ir::concat(&x, &y),
+                    Ok((a, b)) => internal(format!("join of {a} and {b}")),
+                    Err(e) => e,
+                };
+                stack.push(result);
+            }
+
             Op::Branch { otherwise, end } => match stack.pop() {
                 Some(Value::Bool(true)) => {}
                 Some(Value::Bool(false)) => pc = otherwise as usize,
@@ -587,6 +601,7 @@ impl Compiler<'_> {
                     (UnOp::Abs, true) => Op::AbsF,
                     (UnOp::Abs, false) => Op::AbsI,
                     (UnOp::Not, _) => Op::Not,
+                    (UnOp::ToText, _) => Op::ToText,
                 });
             }
             Ir::Binary(op, a, b) => {
@@ -651,6 +666,7 @@ impl Compiler<'_> {
                     BinOp::Ne => cmp(Cmp::Ne),
                     BinOp::And => Op::And,
                     BinOp::Or => Op::Or,
+                    BinOp::Concat => Op::Concat,
                 });
             }
             Ir::If(c, t, e) => {
