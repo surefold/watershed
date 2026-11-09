@@ -14,12 +14,15 @@
 //! 4. **Cutoff:** if a recalculated node's value is identical to its old one,
 //!    the nodes above it are not marked, so the update stops spreading there.
 
+use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::hash::{BuildHasher, Hasher};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::compile::{FloatOp, GeneralProgram, Program, Scratch, eval_float};
+use crate::compile::{
+    FloatOp, GeneralProgram, Program, Scratch, compile, decompile_float, eval_float, float_loads,
+};
 use crate::error::CalcError;
 use crate::expr::IntoExpr;
 use crate::handle::{GraphId, Handle, Input, Node, NodeId, NodeRef};
@@ -28,31 +31,100 @@ use crate::value::{CalcType, Type, Value};
 
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Marks the end of a list in the edge arrays.
+const NONE: u32 = u32::MAX;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Input,
-    /// The expression as written.
-    Calculated(Arc<Ir>),
+    /// A pure-float program at `float_ops[code..code + len]`.
+    Float,
+    /// `general[code]`.
+    General,
 }
 
-/// How to recalculate a node, kept small for the update loop.
-enum Code {
-    Input,
-    /// A pure-float program, stored in `Graph::float_ops[start..start + len]`.
-    Float {
-        start: u32,
-        len: u32,
-    },
-    General(Box<GeneralProgram>),
-}
-
-/// The parts of a node the update loop does not need. What it does need is
-/// kept in separate compact arrays in `Graph`, so the loop reads only those.
-struct Meta {
-    name: String,
+/// What the update loop needs about a node, packed into 16 bytes so that
+/// visiting a node touches as little memory as possible.
+#[derive(Debug, Clone, Copy)]
+struct Hot {
+    code: u32,
+    len: u32,
+    height: u32,
     kind: Kind,
-    ty: Type,
-    /// Nodes this one uses, without repeats.
-    deps: Vec<NodeId>,
+}
+
+/// Every node's name, stored back to back in one string, with a compact
+/// index from name to node.
+#[derive(Default)]
+struct Names {
+    text: String,
+    /// Where each name starts in `text`; one extra entry marks the end.
+    starts: Vec<u32>,
+    hasher: RandomState,
+    /// From a name's hash to its node. Two names can share a hash; the
+    /// second and later ones go in `collisions`.
+    index: HashMap<u64, NodeId, Prehashed>,
+    collisions: HashMap<String, NodeId>,
+}
+
+impl Names {
+    fn get(&self, id: NodeId) -> &str {
+        let i = id.index();
+        &self.text[self.starts[i] as usize..self.starts[i + 1] as usize]
+    }
+
+    fn find(&self, name: &str) -> Option<NodeId> {
+        match self.index.get(&self.hasher.hash_one(name)) {
+            Some(&id) if self.get(id) == name => Some(id),
+            _ => self.collisions.get(name).copied(),
+        }
+    }
+
+    /// Adds the next node's name. The caller has checked it is new.
+    fn push(&mut self, name: &str, id: NodeId) {
+        if self.starts.is_empty() {
+            self.starts.push(0);
+        }
+        self.text.push_str(name);
+        self.starts
+            .push(u32::try_from(self.text.len()).expect("node names exceed 4 GB in total"));
+        let hash = self.hasher.hash_one(name);
+        match self.index.entry(hash) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(id);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                self.collisions.insert(name.to_string(), id);
+            }
+        }
+    }
+}
+
+/// The index's keys are already hashes, so hashing them again is wasted work.
+#[derive(Default, Clone, Copy)]
+struct Prehashed;
+
+impl BuildHasher for Prehashed {
+    type Hasher = PrehashedHasher;
+    fn build_hasher(&self) -> PrehashedHasher {
+        PrehashedHasher(0)
+    }
+}
+
+struct PrehashedHasher(u64);
+
+impl Hasher for PrehashedHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 << 8) ^ u64::from(b);
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
 }
 
 /// What one call to [`Graph::stabilize`] did.
@@ -70,23 +142,38 @@ pub struct Report {
 }
 
 /// A graph of inputs and calculated nodes.
+///
+/// Everything is stored in flat arrays indexed by node id, with no per-node
+/// heap allocation for ordinary nodes, so a graph of a million float nodes
+/// takes on the order of a hundred bytes per node.
 pub struct Graph {
     id: GraphId,
-    meta: Vec<Meta>,
 
-    // One entry per node, indexed by node id: what the update loop uses.
+    // One entry per node, indexed by node id.
     values: Vec<Value>,
-    code: Vec<Code>,
-    /// Nodes that use this one.
-    dependents: Vec<Vec<NodeId>>,
-    height: Vec<u32>,
-    dirty: Vec<bool>,
+    hot: Vec<Hot>,
+    types: Vec<Type>,
+    /// Whether a node is waiting to be recalculated. Atomic so that threads
+    /// passing on an update can mark nodes at the same time: exactly one of
+    /// them sees the flag go from false to true and queues the node.
+    dirty: Vec<AtomicBool>,
     /// The update in which the value last changed (0 = when it was created).
     changed_in: Vec<u64>,
-    /// The instructions of every pure-float program, back to back.
-    float_ops: Vec<FloatOp>,
+    names: Names,
 
-    by_name: HashMap<String, NodeId>,
+    /// Who uses each node, as linked lists in flat arrays: `first_user[n]` is
+    /// the first edge from node n, and each edge has a target and a next edge.
+    first_user: Vec<u32>,
+    last_user: Vec<u32>,
+    edge_to: Vec<u32>,
+    edge_next: Vec<u32>,
+
+    /// The instructions and constants of every pure-float program, back to back.
+    float_ops: Vec<FloatOp>,
+    float_consts: Vec<f64>,
+    /// Programs that are not pure float arithmetic.
+    general: Vec<GeneralProgram>,
+
     /// Input changes recorded by `set`, applied by `stabilize`. A later `set`
     /// of the same input replaces an earlier one.
     pending: BTreeMap<NodeId, Value>,
@@ -96,7 +183,23 @@ pub struct Graph {
     last_recalculated: Vec<NodeId>,
     /// Scratch space for evaluating programs.
     scratch: Scratch,
+    /// Levels with at least this many nodes to recalculate are spread over
+    /// all CPU cores (with the `parallel` feature).
+    parallel_threshold: usize,
+    /// Every calculated node, grouped by height, for recalculating everything
+    /// in parallel. Built when first needed; cleared when a node is added.
+    levels: Option<Vec<Vec<NodeId>>>,
+    /// Results of recalculating a level in parallel: the new value for each
+    /// node whose value changed. Kept between updates to reuse its memory.
+    changes: Vec<Option<Value>>,
+    /// Nodes whose value changed on the level being processed in parallel.
+    changed_ids: Vec<NodeId>,
 }
+
+/// The level size from which recalculating in parallel pays off. Measured on
+/// the benchmark graph with 4 cores: below about 30,000 nodes, the time
+/// threads spend waiting for each other outweighs the work they share.
+const DEFAULT_PARALLEL_THRESHOLD: usize = 32_768;
 
 impl Default for Graph {
     fn default() -> Self {
@@ -108,36 +211,60 @@ impl Graph {
     pub fn new() -> Self {
         Graph {
             id: GraphId(NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed)),
-            meta: Vec::new(),
             values: Vec::new(),
-            code: Vec::new(),
-            dependents: Vec::new(),
-            height: Vec::new(),
+            hot: Vec::new(),
+            types: Vec::new(),
             dirty: Vec::new(),
             changed_in: Vec::new(),
+            names: Names::default(),
+            first_user: Vec::new(),
+            last_user: Vec::new(),
+            edge_to: Vec::new(),
+            edge_next: Vec::new(),
             float_ops: Vec::new(),
-            by_name: HashMap::new(),
+            float_consts: Vec::new(),
+            general: Vec::new(),
             pending: BTreeMap::new(),
             queue: Vec::new(),
             epoch: 0,
             last_recalculated: Vec::new(),
             scratch: Scratch::default(),
+            parallel_threshold: DEFAULT_PARALLEL_THRESHOLD,
+            levels: None,
+            changes: Vec::new(),
+            changed_ids: Vec::new(),
         }
     }
 
     // ---------------------------------------------------------------- building
 
+    /// Makes room for `nodes` more nodes using about `edges` more links
+    /// between them, so a large graph is built without its arrays being
+    /// copied as they grow (which briefly needs up to twice the memory).
+    pub fn reserve(&mut self, nodes: usize, edges: usize) {
+        self.values.reserve(nodes);
+        self.hot.reserve(nodes);
+        self.types.reserve(nodes);
+        self.dirty.reserve(nodes);
+        self.changed_in.reserve(nodes);
+        self.first_user.reserve(nodes);
+        self.last_user.reserve(nodes);
+        self.names.starts.reserve(nodes + 1);
+        self.names.index.reserve(nodes);
+        self.edge_to.reserve(edges);
+        self.edge_next.reserve(edges);
+    }
+
     /// Adds an input with a starting value.
     pub fn input<T: CalcType>(&mut self, name: &str, value: T) -> Result<Input<T>, CalcError> {
         self.check_name(name)?;
-        let id = self.push(
-            name,
-            Kind::Input,
-            Code::Input,
-            T::TYPE,
-            Vec::new(),
-            value.into_value(),
-        );
+        let hot = Hot {
+            code: 0,
+            len: 0,
+            height: 0,
+            kind: Kind::Input,
+        };
+        let id = self.push(name, hot, T::TYPE, &[], value.into_value());
         Ok(Input::new(self.node_ref(id)))
     }
 
@@ -148,7 +275,13 @@ impl Graph {
         let ty = value
             .type_of()
             .ok_or_else(|| TypeError("an input's starting value cannot be an error".into()))?;
-        Ok(self.push(name, Kind::Input, Code::Input, ty, Vec::new(), value))
+        let hot = Hot {
+            code: 0,
+            len: 0,
+            height: 0,
+            kind: Kind::Input,
+        };
+        Ok(self.push(name, hot, ty, &[], value))
     }
 
     /// Adds a calculated node. Its value is worked out straight away.
@@ -159,7 +292,7 @@ impl Graph {
     ) -> Result<Node<T>, CalcError> {
         let expr = expr.into_expr();
         let id = self.define_ir(name, (*expr.ir).clone())?;
-        let ty = self.meta[id.index()].ty;
+        let ty = self.types[id.index()];
         if ty != T::TYPE {
             // The typed API cannot build such an expression; this is a safety net.
             return Err(CalcError::TypeMismatch {
@@ -182,79 +315,97 @@ impl Graph {
             self.check_ref(*r)?;
         }
         let ty = ir.type_check(&|r| {
-            self.meta
+            self.types
                 .get(r.node.index())
-                .map(|m| m.ty)
+                .copied()
                 .ok_or_else(|| TypeError(format!("there is no node {}", r.node)))
         })?;
 
         let mut deps: Vec<NodeId> = refs.into_iter().map(|r| r.node).collect();
         deps.sort();
         deps.dedup();
-        // Worked out from the values of the last update, like every other node.
-        let code = match Program::compile(&ir, &|i| self.meta[i].ty) {
-            Program::Float(ops) => {
-                let start = u32::try_from(self.float_ops.len()).expect("too many instructions");
-                self.float_ops.extend(ops);
-                let len = self.float_ops.len() as u32 - start;
-                Code::Float { start, len }
-            }
-            Program::General(program) => Code::General(Box::new(program)),
-        };
-        let value = evaluate(&code, &self.float_ops, &self.values, &mut self.scratch);
-        let id = self.push(
-            name,
-            Kind::Calculated(Arc::new(ir)),
-            code,
-            ty,
-            deps.clone(),
-            value,
-        );
-        for d in deps {
-            self.dependents[d.index()].push(id);
-        }
-        Ok(id)
-    }
-
-    fn push(
-        &mut self,
-        name: &str,
-        kind: Kind,
-        code: Code,
-        ty: Type,
-        deps: Vec<NodeId>,
-        value: Value,
-    ) -> NodeId {
         // Inputs have height 0; any other node is one above the highest node
         // it uses (1 if it uses none).
-        let height = match code {
-            Code::Input => 0,
-            _ => deps
-                .iter()
-                .map(|d| self.height[d.index()] as usize + 1)
-                .max()
-                .unwrap_or(1),
+        let height = deps
+            .iter()
+            .map(|d| self.hot[d.index()].height + 1)
+            .max()
+            .unwrap_or(1);
+        let types = &self.types;
+        let program = compile(
+            &ir,
+            &|i| types[i],
+            &mut self.float_ops,
+            &mut self.float_consts,
+        );
+        let hot = match program {
+            Program::Float { start, len } => Hot {
+                code: start,
+                len,
+                height,
+                kind: Kind::Float,
+            },
+            Program::General(program) => {
+                self.general.push(program);
+                let code = u32::try_from(self.general.len() - 1).expect("too many programs");
+                Hot {
+                    code,
+                    len: 0,
+                    height,
+                    kind: Kind::General,
+                }
+            }
         };
+        // Worked out from the values of the last update, like every other node.
+        let value = self.evaluate(hot);
+        Ok(self.push(name, hot, ty, &deps, value))
+    }
+
+    fn push(&mut self, name: &str, hot: Hot, ty: Type, deps: &[NodeId], value: Value) -> NodeId {
         let id =
-            NodeId(u32::try_from(self.meta.len()).expect("a graph holds at most u32::MAX nodes"));
-        self.meta.push(Meta {
-            name: name.to_string(),
-            kind,
-            ty,
-            deps,
-        });
+            NodeId(u32::try_from(self.hot.len()).expect("a graph holds at most u32::MAX nodes"));
         self.values.push(value);
-        self.code.push(code);
-        self.dependents.push(Vec::new());
-        self.height
-            .push(u32::try_from(height).expect("graph too deep"));
-        self.dirty.push(false);
+        self.hot.push(hot);
+        self.types.push(ty);
+        self.dirty.push(AtomicBool::new(false));
         self.changed_in.push(self.epoch);
-        self.by_name.insert(name.to_string(), id);
+        self.names.push(name, id);
+        self.first_user.push(NONE);
+        self.last_user.push(NONE);
+        for d in deps {
+            self.add_user(*d, id);
+        }
+        self.levels = None;
+        let height = hot.height as usize;
         if self.queue.len() <= height {
             self.queue.resize_with(height + 1, Vec::new);
         }
         id
+    }
+
+    /// Records that `user` uses `node`, at the end of `node`'s list of users.
+    fn add_user(&mut self, node: NodeId, user: NodeId) {
+        let edge = u32::try_from(self.edge_to.len()).expect("a graph holds at most u32::MAX edges");
+        self.edge_to.push(user.0);
+        self.edge_next.push(NONE);
+        let n = node.index();
+        match self.last_user[n] {
+            NONE => self.first_user[n] = edge,
+            last => self.edge_next[last as usize] = edge,
+        }
+        self.last_user[n] = edge;
+    }
+
+    #[inline]
+    fn evaluate(&mut self, hot: Hot) -> Value {
+        evaluate(
+            hot,
+            &self.float_ops,
+            &self.float_consts,
+            &self.general,
+            &self.values,
+            &mut self.scratch,
+        )
     }
 
     // ---------------------------------------------------------------- updating
@@ -271,18 +422,16 @@ impl Graph {
     /// must have the input's type, or be an error (for example, to say that a
     /// feed has failed).
     pub fn set_value(&mut self, id: NodeId, value: Value) -> Result<(), CalcError> {
-        let meta = self
-            .meta
-            .get(id.index())
-            .ok_or(CalcError::UnknownNode(id))?;
-        if !matches!(meta.kind, Kind::Input) {
-            return Err(CalcError::NotAnInput(meta.name.clone()));
+        let hot = self.hot.get(id.index()).ok_or(CalcError::UnknownNode(id))?;
+        if hot.kind != Kind::Input {
+            return Err(CalcError::NotAnInput(self.name(id).to_string()));
         }
+        let ty = self.types[id.index()];
         if let Some(found) = value.type_of() {
-            if found != meta.ty {
+            if found != ty {
                 return Err(CalcError::TypeMismatch {
-                    node: meta.name.clone(),
-                    expected: meta.ty,
+                    node: self.name(id).to_string(),
+                    expected: ty,
                     found: Some(found),
                 });
             }
@@ -316,38 +465,162 @@ impl Graph {
         // Lowest height first. Recalculating a node can only mark nodes that
         // are higher, so they are always still ahead of us in this loop.
         for height in 0..self.queue.len() {
-            let level = std::mem::take(&mut self.queue[height]);
-            for id in level {
-                let i = id.index();
-                self.dirty[i] = false;
-                let new_value = evaluate(
-                    &self.code[i],
-                    &self.float_ops,
-                    &self.values,
-                    &mut self.scratch,
-                );
-                report.recalculated += 1;
-                self.last_recalculated.push(id);
-
-                if !self.values[i].same_as(&new_value) {
-                    self.values[i] = new_value;
-                    self.changed_in[i] = epoch;
-                    report.changed += 1;
-                    self.mark_dependents(id);
+            let mut level = std::mem::take(&mut self.queue[height]);
+            // In id order: the same order however the level was filled, and
+            // kinder to memory.
+            level.sort_unstable();
+            if self.recalculate_in_parallel(&level) {
+                // Nodes on one level never use each other, so they were all
+                // worked out at once. Store the changed values, then pass the
+                // update on from all of them at once.
+                let mut changes = std::mem::take(&mut self.changes);
+                let mut changed_ids = std::mem::take(&mut self.changed_ids);
+                changed_ids.clear();
+                for (&id, change) in level.iter().zip(changes.drain(..)) {
+                    let i = id.index();
+                    *self.dirty[i].get_mut() = false;
+                    report.recalculated += 1;
+                    self.last_recalculated.push(id);
+                    if let Some(new_value) = change {
+                        self.values[i] = new_value;
+                        self.changed_in[i] = epoch;
+                        report.changed += 1;
+                        changed_ids.push(id);
+                    }
                 }
-                // else: cutoff. The value is the same, so nothing above needs to know.
+                self.mark_dependents_of_all(&changed_ids);
+                self.changes = changes;
+                self.changed_ids = changed_ids;
+            } else {
+                for &id in &level {
+                    let i = id.index();
+                    let new_value = self.evaluate(self.hot[i]);
+                    let change = (!self.values[i].same_as(&new_value)).then_some(new_value);
+                    self.apply(id, change, &mut report);
+                }
             }
+            // Hand the emptied list back, so the next update reuses its memory.
+            level.clear();
+            self.queue[height] = level;
         }
         report
     }
 
+    /// Records that a node was recalculated and, if its value changed
+    /// (`change` holds the new value), stores it and passes the update on.
+    #[inline]
+    fn apply(&mut self, id: NodeId, change: Option<Value>, report: &mut Report) {
+        let i = id.index();
+        *self.dirty[i].get_mut() = false;
+        report.recalculated += 1;
+        self.last_recalculated.push(id);
+        if let Some(new_value) = change {
+            self.values[i] = new_value;
+            self.changed_in[i] = report.epoch;
+            report.changed += 1;
+            self.mark_dependents(id);
+        }
+        // else: cutoff. The value is the same, so nothing above needs to know.
+    }
+
+    /// Recalculates a whole level on all cores, if it is big enough to be
+    /// worth it, leaving in `self.changes` the new value of each node whose
+    /// value changed. Returns false, doing nothing, for a small level.
+    #[cfg(feature = "parallel")]
+    fn recalculate_in_parallel(&mut self, level: &[NodeId]) -> bool {
+        use rayon::prelude::*;
+        if level.len() < self.parallel_threshold {
+            return false;
+        }
+        let Graph {
+            hot,
+            float_ops,
+            float_consts,
+            general,
+            values,
+            changes,
+            ..
+        } = self;
+        let (hot, float_ops, float_consts, general, values) =
+            (&*hot, &*float_ops, &*float_consts, &*general, &*values);
+        level
+            .par_iter()
+            .with_min_len(512)
+            .map_init(Scratch::default, |scratch, id| {
+                let i = id.index();
+                let new_value = evaluate(hot[i], float_ops, float_consts, general, values, scratch);
+                (!values[i].same_as(&new_value)).then_some(new_value)
+            })
+            .collect_into_vec(changes);
+        true
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    fn recalculate_in_parallel(&mut self, _level: &[NodeId]) -> bool {
+        false
+    }
+
+    /// Levels with at least this many nodes to recalculate are spread over
+    /// all CPU cores. The default suits most graphs; `usize::MAX` turns it
+    /// off, and `1` makes every level parallel (the tests use that). Without
+    /// the `parallel` feature, everything runs on one core regardless.
+    pub fn set_parallel_threshold(&mut self, nodes: usize) {
+        self.parallel_threshold = nodes.max(1);
+    }
+
     fn mark_dependents(&mut self, id: NodeId) {
-        for &dependent in &self.dependents[id.index()] {
-            let d = dependent.index();
-            if !self.dirty[d] {
-                self.dirty[d] = true;
-                self.queue[self.height[d] as usize].push(dependent);
+        let mut edge = self.first_user[id.index()];
+        while edge != NONE {
+            let user = self.edge_to[edge as usize];
+            let dirty = self.dirty[user as usize].get_mut();
+            if !*dirty {
+                *dirty = true;
+                self.queue[self.hot[user as usize].height as usize].push(NodeId(user));
             }
+            edge = self.edge_next[edge as usize];
+        }
+    }
+
+    /// Marks the users of every node in `changed`, on all cores if there are
+    /// enough of them.
+    #[cfg(feature = "parallel")]
+    fn mark_dependents_of_all(&mut self, changed: &[NodeId]) {
+        use rayon::prelude::*;
+        if changed.len() < self.parallel_threshold {
+            for &id in changed {
+                self.mark_dependents(id);
+            }
+            return;
+        }
+        let (first_user, edge_to, edge_next, dirty) = (
+            &self.first_user,
+            &self.edge_to,
+            &self.edge_next,
+            &self.dirty,
+        );
+        let marked: Vec<u32> = changed
+            .par_iter()
+            .with_min_len(512)
+            .flat_map_iter(|id| {
+                Users {
+                    edge: first_user[id.index()],
+                    edge_to,
+                    edge_next,
+                }
+                // `swap` returns the old flag: only the first thread to
+                // mark a node sees false, so each node is queued once.
+                .filter(|&user| !dirty[user as usize].swap(true, Ordering::Relaxed))
+            })
+            .collect();
+        for user in marked {
+            self.queue[self.hot[user as usize].height as usize].push(NodeId(user));
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    fn mark_dependents_of_all(&mut self, changed: &[NodeId]) {
+        for &id in changed {
+            self.mark_dependents(id);
         }
     }
 
@@ -377,49 +650,75 @@ impl Graph {
     }
 
     pub fn name(&self, id: NodeId) -> &str {
-        &self.meta[id.index()].name
+        self.names.get(id)
     }
 
     pub fn find(&self, name: &str) -> Option<NodeId> {
-        self.by_name.get(name).copied()
+        self.names.find(name)
     }
 
     pub fn node_type(&self, id: NodeId) -> Type {
-        self.meta[id.index()].ty
+        self.types[id.index()]
     }
 
     pub fn is_input(&self, id: NodeId) -> bool {
-        matches!(self.meta[id.index()].kind, Kind::Input)
+        self.hot[id.index()].kind == Kind::Input
     }
 
-    /// The nodes this node uses.
-    pub fn dependencies(&self, id: NodeId) -> &[NodeId] {
-        &self.meta[id.index()].deps
+    /// The nodes this node uses, in id order, without repeats.
+    pub fn dependencies(&self, id: NodeId) -> Vec<NodeId> {
+        let hot = self.hot[id.index()];
+        let mut deps = Vec::new();
+        match hot.kind {
+            Kind::Input => {}
+            Kind::Float => float_loads(self.float_program(hot), &mut deps),
+            Kind::General => self.general[hot.code as usize].loads(&mut deps),
+        }
+        deps.sort();
+        deps.dedup();
+        deps
     }
 
-    /// The nodes that use this node.
-    pub fn dependents(&self, id: NodeId) -> &[NodeId] {
-        &self.dependents[id.index()]
+    /// The nodes that use this node, in the order they were added.
+    pub fn dependents(&self, id: NodeId) -> Vec<NodeId> {
+        let mut users = Vec::new();
+        let mut edge = self.first_user[id.index()];
+        while edge != NONE {
+            users.push(NodeId(self.edge_to[edge as usize]));
+            edge = self.edge_next[edge as usize];
+        }
+        users
     }
 
     pub fn height(&self, id: NodeId) -> usize {
-        self.height[id.index()] as usize
+        self.hot[id.index()].height as usize
     }
 
-    /// The expression a calculated node computes (`None` for inputs).
-    pub fn expression(&self, id: NodeId) -> Option<&Ir> {
-        match &self.meta[id.index()].kind {
+    /// The expression a calculated node computes (`None` for inputs). It is
+    /// rebuilt from the compiled program, so it is exactly what runs.
+    pub fn expression(&self, id: NodeId) -> Option<Ir> {
+        let hot = self.hot[id.index()];
+        match hot.kind {
             Kind::Input => None,
-            Kind::Calculated(ir) => Some(ir),
+            Kind::Float => Some(decompile_float(
+                self.float_program(hot),
+                &self.float_consts,
+                self.id,
+            )),
+            Kind::General => Some(self.general[hot.code as usize].decompile(self.id)),
         }
     }
 
+    fn float_program(&self, hot: Hot) -> &[FloatOp] {
+        &self.float_ops[hot.code as usize..(hot.code + hot.len) as usize]
+    }
+
     pub fn len(&self) -> usize {
-        self.meta.len()
+        self.hot.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.meta.is_empty()
+        self.hot.is_empty()
     }
 
     /// The number of the last update (0 before the first).
@@ -433,7 +732,7 @@ impl Graph {
     }
 
     pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        (0..self.meta.len()).map(|i| NodeId(i as u32))
+        (0..self.hot.len()).map(|i| NodeId(i as u32))
     }
 
     // ---------------------------------------------------------------- checking
@@ -445,24 +744,31 @@ impl Graph {
         let mut fresh: Vec<Value> = Vec::with_capacity(self.values.len());
         // Ids are in creation order and a node only uses older nodes, so
         // going through them in order always has every dependency ready.
-        for (i, meta) in self.meta.iter().enumerate() {
-            let value = match &meta.kind {
-                Kind::Input => self.values[i].clone(),
+        for id in self.node_ids() {
+            let i = id.index();
+            let value = match self.expression(id) {
+                None => self.values[i].clone(),
                 // Deliberately the simple tree evaluator, not the compiled
                 // program, so this check is independent of the fast path.
-                Kind::Calculated(ir) => ir.eval(&fresh),
+                // (The tests separately check that rebuilding an expression
+                // from its program gives back exactly what was compiled.)
+                Some(ir) => ir.eval(&fresh),
             };
             if !value.same_as(&self.values[i]) {
                 return Err(format!(
                     "{:?} is {} after incremental updates, but {} when calculated from scratch",
-                    meta.name, self.values[i], value
+                    self.name(id),
+                    self.values[i],
+                    value
                 ));
             }
             if let Some(ty) = value.type_of() {
-                if ty != meta.ty {
+                if ty != self.types[i] {
                     return Err(format!(
                         "{:?} is declared {} but holds {}",
-                        meta.name, meta.ty, value
+                        self.name(id),
+                        self.types[i],
+                        value
                     ));
                 }
             }
@@ -474,18 +780,47 @@ impl Graph {
     /// Recalculates every node from scratch, in place. This is what you would
     /// do without incremental updates; the benchmark compares against it.
     pub fn recalculate_everything(&mut self) -> usize {
+        if !cfg!(feature = "parallel") || self.parallel_threshold == usize::MAX {
+            // One core: in id order, which reads memory front to back.
+            let mut count = 0;
+            for i in 0..self.hot.len() {
+                let hot = self.hot[i];
+                if hot.kind != Kind::Input {
+                    self.values[i] = self.evaluate(hot);
+                    count += 1;
+                }
+            }
+            return count;
+        }
+        // All cores: level by level, since nodes on one level never use each other.
+        let levels = self.levels.take().unwrap_or_else(|| {
+            let mut levels: Vec<Vec<NodeId>> = vec![Vec::new(); self.queue.len()];
+            for id in self.node_ids() {
+                let hot = self.hot[id.index()];
+                if hot.kind != Kind::Input {
+                    levels[hot.height as usize].push(id);
+                }
+            }
+            levels
+        });
         let mut count = 0;
-        for i in 0..self.code.len() {
-            if !matches!(self.code[i], Code::Input) {
-                self.values[i] = evaluate(
-                    &self.code[i],
-                    &self.float_ops,
-                    &self.values,
-                    &mut self.scratch,
-                );
-                count += 1;
+        for level in &levels {
+            count += level.len();
+            if self.recalculate_in_parallel(level) {
+                let mut changes = std::mem::take(&mut self.changes);
+                for (&id, change) in level.iter().zip(changes.drain(..)) {
+                    if let Some(value) = change {
+                        self.values[id.index()] = value;
+                    }
+                }
+                self.changes = changes;
+            } else {
+                for &id in level {
+                    self.values[id.index()] = self.evaluate(self.hot[id.index()]);
+                }
             }
         }
+        self.levels = Some(levels);
         count
     }
 
@@ -512,7 +847,7 @@ impl Graph {
 
     /// [`explain`](Self::explain) for a node given by id, for the untyped API.
     pub fn explain_node(&self, id: NodeId) -> String {
-        if id.index() >= self.meta.len() {
+        if id.index() >= self.hot.len() {
             return "(not a node of this graph)".into();
         }
         let mut out = String::new();
@@ -554,10 +889,9 @@ impl Graph {
     }
 
     fn summary(&self, id: NodeId) -> String {
-        let meta = &self.meta[id.index()];
-        let how = match &meta.kind {
-            Kind::Input => "(input)".to_string(),
-            Kind::Calculated(ir) => format!("← {}", self.render(ir)),
+        let how = match self.expression(id) {
+            None => "(input)".to_string(),
+            Some(ir) => format!("← {}", self.render(&ir)),
         };
         let changed = if self.epoch > 0 && self.changed_in[id.index()] == self.epoch {
             "  [changed]"
@@ -566,7 +900,7 @@ impl Graph {
         };
         format!(
             "{} = {}  {how}{changed}",
-            meta.name,
+            self.name(id),
             self.values[id.index()]
         )
     }
@@ -590,10 +924,9 @@ impl Graph {
         let rows: Vec<(usize, [String; 5], String)> = self
             .node_ids()
             .map(|id| {
-                let meta = &self.meta[id.index()];
-                let how = match &meta.kind {
-                    Kind::Input => "input".to_string(),
-                    Kind::Calculated(ir) => self.render(ir),
+                let how = match self.expression(id) {
+                    None => "input".to_string(),
+                    Some(ir) => self.render(&ir),
                 };
                 let mut marks = String::new();
                 if recalculated.contains(&id) {
@@ -604,12 +937,12 @@ impl Graph {
                 }
                 let cells = [
                     id.to_string(),
-                    meta.name.clone(),
-                    meta.ty.to_string(),
+                    self.name(id).to_string(),
+                    self.types[id.index()].to_string(),
                     format!("= {}", self.values[id.index()]),
                     how,
                 ];
-                (self.height[id.index()] as usize, cells, marks)
+                (self.height(id), cells, marks)
             })
             .collect();
 
@@ -657,22 +990,21 @@ impl Graph {
             "digraph watershed {\n  rankdir=BT;\n  node [fontname=\"Helvetica\", style=filled, fillcolor=white];\n",
         );
         for id in self.node_ids() {
-            let meta = &self.meta[id.index()];
             let changed = self.epoch > 0 && self.changed_in[id.index()] == self.epoch;
-            let (shape, how) = match &meta.kind {
-                Kind::Input => ("box", "input".to_string()),
-                Kind::Calculated(ir) => ("ellipse", self.render(ir)),
+            let (shape, how) = match self.expression(id) {
+                None => ("box", "input".to_string()),
+                Some(ir) => ("ellipse", self.render(&ir)),
             };
-            let style = match (&meta.kind, recalculated.contains(&id), changed) {
-                (Kind::Input, _, true) => ", fillcolor=\"#b2f2bb\"",
+            let style = match (self.is_input(id), recalculated.contains(&id), changed) {
+                (true, _, true) => ", fillcolor=\"#b2f2bb\"",
                 (_, true, true) => ", fillcolor=\"#ffd8a8\"",
                 (_, true, false) => ", fillcolor=\"#e9ecef\", style=\"filled,dashed\"",
                 _ => "",
             };
             let label = format!(
                 "{}: {}\n= {}\n{}",
-                meta.name,
-                meta.ty,
+                self.name(id),
+                self.types[id.index()],
                 self.values[id.index()],
                 how
             );
@@ -702,7 +1034,7 @@ impl Graph {
     }
 
     fn check_name(&self, name: &str) -> Result<(), CalcError> {
-        if self.by_name.contains_key(name) {
+        if self.names.find(name).is_some() {
             return Err(CalcError::DuplicateName(name.to_string()));
         }
         Ok(())
@@ -712,7 +1044,7 @@ impl Graph {
         if r.graph != self.id {
             return Err(CalcError::ForeignNode);
         }
-        if r.node.index() >= self.meta.len() {
+        if r.node.index() >= self.hot.len() {
             return Err(CalcError::UnknownNode(r.node));
         }
         Ok(())
@@ -733,13 +1065,64 @@ fn escape(s: &str) -> String {
 
 /// Recalculates one node from the values of the nodes it uses.
 #[inline]
-fn evaluate(code: &Code, float_ops: &[FloatOp], values: &[Value], scratch: &mut Scratch) -> Value {
-    match code {
-        Code::Float { start, len } => {
-            let start = *start as usize;
-            eval_float(&float_ops[start..start + *len as usize], values, scratch)
+fn evaluate(
+    hot: Hot,
+    float_ops: &[FloatOp],
+    float_consts: &[f64],
+    general: &[GeneralProgram],
+    values: &[Value],
+    scratch: &mut Scratch,
+) -> Value {
+    match hot.kind {
+        Kind::Float => {
+            let start = hot.code as usize;
+            eval_float(
+                &float_ops[start..start + hot.len as usize],
+                float_consts,
+                values,
+                scratch,
+            )
         }
-        Code::General(program) => program.eval(values, scratch),
-        Code::Input => unreachable!("inputs are never recalculated"),
+        Kind::General => general[hot.code as usize].eval(values, scratch),
+        Kind::Input => unreachable!("inputs are never recalculated"),
+    }
+}
+
+/// Walks the list of a node's users in the edge arrays.
+struct Users<'a> {
+    edge: u32,
+    edge_to: &'a [u32],
+    edge_next: &'a [u32],
+}
+
+impl Iterator for Users<'_> {
+    type Item = u32;
+    fn next(&mut self) -> Option<u32> {
+        if self.edge == NONE {
+            return None;
+        }
+        let user = self.edge_to[self.edge as usize];
+        self.edge = self.edge_next[self.edge as usize];
+        Some(user)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two names with the same 64-bit hash almost never happen by chance, so
+    /// force one: make "b"'s hash already point at "a".
+    #[test]
+    fn a_name_whose_hash_is_taken_is_still_found() {
+        let mut names = Names::default();
+        names.push("a", NodeId(0));
+        let hash_of_b = names.hasher.hash_one("b");
+        names.index.insert(hash_of_b, NodeId(0));
+        names.push("b", NodeId(1));
+        assert_eq!(names.find("a"), Some(NodeId(0)));
+        assert_eq!(names.find("b"), Some(NodeId(1)));
+        assert_eq!(names.find("c"), None);
+        assert_eq!(names.get(NodeId(1)), "b");
     }
 }

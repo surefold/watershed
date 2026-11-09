@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2.130"
-watershed-core = { version = "0.1.0", path = "../watershed-core" }
+watershed-core = { version = "0.1.0", path = "../watershed-core", default-features = false }
 
 [lints]
 workspace = true

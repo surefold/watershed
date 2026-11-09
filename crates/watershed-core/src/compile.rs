@@ -7,6 +7,9 @@
 //! instructions sit next to each other in memory. The tree evaluator is kept as
 //! the simple reference: the tests check that both always give the same answer.
 
+use std::sync::Arc;
+
+use crate::handle::{GraphId, NodeId, NodeRef};
 use crate::ir::{BinOp, Ir, UnOp};
 use crate::value::{Type, Value};
 
@@ -62,7 +65,9 @@ pub(crate) enum Op {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FloatOp {
     Load(u32),
-    Const(f64),
+    /// An index into the graph's pool of float constants, which keeps each
+    /// instruction to 8 bytes.
+    Const(u32),
     Add,
     Sub,
     Mul,
@@ -76,12 +81,12 @@ pub(crate) enum FloatOp {
 /// A compiled expression.
 #[derive(Debug, Clone)]
 pub(crate) enum Program {
-    /// Pure `f64` arithmetic, with no conditionals. Arithmetic on floats
-    /// cannot fail, so the only possible error is one held by a node it
-    /// reads, and the evaluator returns the first such error in reading
-    /// order, exactly as evaluating the tree would. The graph stores these
-    /// instructions for all its nodes back to back in one array.
-    Float(Vec<FloatOp>),
+    /// Pure `f64` arithmetic, with no conditionals, stored at
+    /// `float_ops[start..start + len]` in the arrays passed to [`compile`].
+    /// Arithmetic on floats cannot fail, so the only possible error is one
+    /// held by a node it reads, and the evaluator returns the first such
+    /// error in reading order, exactly as evaluating the tree would.
+    Float { start: u32, len: u32 },
     /// Everything else.
     General(GeneralProgram),
 }
@@ -97,6 +102,19 @@ impl GeneralProgram {
     pub(crate) fn eval(&self, values: &[Value], scratch: &mut Scratch) -> Value {
         eval_general(&self.ops, &self.constants, values, &mut scratch.values)
     }
+
+    /// Every node the program reads (possibly with repeats).
+    pub(crate) fn loads(&self, out: &mut Vec<NodeId>) {
+        out.extend(self.ops.iter().filter_map(|op| match op {
+            Op::Load(n) => Some(NodeId(*n)),
+            _ => None,
+        }));
+    }
+
+    /// Rebuilds the expression this program was compiled from.
+    pub(crate) fn decompile(&self, graph: GraphId) -> Ir {
+        decompile_general(&self.ops, &self.constants, graph)
+    }
 }
 
 /// Scratch space for evaluating programs, reused so evaluating allocates nothing.
@@ -106,33 +124,164 @@ pub(crate) struct Scratch {
     floats: Vec<f64>,
 }
 
-impl Program {
-    /// Compiles a type-checked expression. `type_of` gives each node's type.
-    pub(crate) fn compile(ir: &Ir, type_of: &dyn Fn(usize) -> Type) -> Program {
-        let mut float_ops = Vec::new();
-        if compile_float(ir, type_of, &mut float_ops) {
-            return Program::Float(float_ops);
-        }
-        let mut c = Compiler {
-            ops: Vec::new(),
-            constants: Vec::new(),
-            type_of,
-        };
-        c.emit(ir);
-        Program::General(GeneralProgram {
-            ops: c.ops.into(),
-            constants: c.constants.into(),
-        })
+/// Compiles a type-checked expression. `type_of` gives each node's type. A
+/// pure-float program is appended to `float_ops` and `float_consts`.
+pub(crate) fn compile(
+    ir: &Ir,
+    type_of: &dyn Fn(usize) -> Type,
+    float_ops: &mut Vec<FloatOp>,
+    float_consts: &mut Vec<f64>,
+) -> Program {
+    let (ops_before, consts_before) = (float_ops.len(), float_consts.len());
+    if compile_float(ir, type_of, float_ops, float_consts) {
+        let start = u32::try_from(ops_before).expect("too many instructions in one graph");
+        let len = u32::try_from(float_ops.len() - ops_before).expect("expression too long");
+        return Program::Float { start, len };
     }
+    // Not pure float arithmetic: undo what was appended and compile it generally.
+    float_ops.truncate(ops_before);
+    float_consts.truncate(consts_before);
+    let mut c = Compiler {
+        ops: Vec::new(),
+        constants: Vec::new(),
+        type_of,
+    };
+    c.emit(ir);
+    Program::General(GeneralProgram {
+        ops: c.ops.into(),
+        constants: c.constants.into(),
+    })
+}
+
+/// Every node a float program reads (possibly with repeats).
+pub(crate) fn float_loads(ops: &[FloatOp], out: &mut Vec<NodeId>) {
+    out.extend(ops.iter().filter_map(|op| match op {
+        FloatOp::Load(n) => Some(NodeId(*n)),
+        _ => None,
+    }));
+}
+
+/// Rebuilds the expression a float program was compiled from.
+pub(crate) fn decompile_float(ops: &[FloatOp], consts: &[f64], graph: GraphId) -> Ir {
+    let mut stack: Vec<Ir> = Vec::new();
+    for op in ops {
+        let ir = match *op {
+            FloatOp::Load(n) => Ir::Ref(NodeRef {
+                graph,
+                node: NodeId(n),
+            }),
+            FloatOp::Const(i) => Ir::Const(Value::F64(consts[i as usize])),
+            FloatOp::Neg | FloatOp::Abs => {
+                let a = stack.pop().expect("well-formed program");
+                let op = if matches!(op, FloatOp::Neg) {
+                    UnOp::Neg
+                } else {
+                    UnOp::Abs
+                };
+                Ir::Unary(op, Arc::new(a))
+            }
+            _ => {
+                let b = stack.pop().expect("well-formed program");
+                let a = stack.pop().expect("well-formed program");
+                let op = match op {
+                    FloatOp::Add => BinOp::Add,
+                    FloatOp::Sub => BinOp::Sub,
+                    FloatOp::Mul => BinOp::Mul,
+                    FloatOp::Div => BinOp::Div,
+                    FloatOp::Min => BinOp::Min,
+                    _ => BinOp::Max,
+                };
+                Ir::Binary(op, Arc::new(a), Arc::new(b))
+            }
+        };
+        stack.push(ir);
+    }
+    stack.pop().expect("well-formed program")
+}
+
+fn decompile_general(ops: &[Op], constants: &[Value], graph: GraphId) -> Ir {
+    // Jumps are absolute positions in `ops`, so work on ranges of the whole list.
+    fn range(ops: &[Op], constants: &[Value], graph: GraphId, mut pc: usize, end: usize) -> Ir {
+        let mut stack: Vec<Ir> = Vec::new();
+        while pc < end {
+            match ops[pc] {
+                Op::Branch {
+                    otherwise,
+                    end: done,
+                } => {
+                    let condition = stack.pop().expect("well-formed program");
+                    // The `then` branch ends with a jump to `done`, just before `otherwise`.
+                    let then = range(ops, constants, graph, pc + 1, otherwise as usize - 1);
+                    let other = range(ops, constants, graph, otherwise as usize, done as usize);
+                    stack.push(Ir::If(Arc::new(condition), Arc::new(then), Arc::new(other)));
+                    pc = done as usize;
+                    continue;
+                }
+                Op::Load(n) => stack.push(Ir::Ref(NodeRef {
+                    graph,
+                    node: NodeId(n),
+                })),
+                Op::Const(i) => stack.push(Ir::Const(constants[i as usize].clone())),
+                Op::Jump(_) => unreachable!("jumps only end a `then` branch"),
+                op => {
+                    let unary = match op {
+                        Op::NegF | Op::NegI => Some(UnOp::Neg),
+                        Op::AbsF | Op::AbsI => Some(UnOp::Abs),
+                        Op::Not => Some(UnOp::Not),
+                        _ => None,
+                    };
+                    if let Some(u) = unary {
+                        let a = stack.pop().expect("well-formed program");
+                        stack.push(Ir::Unary(u, Arc::new(a)));
+                    } else {
+                        let b = stack.pop().expect("well-formed program");
+                        let a = stack.pop().expect("well-formed program");
+                        let binary = match op {
+                            Op::AddF | Op::AddI => BinOp::Add,
+                            Op::SubF | Op::SubI => BinOp::Sub,
+                            Op::MulF | Op::MulI => BinOp::Mul,
+                            Op::DivF | Op::DivI => BinOp::Div,
+                            Op::MinF | Op::MinI => BinOp::Min,
+                            Op::MaxF | Op::MaxI => BinOp::Max,
+                            Op::And => BinOp::And,
+                            Op::Or => BinOp::Or,
+                            Op::CmpF(c) | Op::CmpI(c) | Op::CmpS(c) | Op::CmpB(c) => match c {
+                                Cmp::Lt => BinOp::Lt,
+                                Cmp::Le => BinOp::Le,
+                                Cmp::Gt => BinOp::Gt,
+                                Cmp::Ge => BinOp::Ge,
+                                Cmp::Eq => BinOp::Eq,
+                                Cmp::Ne => BinOp::Ne,
+                            },
+                            _ => unreachable!("every other instruction is handled above"),
+                        };
+                        stack.push(Ir::Binary(binary, Arc::new(a), Arc::new(b)));
+                    }
+                }
+            }
+            pc += 1;
+        }
+        stack.pop().expect("well-formed program")
+    }
+    range(ops, constants, graph, 0, ops.len())
 }
 
 /// Emits `ir` as float instructions, if it is pure `f64` arithmetic.
-fn compile_float(ir: &Ir, type_of: &dyn Fn(usize) -> Type, out: &mut Vec<FloatOp>) -> bool {
+fn compile_float(
+    ir: &Ir,
+    type_of: &dyn Fn(usize) -> Type,
+    out: &mut Vec<FloatOp>,
+    consts: &mut Vec<f64>,
+) -> bool {
     match ir {
-        Ir::Const(Value::F64(x)) => out.push(FloatOp::Const(*x)),
+        Ir::Const(Value::F64(x)) => {
+            let i = u32::try_from(consts.len()).expect("too many constants in one graph");
+            consts.push(*x);
+            out.push(FloatOp::Const(i));
+        }
         Ir::Ref(r) if type_of(r.node.index()) == Type::F64 => out.push(FloatOp::Load(r.node.0)),
         Ir::Unary(op @ (UnOp::Neg | UnOp::Abs), a) => {
-            if !compile_float(a, type_of, out) {
+            if !compile_float(a, type_of, out, consts) {
                 return false;
             }
             out.push(if *op == UnOp::Neg {
@@ -146,7 +295,7 @@ fn compile_float(ir: &Ir, type_of: &dyn Fn(usize) -> Type, out: &mut Vec<FloatOp
             a,
             b,
         ) => {
-            if !compile_float(a, type_of, out) || !compile_float(b, type_of, out) {
+            if !compile_float(a, type_of, out, consts) || !compile_float(b, type_of, out, consts) {
                 return false;
             }
             out.push(match op {
@@ -164,7 +313,12 @@ fn compile_float(ir: &Ir, type_of: &dyn Fn(usize) -> Type, out: &mut Vec<FloatOp
 }
 
 #[inline]
-pub(crate) fn eval_float(ops: &[FloatOp], values: &[Value], scratch: &mut Scratch) -> Value {
+pub(crate) fn eval_float(
+    ops: &[FloatOp],
+    consts: &[f64],
+    values: &[Value],
+    scratch: &mut Scratch,
+) -> Value {
     let stack = &mut scratch.floats;
     stack.clear();
     for op in ops {
@@ -176,7 +330,7 @@ pub(crate) fn eval_float(ops: &[FloatOp], values: &[Value], scratch: &mut Scratc
                 Value::Error(e) => return Value::Error(e.clone()),
                 other => return internal(format!("float program read {other}")),
             },
-            FloatOp::Const(x) => stack.push(x),
+            FloatOp::Const(i) => stack.push(consts[i as usize]),
             FloatOp::Neg | FloatOp::Abs => {
                 let Some(x) = stack.last_mut() else {
                     return internal("stack underflow".into());

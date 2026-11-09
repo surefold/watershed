@@ -45,8 +45,46 @@ pub enum Value {
     F64(f64),
     I64(i64),
     Bool(bool),
-    Str(Arc<str>),
-    Error(Arc<str>),
+    Str(Text),
+    Error(Text),
+}
+
+/// Shared, immutable text, as held by a [`Value`].
+///
+/// It is a single pointer, which keeps every `Value` to 16 bytes. Cloning it
+/// only bumps a reference count. Make one with `"text".into()`.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Text(Arc<String>);
+
+impl From<&str> for Text {
+    fn from(s: &str) -> Self {
+        Text(Arc::new(s.to_string()))
+    }
+}
+
+impl From<String> for Text {
+    fn from(s: String) -> Self {
+        Text(Arc::new(s))
+    }
+}
+
+impl std::ops::Deref for Text {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl fmt::Display for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self)
+    }
 }
 
 impl Value {
@@ -93,7 +131,8 @@ impl Value {
         }
     }
 
-    pub(crate) fn error(message: impl Into<Arc<str>>) -> Value {
+    /// An error value with this message.
+    pub fn error(message: impl Into<Text>) -> Value {
         Value::Error(message.into())
     }
 }
@@ -104,7 +143,7 @@ impl fmt::Display for Value {
             Value::F64(x) => write!(f, "{x}"),
             Value::I64(x) => write!(f, "{x}"),
             Value::Bool(x) => write!(f, "{x}"),
-            Value::Str(s) => write!(f, "{s:?}"),
+            Value::Str(s) => write!(f, "{:?}", &**s),
             Value::Error(e) => write!(f, "error: {e}"),
         }
     }
