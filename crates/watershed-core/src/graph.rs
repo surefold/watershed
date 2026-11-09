@@ -1089,12 +1089,14 @@ fn evaluate(
 }
 
 /// Walks the list of a node's users in the edge arrays.
+#[cfg(feature = "parallel")]
 struct Users<'a> {
     edge: u32,
     edge_to: &'a [u32],
     edge_next: &'a [u32],
 }
 
+#[cfg(feature = "parallel")]
 impl Iterator for Users<'_> {
     type Item = u32;
     fn next(&mut self) -> Option<u32> {
