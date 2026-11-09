@@ -284,6 +284,34 @@ fn run(
             return Err(format!("report {report:?} does not match what happened"));
         }
 
+        // Rule 6: the links agree in both directions. Each node lists every
+        // user exactly once, and a node is a user of exactly what it uses.
+        for id in g.node_ids() {
+            let users = g.dependents(id);
+            let unique: HashSet<NodeId> = users.iter().copied().collect();
+            if unique.len() != users.len() {
+                return Err(format!("{} lists a user twice: {users:?}", g.name(id)));
+            }
+            for user in users {
+                if !g.dependencies(user).contains(&id) {
+                    return Err(format!(
+                        "{} lists {} as a user, but it is not",
+                        g.name(id),
+                        g.name(user)
+                    ));
+                }
+            }
+            for dep in g.dependencies(id) {
+                if !g.dependents(dep).contains(&id) {
+                    return Err(format!(
+                        "{} uses {}, but is not listed as its user",
+                        g.name(id),
+                        g.name(dep)
+                    ));
+                }
+            }
+        }
+
         // Rule 5: a node is recalculated only after everything it uses.
         let position: std::collections::HashMap<NodeId, usize> = recalculated
             .iter()
