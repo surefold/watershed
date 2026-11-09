@@ -261,3 +261,29 @@ impl<T> Then<T> {
         ))
     }
 }
+
+// ---- Choosing by position: choose(index, [a, b, c]) ----
+
+/// The option at position `index`, counting from 0, like a spreadsheet's
+/// `CHOOSE`. Only that option is evaluated, and the node is only
+/// recalculated when the index or that option changes. An index out of range
+/// is an error.
+///
+/// ```
+/// use watershed_core::prelude::*;
+///
+/// let mut g = Graph::new();
+/// let source = g.input("source", 1_i64).unwrap();
+/// let feeds = [g.input("primary", 100.0).unwrap(), g.input("backup", 99.5).unwrap()];
+/// let price = g.define("price", choose(source, feeds)).unwrap();
+/// assert_eq!(g.get(price).unwrap(), 99.5);
+/// ```
+pub fn choose<T, O: IntoExpr<T>>(
+    index: impl IntoExpr<i64>,
+    options: impl IntoIterator<Item = O>,
+) -> Expr<T> {
+    Expr::from_ir(Ir::Choose(
+        index.into_expr().ir,
+        options.into_iter().map(|o| o.into_expr().ir).collect(),
+    ))
+}

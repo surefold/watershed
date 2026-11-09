@@ -27,6 +27,14 @@ println!("{}", g.get(total)?);  // 36
 println!("{}", g.explain(total));
 ```
 
+A node with a condition or a choice only waits on what it actually read.
+With `when(use_live).then(live).otherwise(end_of_day)`, while `use_live` is
+true a change to `end_of_day` recalculates nothing; switch it, and from then
+on only `end_of_day` matters. `choose(index, [a, b, c])` picks an option by
+position, like a spreadsheet's `CHOOSE`, and waits only on the one it picked.
+`g.reads(node)` says what a node read last time, and `explain` follows only
+those.
+
 Calculations are typed. `qty + region` (a number plus a string) does not
 compile, and neither does setting a calculated node.
 
@@ -204,7 +212,7 @@ web/                    the interactive page and its build script
   they jump between nodes scattered across the graph; placing nodes that
   change together near each other would help. Building is about 1 µs per
   node.
-- **Dynamic dependencies** (a node that changes what it uses), **collections**
+- **Collections**
   (one node per row, updated per row), **removing nodes**, **pull mode**
   (only calculating what someone is watching).
 - **Time travel and full lineage** (values as of an earlier update).

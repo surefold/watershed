@@ -70,6 +70,12 @@ fn random_expr(rng: &mut Rng, g: &Graph, ty: Type, depth: u32) -> Ir {
         return Ir::Const(random_value(rng, ty));
     }
     let sub = |rng: &mut Rng, ty: Type| Arc::new(random_expr(rng, g, ty, depth - 1));
+    // A choice by position, of any type. Its index is often out of range,
+    // which must be an error.
+    if rng.percent(15) {
+        let options = (0..1 + rng.below(3)).map(|_| sub(rng, ty)).collect();
+        return Ir::Choose(sub(rng, Type::I64), options);
+    }
     match ty {
         Type::F64 | Type::I64 => match rng.below(3) {
             0 => {
@@ -127,7 +133,11 @@ fn random_untyped_expr(rng: &mut Rng, g: &Graph, depth: u32) -> Ir {
         return random_expr(rng, g, ty, 0);
     }
     let sub = |rng: &mut Rng| Arc::new(random_untyped_expr(rng, g, depth - 1));
-    match rng.below(3) {
+    match rng.below(4) {
+        3 => {
+            let options = (0..rng.below(3)).map(|_| sub(rng)).collect();
+            Ir::Choose(sub(rng), options)
+        }
         0 => Ir::Unary(rng.pick(&[UnOp::Neg, UnOp::Abs, UnOp::Not]), sub(rng)),
         1 => {
             let op = rng.pick(&[
@@ -242,6 +252,8 @@ fn run(
         }
 
         let before: Vec<Value> = g.node_ids().map(|id| g.value(id).clone()).collect();
+        // What each node actually read when it was last calculated.
+        let reads_before: Vec<Vec<NodeId>> = g.node_ids().map(|id| g.reads(id)).collect();
         let report = g.stabilize();
         let changed: HashSet<NodeId> = g
             .node_ids()
@@ -258,16 +270,28 @@ fn run(
             return Err(format!("a node was recalculated twice: {recalculated:?}"));
         }
 
-        // Rule 3: exactly the nodes that use something that changed are
+        // Rule 3: exactly the nodes that read something that changed are
         // recalculated. Not one more (that would be wasted work), and not
-        // one fewer (that would leave a stale value).
+        // one fewer (that would leave a stale value). "Read" means read when
+        // the node was last calculated: a node with an `if` or a `choose`
+        // reads only the branch or option it took, so a change elsewhere
+        // cannot affect it.
         for id in g.node_ids() {
-            let uses_a_change = g.dependencies(id).iter().any(|d| changed.contains(d));
+            let read_a_change = reads_before[id.index()].iter().any(|d| changed.contains(d));
             let was_recalculated = recalculated_set.contains(&id);
-            if uses_a_change != was_recalculated {
+            if read_a_change != was_recalculated {
                 return Err(format!(
-                    "{}: uses a changed node = {uses_a_change}, but recalculated = {was_recalculated}",
+                    "{}: read a changed node = {read_a_change}, but recalculated = {was_recalculated}",
                     g.name(id)
+                ));
+            }
+            // A node only ever reads nodes its expression mentions.
+            let mentions = g.dependencies(id);
+            if let Some(stray) = g.reads(id).iter().find(|r| !mentions.contains(r)) {
+                return Err(format!(
+                    "{} read {}, which it does not mention",
+                    g.name(id),
+                    g.name(*stray)
                 ));
             }
         }

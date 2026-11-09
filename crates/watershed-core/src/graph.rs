@@ -13,6 +13,12 @@
 //!    date, and at most once per update, however many of its inputs changed.
 //! 4. **Cutoff:** if a recalculated node's value is identical to its old one,
 //!    the nodes above it are not marked, so the update stops spreading there.
+//! 5. **Dynamic dependencies:** a node with an `if` or a `choose` reads only
+//!    some of the nodes it mentions, depending on values. It records what it
+//!    actually read each time it is calculated, and when it is queued it is
+//!    skipped unless one of those nodes changed in this update. (Its height
+//!    still counts every node it mentions, so the order stays safe whichever
+//!    ones it reads next time.)
 
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -175,6 +181,9 @@ pub struct Graph {
     float_consts: Vec<f64>,
     /// Programs that are not pure float arithmetic.
     general: Vec<GeneralProgram>,
+    /// For each general program that is dynamic, the nodes its last
+    /// evaluation read (sorted); empty otherwise.
+    reads: Vec<Box<[u32]>>,
 
     /// Input changes recorded by `set`, applied by `stabilize`. A later `set`
     /// of the same input replaces an earlier one.
@@ -193,7 +202,7 @@ pub struct Graph {
     levels: Option<Vec<Vec<NodeId>>>,
     /// Results of recalculating a level in parallel: the new value for each
     /// node whose value changed. Kept between updates to reuse its memory.
-    changes: Vec<Option<Value>>,
+    changes: Vec<Outcome>,
     /// Nodes whose value changed on the level being processed in parallel.
     changed_ids: Vec<NodeId>,
 }
@@ -226,6 +235,7 @@ impl Graph {
             float_ops: Vec::new(),
             float_consts: Vec::new(),
             general: Vec::new(),
+            reads: Vec::new(),
             pending: BTreeMap::new(),
             queue: Vec::new(),
             epoch: 0,
@@ -348,6 +358,7 @@ impl Graph {
             },
             Program::General(program) => {
                 self.general.push(program);
+                self.reads.push(Box::default());
                 let code = u32::try_from(self.general.len() - 1).expect("too many programs");
                 Hot {
                     code,
@@ -401,14 +412,43 @@ impl Graph {
 
     #[inline]
     fn evaluate(&mut self, hot: Hot) -> Value {
-        evaluate(
+        let value = evaluate(
             hot,
             &self.float_ops,
             &self.float_consts,
             &self.general,
             &self.values,
             &mut self.scratch,
-        )
+        );
+        if self.is_dynamic(hot) {
+            self.reads[hot.code as usize] = self.scratch.reads();
+        }
+        value
+    }
+
+    fn is_dynamic(&self, hot: Hot) -> bool {
+        hot.kind == Kind::General && self.general[hot.code as usize].is_dynamic()
+    }
+
+    /// Whether a queued node can be skipped: it is dynamic, and nothing it
+    /// read last time changed in this update, so its value cannot change.
+    fn reads_unchanged(&self, hot: Hot) -> bool {
+        self.is_dynamic(hot)
+            && self.reads[hot.code as usize]
+                .iter()
+                .all(|&r| self.changed_in[r as usize] != self.epoch)
+    }
+
+    /// Recalculates one queued node on this thread, unless it can be skipped.
+    fn recalculate(&mut self, id: NodeId, report: &mut Report) {
+        let i = id.index();
+        let hot = self.hot[i];
+        if self.reads_unchanged(hot) {
+            return;
+        }
+        let new_value = self.evaluate(hot);
+        let change = (!self.values[i].same_as(&new_value)).then_some(new_value);
+        self.apply(id, change, report);
     }
 
     // ---------------------------------------------------------------- updating
@@ -484,26 +524,30 @@ impl Graph {
                 let mut changes = std::mem::take(&mut self.changes);
                 let mut changed_ids = std::mem::take(&mut self.changed_ids);
                 changed_ids.clear();
-                for (&id, change) in level.iter().zip(changes.drain(..)) {
+                for (&id, outcome) in level.iter().zip(changes.drain(..)) {
                     let i = id.index();
+                    match outcome {
+                        Outcome::Later => {
+                            self.recalculate(id, &mut report);
+                            continue;
+                        }
+                        Outcome::Same => {}
+                        Outcome::Changed(new_value) => {
+                            self.values[i] = new_value;
+                            self.changed_in[i] = epoch;
+                            report.changed += 1;
+                            changed_ids.push(id);
+                        }
+                    }
                     report.recalculated += 1;
                     self.last_recalculated.push(id);
-                    if let Some(new_value) = change {
-                        self.values[i] = new_value;
-                        self.changed_in[i] = epoch;
-                        report.changed += 1;
-                        changed_ids.push(id);
-                    }
                 }
                 self.mark_dependents_of_all(&changed_ids);
                 self.changes = changes;
                 self.changed_ids = changed_ids;
             } else {
                 for &id in &level {
-                    let i = id.index();
-                    let new_value = self.evaluate(self.hot[i]);
-                    let change = (!self.values[i].same_as(&new_value)).then_some(new_value);
-                    self.apply(id, change, &mut report);
+                    self.recalculate(id, &mut report);
                 }
             }
             // Hand the emptied list back, so the next update reuses its memory.
@@ -554,8 +598,18 @@ impl Graph {
             .with_min_len(512)
             .map_init(Scratch::default, |scratch, id| {
                 let i = id.index();
-                let new_value = evaluate(hot[i], float_ops, float_consts, general, values, scratch);
-                (!values[i].same_as(&new_value)).then_some(new_value)
+                let h = hot[i];
+                // Dynamic nodes record what they read, so they are left for
+                // this thread to do afterwards (they are rare in big levels).
+                if h.kind == Kind::General && general[h.code as usize].is_dynamic() {
+                    return Outcome::Later;
+                }
+                let new_value = evaluate(h, float_ops, float_consts, general, values, scratch);
+                if values[i].same_as(&new_value) {
+                    Outcome::Same
+                } else {
+                    Outcome::Changed(new_value)
+                }
             })
             .collect_into_vec(changes);
         true
@@ -725,6 +779,22 @@ impl Graph {
         deps
     }
 
+    /// The nodes this node's last calculation actually read. For a node with
+    /// an `if` or a `choose`, that can be fewer than its
+    /// [`dependencies`](Self::dependencies), and changes with the values;
+    /// for any other node it is the same.
+    pub fn reads(&self, id: NodeId) -> Vec<NodeId> {
+        let hot = self.hot[id.index()];
+        if self.is_dynamic(hot) {
+            self.reads[hot.code as usize]
+                .iter()
+                .map(|&r| NodeId(r))
+                .collect()
+        } else {
+            self.dependencies(id)
+        }
+    }
+
     /// The nodes that use this node, in the order they were added.
     pub fn dependents(&self, id: NodeId) -> Vec<NodeId> {
         let n = id.index();
@@ -859,9 +929,13 @@ impl Graph {
             count += level.len();
             if self.recalculate_in_parallel(level) {
                 let mut changes = std::mem::take(&mut self.changes);
-                for (&id, change) in level.iter().zip(changes.drain(..)) {
-                    if let Some(value) = change {
-                        self.values[id.index()] = value;
+                for (&id, outcome) in level.iter().zip(changes.drain(..)) {
+                    match outcome {
+                        Outcome::Same => {}
+                        Outcome::Changed(value) => self.values[id.index()] = value,
+                        Outcome::Later => {
+                            self.values[id.index()] = self.evaluate(self.hot[id.index()]);
+                        }
                     }
                 }
                 self.changes = changes;
@@ -916,7 +990,8 @@ impl Graph {
         out: &mut String,
     ) {
         let _ = write!(out, "{first}{}", self.summary(id));
-        let deps = self.dependencies(id);
+        // What the node actually read, which is what its value depends on.
+        let deps = self.reads(id);
         if !deps.is_empty() && !shown.insert(id) {
             out.push_str("  (see above)\n");
             return;
@@ -1067,8 +1142,16 @@ impl Graph {
             );
         }
         for id in self.node_ids() {
+            let reads = self.reads(id);
             for dep in self.dependencies(id) {
-                let _ = writeln!(out, "  n{} -> n{};", dep.0, id.0);
+                // A link the node did not read last time (the branch not
+                // taken, the options not chosen) is drawn faint and dashed.
+                let style = if reads.contains(&dep) {
+                    ""
+                } else {
+                    " [style=dashed, color=gray]"
+                };
+                let _ = writeln!(out, "  n{} -> n{}{style};", dep.0, id.0);
             }
         }
         out.push_str("}\n");
@@ -1174,6 +1257,16 @@ impl Iterator for Users<'_> {
         self.edge = next;
         Some(Use { user, height })
     }
+}
+
+/// What recalculating one node of a level in parallel found. (Only the
+/// `parallel` feature creates these.)
+#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+enum Outcome {
+    Same,
+    Changed(Value),
+    /// A dynamic node, to be done on this thread after the parallel part.
+    Later,
 }
 
 #[cfg(test)]

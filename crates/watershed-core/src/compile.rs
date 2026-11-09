@@ -59,6 +59,14 @@ pub(crate) enum Op {
         end: u32,
     },
     Jump(u32),
+    /// Pop an `i64` index and jump to the start of that option, read from
+    /// `tables[table + index]`; each option ends with a jump to `end`. An
+    /// index out of range, or an error, becomes the result: jump to `end`.
+    Switch {
+        table: u32,
+        count: u32,
+        end: u32,
+    },
 }
 
 /// Instructions for the fast path: arithmetic on `f64` only.
@@ -95,12 +103,36 @@ pub(crate) enum Program {
 pub(crate) struct GeneralProgram {
     ops: Box<[Op]>,
     constants: Box<[Value]>,
+    /// Where each `Switch`'s options start.
+    tables: Box<[u32]>,
+    /// Whether which nodes it reads depends on values (it has an `if` or a
+    /// `choose`). Evaluating such a program records what it read.
+    dynamic: bool,
 }
 
 impl GeneralProgram {
+    /// Evaluates the program. For a dynamic program, `scratch.reads` is left
+    /// holding the nodes this evaluation actually read.
     #[inline]
     pub(crate) fn eval(&self, values: &[Value], scratch: &mut Scratch) -> Value {
-        eval_general(&self.ops, &self.constants, values, &mut scratch.values)
+        let reads = if self.dynamic {
+            scratch.reads.clear();
+            Some(&mut scratch.reads)
+        } else {
+            None
+        };
+        eval_general(
+            &self.ops,
+            &self.constants,
+            &self.tables,
+            values,
+            &mut scratch.values,
+            reads,
+        )
+    }
+
+    pub(crate) fn is_dynamic(&self) -> bool {
+        self.dynamic
     }
 
     /// Every node the program reads (possibly with repeats).
@@ -113,7 +145,7 @@ impl GeneralProgram {
 
     /// Rebuilds the expression this program was compiled from.
     pub(crate) fn decompile(&self, graph: GraphId) -> Ir {
-        decompile_general(&self.ops, &self.constants, graph)
+        decompile_general(&self.ops, &self.constants, &self.tables, graph)
     }
 }
 
@@ -122,6 +154,17 @@ impl GeneralProgram {
 pub(crate) struct Scratch {
     values: Vec<Value>,
     floats: Vec<f64>,
+    reads: Vec<u32>,
+}
+
+impl Scratch {
+    /// The nodes the last evaluation of a dynamic program read, sorted and
+    /// without repeats.
+    pub(crate) fn reads(&mut self) -> Box<[u32]> {
+        self.reads.sort_unstable();
+        self.reads.dedup();
+        self.reads.as_slice().into()
+    }
 }
 
 /// Compiles a type-checked expression. `type_of` gives each node's type. A
@@ -144,12 +187,19 @@ pub(crate) fn compile(
     let mut c = Compiler {
         ops: Vec::new(),
         constants: Vec::new(),
+        tables: Vec::new(),
         type_of,
     };
     c.emit(ir);
+    let dynamic = c
+        .ops
+        .iter()
+        .any(|op| matches!(op, Op::Branch { .. } | Op::Switch { .. }));
     Program::General(GeneralProgram {
         ops: c.ops.into(),
         constants: c.constants.into(),
+        tables: c.tables.into(),
+        dynamic,
     })
 }
 
@@ -199,9 +249,16 @@ pub(crate) fn decompile_float(ops: &[FloatOp], consts: &[f64], graph: GraphId) -
     stack.pop().expect("well-formed program")
 }
 
-fn decompile_general(ops: &[Op], constants: &[Value], graph: GraphId) -> Ir {
+fn decompile_general(ops: &[Op], constants: &[Value], tables: &[u32], graph: GraphId) -> Ir {
     // Jumps are absolute positions in `ops`, so work on ranges of the whole list.
-    fn range(ops: &[Op], constants: &[Value], graph: GraphId, mut pc: usize, end: usize) -> Ir {
+    fn range(
+        ops: &[Op],
+        constants: &[Value],
+        tables: &[u32],
+        graph: GraphId,
+        mut pc: usize,
+        end: usize,
+    ) -> Ir {
         let mut stack: Vec<Ir> = Vec::new();
         while pc < end {
             match ops[pc] {
@@ -211,9 +268,42 @@ fn decompile_general(ops: &[Op], constants: &[Value], graph: GraphId) -> Ir {
                 } => {
                     let condition = stack.pop().expect("well-formed program");
                     // The `then` branch ends with a jump to `done`, just before `otherwise`.
-                    let then = range(ops, constants, graph, pc + 1, otherwise as usize - 1);
-                    let other = range(ops, constants, graph, otherwise as usize, done as usize);
+                    let then = range(
+                        ops,
+                        constants,
+                        tables,
+                        graph,
+                        pc + 1,
+                        otherwise as usize - 1,
+                    );
+                    let other = range(
+                        ops,
+                        constants,
+                        tables,
+                        graph,
+                        otherwise as usize,
+                        done as usize,
+                    );
                     stack.push(Ir::If(Arc::new(condition), Arc::new(then), Arc::new(other)));
+                    pc = done as usize;
+                    continue;
+                }
+                Op::Switch {
+                    table,
+                    count,
+                    end: done,
+                } => {
+                    let index = stack.pop().expect("well-formed program");
+                    let starts = &tables[table as usize..(table + count) as usize];
+                    let options = (0..starts.len())
+                        .map(|k| {
+                            let start = starts[k] as usize;
+                            // Each option ends with a jump to `done`, just before the next option.
+                            let stop = starts.get(k + 1).map_or(done as usize, |&s| s as usize) - 1;
+                            Arc::new(range(ops, constants, tables, graph, start, stop))
+                        })
+                        .collect();
+                    stack.push(Ir::Choose(Arc::new(index), options));
                     pc = done as usize;
                     continue;
                 }
@@ -263,7 +353,7 @@ fn decompile_general(ops: &[Op], constants: &[Value], graph: GraphId) -> Ir {
         }
         stack.pop().expect("well-formed program")
     }
-    range(ops, constants, graph, 0, ops.len())
+    range(ops, constants, tables, graph, 0, ops.len())
 }
 
 /// Emits `ir` as float instructions, if it is pure `f64` arithmetic.
@@ -365,8 +455,10 @@ pub(crate) fn eval_float(
 fn eval_general(
     ops: &[Op],
     constants: &[Value],
+    tables: &[u32],
     values: &[Value],
     stack: &mut Vec<Value>,
+    mut reads: Option<&mut Vec<u32>>,
 ) -> Value {
     stack.clear();
     let mut pc = 0;
@@ -374,7 +466,12 @@ fn eval_general(
         let op = ops[pc];
         pc += 1;
         match op {
-            Op::Load(i) => stack.push(values[i as usize].clone()),
+            Op::Load(i) => {
+                if let Some(reads) = reads.as_deref_mut() {
+                    reads.push(i);
+                }
+                stack.push(values[i as usize].clone());
+            }
             Op::Const(i) => stack.push(constants[i as usize].clone()),
 
             Op::AddF => float(stack, |x, y| x + y),
@@ -433,6 +530,20 @@ fn eval_general(
                 other => return internal(format!("condition evaluated to {other:?}")),
             },
             Op::Jump(to) => pc = to as usize,
+            Op::Switch { table, count, end } => match stack.pop() {
+                Some(Value::I64(i)) if (0..i64::from(count)).contains(&i) => {
+                    pc = tables[table as usize + i as usize] as usize;
+                }
+                Some(Value::I64(i)) => {
+                    stack.push(crate::ir::out_of_range(i, count as usize));
+                    pc = end as usize;
+                }
+                Some(err @ Value::Error(_)) => {
+                    stack.push(err);
+                    pc = end as usize;
+                }
+                other => return internal(format!("choice index evaluated to {other:?}")),
+            },
         }
     }
     debug_assert_eq!(stack.len(), 1, "a program leaves exactly one value");
@@ -444,6 +555,7 @@ fn eval_general(
 struct Compiler<'a> {
     ops: Vec<Op>,
     constants: Vec<Value>,
+    tables: Vec<u32>,
     type_of: &'a dyn Fn(usize) -> Type,
 }
 
@@ -556,6 +668,30 @@ impl Compiler<'_> {
                 let end = self.here();
                 self.ops[branch_at] = Op::Branch { otherwise, end };
                 self.ops[jump_at] = Op::Jump(end);
+            }
+            Ir::Choose(index, options) => {
+                self.emit(index);
+                let switch_at = self.ops.len();
+                let table = u32::try_from(self.tables.len()).expect("too many choices");
+                let count = u32::try_from(options.len()).expect("too many options");
+                self.ops.push(Op::Switch {
+                    table,
+                    count,
+                    end: 0,
+                }); // patched below
+                self.tables.resize(self.tables.len() + options.len(), 0);
+                let mut jumps = Vec::with_capacity(options.len());
+                for (k, option) in options.iter().enumerate() {
+                    self.tables[table as usize + k] = self.here();
+                    self.emit(option);
+                    jumps.push(self.ops.len());
+                    self.ops.push(Op::Jump(0)); // patched below
+                }
+                let end = self.here();
+                self.ops[switch_at] = Op::Switch { table, count, end };
+                for at in jumps {
+                    self.ops[at] = Op::Jump(end);
+                }
             }
         }
     }
