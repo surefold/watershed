@@ -12,3 +12,9 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# `cargo test` only: the random-graph property tests spend most of their time in
+# unoptimised code. Light optimisation makes them about four times faster for a few
+# seconds of extra compiling. Debug assertions and overflow checks stay on.
+[profile.test]
+opt-level = 1
