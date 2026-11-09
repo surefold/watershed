@@ -13,13 +13,16 @@ use watershed_core::{NodeId, Value};
 
 /// The example models. Each is a file of ordinary watershed code; the page
 /// shows the same file as the source of the graph it draws.
-const PRESETS: [(&str, &str); 3] = [
+const PRESETS: [(&str, &str); 4] = [
+    ("crypto", include_str!("presets/crypto.rs")),
     ("order", include_str!("presets/order.rs")),
     ("thermostat", include_str!("presets/thermostat.rs")),
     ("portfolio", include_str!("presets/portfolio.rs")),
 ];
 
 mod presets {
+    #[path = "crypto.rs"]
+    pub mod crypto;
     #[path = "order.rs"]
     pub mod order;
     #[path = "portfolio.rs"]
@@ -30,6 +33,7 @@ mod presets {
 
 fn build(name: &str, g: &mut Graph) -> Option<Result<(), CalcError>> {
     Some(match name {
+        "crypto" => presets::crypto::build(g),
         "order" => presets::order::build(g),
         "thermostat" => presets::thermostat::build(g),
         "portfolio" => presets::portfolio::build(g),
@@ -50,7 +54,7 @@ pub struct Model {
 
 #[wasm_bindgen]
 impl Model {
-    /// Builds one of the example models: "order", "thermostat" or "portfolio".
+    /// Builds one of the example models: "crypto", "order", "thermostat" or "portfolio".
     #[wasm_bindgen(constructor)]
     pub fn new(preset: &str) -> Result<Model, JsError> {
         let mut graph = Graph::new();

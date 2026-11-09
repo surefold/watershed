@@ -81,6 +81,18 @@ input[type="range"] { width: 100%; accent-color: var(--rain); }
 .switch { display: flex; align-items: center; gap: 8px; font: 600 0.8rem var(--mono); cursor: pointer; }
 .switch input { width: 18px; height: 18px; accent-color: var(--rain); }
 
+.live { display: grid; gap: 6px; padding-bottom: 12px; border-bottom: 1px dashed var(--rule); }
+.live-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.live-top strong { font-size: 0.9rem; flex: 1; min-width: 0; }
+.live-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--still); flex: none; }
+.live[data-state="live"] .live-dot { background: var(--rain); box-shadow: 0 0 0 0 var(--rain); animation: pulse 1.6s ease-out infinite; }
+.live[data-state="offline"] .live-dot { background: var(--sediment); }
+.live-stats { font: 0.78rem/1.5 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.live-note { font-size: 0.82rem; color: var(--muted); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--rain) 60%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+button.small { padding: 4px 10px; font-size: 0.78rem; }
+input[type="range"]:disabled { accent-color: var(--water); opacity: 0.9; }
+
 .catchment { padding: 0; overflow: hidden; }
 .catchment-scroll { overflow-x: auto; }
 .catchment svg { display: block; width: 100%; min-width: 620px; height: auto; }
@@ -174,6 +186,11 @@ footer { color: var(--muted); font-size: 0.85rem; }
     <div class="workbench">
       <div class="panel">
         <h3>Inputs</h3>
+        <div class="live" id="live" data-state="connecting" hidden>
+          <div class="live-top"><span class="live-dot" aria-hidden="true"></span><strong id="live-state" role="status">Connecting to Coinbase…</strong><button class="secondary small" id="live-toggle" type="button">Pause</button></div>
+          <p class="live-stats" id="live-stats"></p>
+          <p class="live-note" id="live-note">Prices stream from Coinbase's public feed. Move the risk limit yourself.</p>
+        </div>
         <div class="inputs" id="inputs"><p class="empty">Starting the engine…</p></div>
       </div>
 
@@ -239,10 +256,18 @@ footer { color: var(--muted); font-size: 0.85rem; }
 import init, { Model, Benchmark } from "./pkg/watershed_web.js";
 
 const PRESETS = [
+  {
+    id: "crypto",
+    label: "Live crypto book",
+    // Coinbase product → the input it drives.
+    feed: { "BTC-USD": "btc", "ETH-USD": "eth", "SOL-USD": "sol", "AVAX-USD": "avax", "LINK-USD": "link", "ADA-USD": "ada", "XRP-USD": "xrp", "DOGE-USD": "doge" },
+  },
   { id: "order", label: "Online order" },
   { id: "thermostat", label: "Greenhouse" },
   { id: "portfolio", label: "Trading book" },
 ];
+// Coinbase's public market data feed: no account or key needed.
+const FEED_URL = "wss://ws-feed.exchange.coinbase.com";
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const $ = (id) => document.getElementById(id);
 const SVG = "http://www.w3.org/2000/svg";
@@ -252,36 +277,17 @@ const W = 150, H = 48, GAP_X = 22, GAP_Y = 54, PAD = 28, LABEL = 40;
 let model = null, nodes = [], values = [], selected = 0, preset = "order";
 let elements = new Map(), edges = [], timers = [];
 const log = [];
-
-// ---------------------------------------------------------------- start
-
-try {
-  await init();
-} catch (error) {
-  for (const id of ["inputs", "results"]) {
-    $(id).innerHTML = "";
-    const p = document.createElement("p");
-    p.className = "status bad";
-    p.textContent = "The engine could not start in this browser: " + (error?.message ?? error) + ". It needs WebAssembly, which every current browser supports.";
-    $(id).append(p);
-    $(id).closest(".panel").classList.add("failed");
-  }
-  $("build").disabled = true;
-  throw error;
-}
-
-for (const p of PRESETS) {
-  const b = document.createElement("button");
-  b.className = "tab"; b.type = "button"; b.role = "tab"; b.id = "tab-" + p.id;
-  b.textContent = p.label;
-  b.addEventListener("click", () => load(p.id));
-  $("tabs").append(b);
-}
-load("order");
+// The live price feed, while a live model is open.
+let feed = null;
+// Each input's slider and readout, so live prices can move them.
+const inputEls = new Map();
+// How long the engine itself took over the last update, in ms.
+let engineMs = 0;
 
 // ---------------------------------------------------------------- models
 
 function load(name) {
+  stopFeed();
   preset = name;
   for (const b of $("tabs").children) b.setAttribute("aria-selected", String(b.id === "tab-" + name));
   model?.free();
@@ -295,6 +301,8 @@ function load(name) {
   renderGraph();
   renderExplain();
   $("source").innerHTML = highlight(Model.source(name) ?? "");
+  const p = PRESETS.find((p) => p.id === name);
+  if (p.feed) startFeed(p.feed);
 }
 
 function sliderRange(v) {
@@ -309,6 +317,8 @@ function sliderRange(v) {
 function renderInputs() {
   const box = $("inputs");
   box.innerHTML = "";
+  inputEls.clear();
+  const fed = new Set(Object.values(PRESETS.find((p) => p.id === preset).feed ?? {}));
   for (const n of nodes.filter((n) => n.input)) {
     const v = values[n.id];
     const field = document.createElement("div");
@@ -326,6 +336,9 @@ function renderInputs() {
       const slider = field.querySelector("input");
       const out = field.querySelector("output");
       out.textContent = format(v.value);
+      inputEls.set(n.id, { slider, out });
+      // Prices on a live feed move by themselves.
+      if (fed.has(n.name)) slider.disabled = true;
       slider.addEventListener("input", () => {
         const x = Number(slider.value);
         out.textContent = format(x);
@@ -337,8 +350,11 @@ function renderInputs() {
   }
 }
 
-function update() {
-  const report = JSON.parse(model.update());
+function update(live = false) {
+  const started = performance.now();
+  const raw = model.update();
+  engineMs = performance.now() - started;
+  const report = JSON.parse(raw);
   values = JSON.parse(model.values());
   const changed = new Set(report.changed);
   const stopped = report.recalculated.filter((id) => !changed.has(id));
@@ -347,7 +363,7 @@ function update() {
     log.length = Math.min(log.length, 6);
   }
   renderLog();
-  animate(report, changed);
+  animate(report, changed, live);
   renderExplain();
   const problem = model.check();
   if (problem) console.error("incremental result differs from a full recalculation:", problem);
@@ -379,41 +395,60 @@ function renderLog() {
 // ---------------------------------------------------------------- the graph
 
 
+// Levels wider than this wrap onto extra rows, so nodes stay readable.
+const MAX_ROW = 5;
+
 function layout() {
   const maxH = Math.max(...nodes.map((n) => n.height));
-  const rows = Array.from({ length: maxH + 1 }, () => []);
-  for (const n of nodes) rows[n.height].push(n);
+  const levels = Array.from({ length: maxH + 1 }, () => []);
+  for (const n of nodes) levels[n.height].push(n);
+  const widest = Math.min(MAX_ROW, Math.max(...levels.map((l) => l.length)));
+  const inner = widest * (W + GAP_X) - GAP_X;
+
+  // Visual rows, bottom (inputs) first; a level wider than MAX_ROW becomes several rows.
   const x = new Map();
-  const widest = Math.max(...rows.map((r) => r.length));
-  const width = widest * (W + GAP_X) - GAP_X + PAD * 2 + LABEL;
-  rows.forEach((row, h) => {
+  const rows = [];
+  levels.forEach((level, h) => {
     // Order each level by where the nodes it uses sit, so lines cross less.
     if (h > 0) {
-      const centre = (n) => n.deps.reduce((s, d) => s + x.get(d), 0) / Math.max(1, n.deps.length);
-      row.sort((a, b) => centre(a) - centre(b) || a.id - b.id);
+      const centre = (n) => n.deps.reduce((sum, d) => sum + x.get(d), 0) / Math.max(1, n.deps.length);
+      level.sort((a, b) => centre(a) - centre(b) || a.id - b.id);
     }
-    const rowWidth = row.length * (W + GAP_X) - GAP_X;
-    const start = LABEL + PAD + (width - LABEL - PAD * 2 - rowWidth) / 2;
-    row.forEach((n, i) => x.set(n.id, start + i * (W + GAP_X) + W / 2));
+    for (let k = 0; k < level.length; k += MAX_ROW) {
+      const row = { height: h, first: k === 0, nodes: level.slice(k, k + MAX_ROW) };
+      const rowWidth = row.nodes.length * (W + GAP_X) - GAP_X;
+      const start = LABEL + PAD + (inner - rowWidth) / 2;
+      row.nodes.forEach((n, i) => x.set(n.id, start + i * (W + GAP_X) + W / 2));
+      rows.push(row);
+    }
   });
-  const height = (maxH + 1) * (H + GAP_Y) - GAP_Y + PAD * 2;
-  const y = (n) => PAD + (maxH - n.height) * (H + GAP_Y) + H / 2;
-  return { x, y, width, height, maxH };
+
+  const width = inner + PAD * 2 + LABEL;
+  const height = rows.length * (H + GAP_Y) - GAP_Y + PAD * 2;
+  const rowY = (r) => PAD + (rows.length - 1 - r) * (H + GAP_Y) + H / 2;
+  const yOf = new Map();
+  rows.forEach((row, r) => row.nodes.forEach((n) => yOf.set(n.id, rowY(r))));
+  const labels = rows.map((row, r) => ({
+    y: rowY(r),
+    text: row.first ? (row.height === 0 ? "INPUTS" : "L" + row.height) : "",
+  }));
+  return { x, y: (n) => yOf.get(n.id), width, height, labels };
 }
 
 function renderGraph() {
   const svg = $("graph");
   svg.innerHTML = "";
   elements = new Map(); edges = [];
-  const { x, y, width, height, maxH } = layout();
+  const { x, y, width, height, labels } = layout();
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
 
-  for (let h = 0; h <= maxH; h++) {
+  for (const label of labels) {
+    if (!label.text) continue;
     const t = document.createElementNS(SVG, "text");
     t.setAttribute("class", "level-label");
     t.setAttribute("x", 8);
-    t.setAttribute("y", PAD + (maxH - h) * (H + GAP_Y) + H / 2 + 4);
-    t.textContent = h === 0 ? "INPUTS" : "L" + h;
+    t.setAttribute("y", label.y + 4);
+    t.textContent = label.text;
     svg.append(t);
   }
   for (const n of nodes) {
@@ -455,12 +490,13 @@ function paintValues() {
   }
 }
 
-function animate(report, changed) {
+function animate(report, changed, live = false) {
   timers.forEach(clearTimeout); timers = [];
   for (const g of elements.values()) g.classList.remove("rain", "sediment", "still");
   for (const e of edges) e.path.classList.remove("flow");
   for (const id of report.changed) if (nodes[id].input) elements.get(id).classList.add("rain");
-  const step = reduceMotion ? 0 : 70;
+  // Live ticks arrive too often to stagger; show each update at once.
+  const step = reduceMotion || live ? 0 : 70;
   report.recalculated.forEach((id, k) => {
     const apply = () => {
       elements.get(id).classList.add(changed.has(id) ? "sediment" : "still");
@@ -562,6 +598,123 @@ function showResults(count, full, one, batch, problem) {
   }
 }
 
+// ---------------------------------------------------------------- live prices
+
+function startFeed(products) {
+  const byProduct = new Map();
+  for (const [product, name] of Object.entries(products)) {
+    byProduct.set(product, nodes.find((n) => n.name === name).id);
+  }
+  feed = {
+    byProduct, ws: null, paused: false, opened: false, retry: 0, timer: 0, frame: 0,
+    pending: new Map(), ticks: 0, updates: 0, engineTotal: 0, since: performance.now(),
+  };
+  $("live").hidden = false;
+  $("live-toggle").textContent = "Pause";
+  $("live-note").textContent = "Prices stream from Coinbase's public feed. Move the risk limit yourself.";
+  renderStats();
+  connect();
+}
+
+function connect() {
+  const f = feed;
+  if (!f || f.paused) return;
+  setLive("connecting", "Connecting to Coinbase…");
+  let ws;
+  try {
+    ws = new WebSocket(FEED_URL);
+  } catch (error) {
+    console.error("could not open the price feed:", error);
+    return unreachable(f);
+  }
+  f.ws = ws;
+  ws.onopen = () => {
+    f.opened = true;
+    f.retry = 0;
+    ws.send(JSON.stringify({ type: "subscribe", product_ids: [...f.byProduct.keys()], channels: ["ticker"] }));
+    setLive("live", "Live · Coinbase");
+  };
+  ws.onmessage = (event) => {
+    let message;
+    try { message = JSON.parse(event.data); } catch { return; }
+    if (message.type !== "ticker") return;
+    const id = f.byProduct.get(message.product_id);
+    const price = Number(message.price);
+    if (id === undefined || !Number.isFinite(price)) return;
+    f.ticks++;
+    // Keep only the latest price per coin, and update the engine at most once a frame.
+    f.pending.set(id, price);
+    if (!f.frame) f.frame = requestAnimationFrame(() => flush(f));
+  };
+  ws.onclose = () => {
+    if (feed !== f || f.paused) return;
+    if (!f.opened) return unreachable(f);
+    const delay = Math.min(30, 2 ** f.retry++);
+    setLive("offline", `Connection lost. Reconnecting in ${delay} s…`);
+    f.timer = setTimeout(connect, delay * 1000);
+  };
+}
+
+function unreachable(f) {
+  if (feed !== f) return;
+  setLive("offline", "Live prices can't connect here");
+  const note = $("live-note");
+  note.innerHTML = "";
+  note.append("This page couldn't reach Coinbase. Some viewers, including claude.ai, block connections to other sites. See it live at ");
+  const a = document.createElement("a");
+  a.href = "https://surefold.dev/watershed/";
+  a.textContent = "surefold.dev/watershed";
+  note.append(a, ". The sliders still work here.");
+  // Without a feed, the prices are the user's to move.
+  for (const id of f.byProduct.values()) {
+    const el = inputEls.get(id);
+    if (el) el.slider.disabled = false;
+  }
+}
+
+function flush(f) {
+  f.frame = 0;
+  if (feed !== f || f.paused || !f.pending.size) return;
+  for (const [id, price] of f.pending) {
+    model.set_number(id, price);
+    const el = inputEls.get(id);
+    if (el) { el.slider.value = price; el.out.textContent = format(price); }
+  }
+  f.pending.clear();
+  update(true);
+  f.updates++;
+  f.engineTotal += engineMs;
+  renderStats();
+}
+
+function renderStats() {
+  const f = feed;
+  if (!f) return;
+  const seconds = Math.max(1, (performance.now() - f.since) / 1000);
+  const engine = f.updates ? fmtMs(f.engineTotal / f.updates) : "–";
+  $("live-stats").textContent =
+    `${f.ticks.toLocaleString()} ticks (${(f.ticks / seconds).toFixed(1)}/s) · ${f.updates.toLocaleString()} updates · engine ${engine} per update`;
+}
+
+function setLive(state, text) {
+  $("live").dataset.state = state;
+  $("live-state").textContent = text;
+}
+
+function disconnect(f) {
+  clearTimeout(f.timer);
+  if (f.frame) cancelAnimationFrame(f.frame);
+  f.frame = 0;
+  if (f.ws) { f.ws.onclose = null; f.ws.close(); f.ws = null; }
+}
+
+function stopFeed() {
+  if (!feed) return;
+  disconnect(feed);
+  feed = null;
+  $("live").hidden = true;
+}
+
 // ---------------------------------------------------------------- helpers
 
 function frame() { return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0))); }
@@ -586,4 +739,47 @@ function highlight(src) {
     return body + comment;
   }).join("\n");
 }
+// ---------------------------------------------------------------- start
+//
+// Startup runs last, once every constant and function above exists.
+
+async function start() {
+  try {
+    await init();
+  } catch (error) {
+    for (const id of ["inputs", "results"]) {
+      $(id).innerHTML = "";
+      const p = document.createElement("p");
+      p.className = "status bad";
+      p.textContent = "The engine could not start in this browser: " + (error?.message ?? error) + ". It needs WebAssembly, which every current browser supports.";
+      $(id).append(p);
+      $(id).closest(".panel").classList.add("failed");
+    }
+    $("build").disabled = true;
+    throw error;
+  }
+
+  for (const p of PRESETS) {
+    const b = document.createElement("button");
+    b.className = "tab"; b.type = "button"; b.role = "tab"; b.id = "tab-" + p.id;
+    b.textContent = p.label;
+    b.addEventListener("click", () => load(p.id));
+    $("tabs").append(b);
+  }
+  load("crypto");
+
+  $("live-toggle").addEventListener("click", () => {
+    if (!feed) return;
+    feed.paused = !feed.paused;
+    $("live-toggle").textContent = feed.paused ? "Resume" : "Pause";
+    if (feed.paused) {
+      disconnect(feed);
+      setLive("offline", "Paused");
+    } else {
+      connect();
+    }
+  });
+}
+
+await start();
 </script>
