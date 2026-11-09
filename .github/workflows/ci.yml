@@ -86,6 +86,9 @@ jobs:
       - run: cargo run --locked --release --example benchmark
       # A 100,000-row collection, checked against adding its rows up from scratch.
       - run: cargo run --locked --release --example collection -- 100000
+      # The build file tool on its example: show it, and explain a value.
+      - run: cargo run --locked -p watershed-build --bin wsb -- -f crates/watershed-build/examples/build.ws show
+      - run: cargo run --locked -p watershed-build --bin wsb -- -f crates/watershed-build/examples/build.ws -e CI=true explain app.jvmTarget
 
   web:
     name: Web demo (WebAssembly)

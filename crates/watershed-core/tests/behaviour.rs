@@ -840,3 +840,96 @@ fn a_grouping_added_after_rows_includes_them() -> Result {
     ));
     Ok(())
 }
+
+// ---------------------------------------------------------------- redefining
+
+#[test]
+fn a_redefined_node_keeps_its_old_value_until_the_next_update() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 2.0)?;
+    let b = g.input("b", 10.0)?;
+    let x = g.define("x", a * 2.0)?;
+    let y = g.define("y", x + 1.0)?;
+    g.redefine(x, b * 3.0)?;
+    assert_eq!(g.get(x)?, 4.0); // not yet
+    g.stabilize();
+    assert_eq!(g.get(x)?, 30.0);
+    assert_eq!(g.get(y)?, 31.0); // what uses it follows
+    assert_eq!(recalculated(&g), ["x", "y"]);
+    g.check_consistency().unwrap();
+
+    // Now `a` is nothing to do with it.
+    g.set(a, 5.0)?;
+    g.stabilize();
+    assert!(recalculated(&g).is_empty());
+    g.set(b, 1.0)?;
+    g.stabilize();
+    assert_eq!(g.get(y)?, 4.0);
+    Ok(())
+}
+
+#[test]
+fn a_redefinition_that_gives_the_same_value_stops_there() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 2.0)?;
+    let x = g.define("x", a * 2.0)?;
+    g.define("y", x + 1.0)?;
+    g.redefine(x, a + a)?;
+    g.stabilize();
+    assert_eq!(recalculated(&g), ["x"]);
+    Ok(())
+}
+
+#[test]
+fn a_node_can_be_redefined_to_use_nodes_made_after_it() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 1_i64)?;
+    let x = g.define("x", a + 1)?;
+    let y = g.define("y", x * 10)?;
+    // `later` sits above `x`, so `x` (and `y` above it) must move up.
+    let later = g.define("later", a * 100)?;
+    g.redefine(x, later + 1)?;
+    g.stabilize();
+    assert_eq!(g.get(y)?, 1010);
+    let (x, later) = (g.find("x").unwrap(), g.find("later").unwrap());
+    assert!(g.height(x) > g.height(later));
+    g.set(a, 2)?;
+    g.stabilize();
+    assert_eq!(recalculated(&g), ["later", "x", "y"]);
+    assert_eq!(g.get(y)?, 2010);
+    g.check_consistency().unwrap();
+    Ok(())
+}
+
+#[test]
+fn a_node_cannot_be_redefined_to_use_itself() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 1.0)?;
+    let x = g.define("x", a + 1.0)?;
+    let y = g.define("y", x * 2.0)?;
+    let err = g.redefine(x, y + 1.0).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "\"x\" cannot use \"y\" → \"x\": that would make it depend on itself"
+    );
+    Ok(())
+}
+
+#[test]
+fn redefining_cannot_change_a_type_or_touch_an_input() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 1.0)?;
+    g.define("x", a + 1.0)?;
+    // The typed API cannot even express a change of type; the untyped one
+    // refuses it.
+    let x = g.find("x").unwrap();
+    let err = g.redefine_ir(x, Ir::Const(Value::Bool(true))).unwrap_err();
+    assert!(matches!(err, CalcError::TypeMismatch { .. }), "{err}");
+    let a = g.find("a").unwrap();
+    let err = g.redefine_ir(a, Ir::Const(Value::F64(2.0))).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "\"a\" is an input, so it cannot be redefined"
+    );
+    Ok(())
+}

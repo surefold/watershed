@@ -104,6 +104,39 @@ uv sync && uv run pytest
 Calling from Python adds little: on a 210,000-node graph, changing one price
 and updating takes about 29 µs from Python.
 
+## Build files
+
+`crates/watershed-build` is a typed build file language for JVM projects
+(Kotlin first), with `wsb`, a tool to check, show, explain and watch build
+files. Every value in the file is a node, so saving an edit works out only
+what it changes, and any value can say where it came from:
+
+```kotlin
+val ci = env("CI") == "true"
+
+module core {
+    jvmTarget = if (ci) 21 else 17
+}
+
+module app {
+    dependsOn(core)
+    jvmTarget = core.jvmTarget
+    dependency("com.fasterxml.jackson.core:jackson-databind:2.17.1")
+}
+```
+
+```bash
+cargo run -p watershed-build --bin wsb -- -f crates/watershed-build/examples/build.ws explain app.jvmTarget
+```
+
+A misspelt setting is an error with a suggestion, not a key that is silently
+ignored. See [its README](crates/watershed-build/README.md) for the language,
+and `editors/watershed-build` for highlighting in IntelliJ and VS Code.
+
+A node's formula can be changed after it is made: `g.redefine(node, expr)`.
+Like `set`, it takes effect at the next update, which recalculates the node
+and whatever its new value reaches.
+
 ## Try it in your browser
 
 `web/` is an interactive page running the real engine, compiled to
@@ -152,7 +185,7 @@ Every line should say `ok`. There are four kinds of test:
 
 | Where | What it checks |
 |---|---|
-| `crates/watershed-core/tests/behaviour.rs` | 21 tests, each one promise, named as a sentence: `only_nodes_that_depend_on_a_change_are_recalculated`, `an_update_stops_where_a_value_comes_out_the_same`, `a_node_reached_by_two_paths_is_recalculated_once_and_never_sees_half_an_update`, … Read the names: they are the specification. |
+| `crates/watershed-core/tests/behaviour.rs` | 44 tests, each one promise, named as a sentence: `only_nodes_that_depend_on_a_change_are_recalculated`, `an_update_stops_where_a_value_comes_out_the_same`, `a_node_reached_by_two_paths_is_recalculated_once_and_never_sees_half_an_update`, … Read the names: they are the specification. |
 | `crates/watershed-core/tests/properties.rs` | Builds thousands of random graphs (with awkward values: NaN, infinity, integer overflow, failed inputs), applies random updates, and after every update checks the rules below. |
 | `src/lib.rs` (doc examples) | The example above runs, and two examples that must *not* compile (number + string, setting a calculated node) are checked to fail. |
 
@@ -186,6 +219,8 @@ and the tests failed every time:
 | Let the type checker accept `&&` on numbers | ✅ |
 | Compare floats with `==` for cutoff (so NaN never equals NaN) | ✅ |
 | Evaluate the wrong branch of an `if` | ✅ |
+| Forget to recalculate a node given a new formula by `redefine` | ✅ |
+| Skip a redefined node with an `if` because what it read under its old formula did not change | ✅ |
 
 ### 4. Ask for a second opinion
 
@@ -270,9 +305,11 @@ crates/watershed-core/
   src/error.rs    errors
   tests/          behaviour and property tests
   examples/       tour and benchmark
+crates/watershed-build/ a typed build file language on the engine, and the `wsb` tool
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
 crates/watershed-web/   the engine as WebAssembly, with three example models
 web/                    the interactive page and its build script
+editors/watershed-build/  syntax highlighting for build files (IntelliJ, VS Code)
 ```
 
 ## Not done yet
@@ -283,8 +320,9 @@ web/                    the interactive page and its build script
   node.
 - **Collections:** grouping by a calculated column (groups are by a field
   today), and building rows faster (about 2.4 µs per node).
-- **Removing nodes** in general (collections reuse rows instead), and **pull
-  mode** (only calculating what someone is watching).
+- **Removing nodes** in general (collections reuse rows instead, and build
+  files redefine a removed value as a constant), and **pull mode** (only
+  calculating what someone is watching).
 - **Time travel and full lineage** (values as of an earlier update).
 - **Bindings** for the JVM, a formula parser for end users, publishing the
   Python package, and the cluster.
