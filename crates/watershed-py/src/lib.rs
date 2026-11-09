@@ -677,6 +677,34 @@ struct Collection {
 }
 
 impl Collection {
+    fn grouping(
+        slf: &Bound<'_, Self>,
+        name: &str,
+        op: AggregateOp,
+        by: &Bound<'_, Expr>,
+        of: Option<&Bound<'_, Expr>>,
+    ) -> PyResult<Groups> {
+        let py = slf.py();
+        let mut this = slf.borrow_mut();
+        let graph = this.graph.clone_ref(py);
+        let by_type = by.get().ty;
+        let index = this
+            .inner
+            .add_grouping(
+                &mut graph.bind(py).borrow_mut().inner,
+                name,
+                op,
+                &by.get().ir,
+                of.map(|o| &*o.get().ir),
+            )
+            .map_err(to_py_err)?;
+        Ok(Groups {
+            collection: slf.clone().unbind(),
+            index,
+            key_type: by_type,
+        })
+    }
+
     fn total(
         &mut self,
         py: Python<'_>,
@@ -746,6 +774,43 @@ impl Collection {
         self.total(py, name, AggregateOp::Count, None)
     }
 
+    /// Totals per group: the sum of `of` over the rows with each value of
+    /// the field `by`. Returns a `Groups`, which works like a read-only dict
+    /// from each key to its total's node.
+    fn group_sum(
+        slf: &Bound<'_, Self>,
+        name: &str,
+        by: &Bound<'_, Expr>,
+        of: &Bound<'_, Expr>,
+    ) -> PyResult<Groups> {
+        Collection::grouping(slf, name, AggregateOp::Sum, by, Some(of))
+    }
+
+    /// Totals per group: the smallest value of `of` in each group.
+    fn group_min(
+        slf: &Bound<'_, Self>,
+        name: &str,
+        by: &Bound<'_, Expr>,
+        of: &Bound<'_, Expr>,
+    ) -> PyResult<Groups> {
+        Collection::grouping(slf, name, AggregateOp::Min, by, Some(of))
+    }
+
+    /// Totals per group: the largest value of `of` in each group.
+    fn group_max(
+        slf: &Bound<'_, Self>,
+        name: &str,
+        by: &Bound<'_, Expr>,
+        of: &Bound<'_, Expr>,
+    ) -> PyResult<Groups> {
+        Collection::grouping(slf, name, AggregateOp::Max, by, Some(of))
+    }
+
+    /// Totals per group: how many rows each group has.
+    fn group_count(slf: &Bound<'_, Self>, name: &str, by: &Bound<'_, Expr>) -> PyResult<Groups> {
+        Collection::grouping(slf, name, AggregateOp::Count, by, None)
+    }
+
     /// Adds a row, or changes the given fields of an existing one:
     /// `upsert("o-1", qty=2, price=9.99)`. A new row needs every field.
     /// Takes effect at the next `stabilize()`.
@@ -810,6 +875,71 @@ impl Collection {
     }
 }
 
+/// A grouped total: one total per distinct value of a field. Works like a
+/// read-only dict from each key to its total's node: `groups["EU"].value`,
+/// `groups.keys()`, `"EU" in groups`, `groups.to_dict()`.
+#[pyclass(module = "watershed")]
+struct Groups {
+    collection: Py<Collection>,
+    index: usize,
+    key_type: Type,
+}
+
+#[pymethods]
+impl Groups {
+    /// The total's node for one group, or None if no row has had that key.
+    fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Option<Expr>> {
+        let key = value_for(self.key_type, key)?;
+        let c = self.collection.borrow(py);
+        let Some(id) = c.inner.group_node(self.index, &key) else {
+            return Ok(None);
+        };
+        Ok(Some(Graph::node(c.graph.bind(py), id)))
+    }
+
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Expr> {
+        self.get(py, key)?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(key.to_string()))
+    }
+
+    /// The keys of the groups that have rows, sorted.
+    fn keys(&self, py: Python<'_>) -> Vec<String> {
+        self.collection.borrow(py).inner.group_keys_of(self.index)
+    }
+
+    fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let key = value_for(self.key_type, key)?;
+        let text = match &key {
+            Value::Str(s) => s.to_string(),
+            other => other.to_string(),
+        };
+        Ok(self.keys(py).contains(&text))
+    }
+
+    fn __len__(&self, py: Python<'_>) -> usize {
+        self.keys(py).len()
+    }
+
+    /// Every group that has rows, with its total as of the last update.
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let dict = PyDict::new(py);
+        let c = self.collection.borrow(py);
+        let graph = c.graph.bind(py).borrow();
+        for key in c.inner.group_keys_of(self.index) {
+            let value = match self.key_type {
+                Type::Str => Value::Str(key.clone().into()),
+                Type::I64 => Value::I64(key.parse().unwrap_or_default()),
+                Type::Bool => Value::Bool(key == "true"),
+                Type::F64 => Value::F64(key.parse().unwrap_or_default()),
+            };
+            if let Some(id) = c.inner.group_node(self.index, &value) {
+                dict.set_item(to_py(py, &value)?, to_py(py, graph.inner.value(id))?)?;
+            }
+        }
+        Ok(dict.unbind())
+    }
+}
+
 // ---------------------------------------------------------------- module
 
 /// watershed: an incremental calculation engine. Change an input, and only
@@ -820,6 +950,7 @@ fn watershed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Expr>()?;
     m.add_class::<Collection>()?;
     m.add_class::<Report>()?;
+    m.add_class::<Groups>()?;
     m.add_class::<When>()?;
     m.add_class::<Then>()?;
     m.add_function(wrap_pyfunction!(when, m)?)?;

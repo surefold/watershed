@@ -230,3 +230,44 @@ def test_stabilize_lets_other_python_threads_run():
     g.stabilize()
     assert total.value == 2000.0
     assert not math.isnan(total.value)
+
+
+def test_groups_total_rows_per_key_and_follow_rows_that_move():
+    g = ws.Graph()
+    sales = g.collection("sales")
+    region = sales.field("region", str)
+    amount = sales.field("amount", float)
+    by_region = sales.group_sum("by_region", region, amount)
+    counts = sales.group_count("count_by_region", region)
+    sales.upsert("s1", region="EU", amount=10)
+    sales.upsert("s2", region="EU", amount=5)
+    sales.upsert("s3", region="US", amount=7)
+    g.stabilize()
+    assert by_region.to_dict() == {"EU": 15.0, "US": 7.0}
+    assert by_region["EU"].value == 15.0
+    assert "US" in by_region and "APAC" not in by_region
+    assert by_region.get("APAC") is None
+    with pytest.raises(KeyError):
+        by_region["APAC"]
+
+    sales.upsert("s2", region="US")
+    g.stabilize()
+    assert by_region.to_dict() == {"EU": 10.0, "US": 12.0}
+    assert counts.to_dict() == {"EU": 1, "US": 2}
+
+    sales.remove("s1")
+    g.stabilize()
+    assert by_region.keys() == ["US"] and len(by_region) == 1
+    g.check_consistency()
+
+
+def test_groups_by_an_int_field():
+    g = ws.Graph()
+    c = g.collection("c")
+    team = c.field("team", int)
+    points = c.field("points", int)
+    best = c.group_max("best", team, points)
+    for i in range(30):
+        c.upsert(f"p{i}", team=i % 3, points=i)
+    g.stabilize()
+    assert best.to_dict() == {0: 27, 1: 28, 2: 29}

@@ -754,3 +754,89 @@ fn a_nan_row_makes_min_and_max_nan_however_many_rows_were_removed() -> Result {
     assert_eq!(g.get(largest)?, 2.0);
     Ok(())
 }
+
+// ---------------------------------------------------------------- groups
+
+#[test]
+fn groups_total_their_rows_and_follow_rows_that_move() -> Result {
+    let mut g = Graph::new();
+    let mut sales = Collection::new(&g, "sales");
+    let region = sales.field::<String>("region")?;
+    let amount = sales.field::<f64>("amount")?;
+    let by_region = sales.group_sum(&mut g, "by_region", region, amount)?;
+    let counts = sales.group_count(&mut g, "count_by_region", region)?;
+    sales.upsert(&mut g, "s1", &[region.is("EU".into()), amount.is(10.0)])?;
+    sales.upsert(&mut g, "s2", &[region.is("EU".into()), amount.is(5.0)])?;
+    sales.upsert(&mut g, "s3", &[region.is("US".into()), amount.is(7.0)])?;
+    g.stabilize();
+    let eu = sales.group(&g, by_region, "EU".to_string()).unwrap();
+    let us = sales.group(&g, by_region, "US".to_string()).unwrap();
+    assert_eq!((g.get(eu)?, g.get(us)?), (15.0, 7.0));
+    assert_eq!(sales.group_keys(by_region), ["EU", "US"]);
+
+    // s2 moves to the US: both groups update by that one row.
+    sales.upsert(&mut g, "s2", &[region.is("US".into())])?;
+    g.stabilize();
+    assert_eq!((g.get(eu)?, g.get(us)?), (10.0, 12.0));
+    let us_count = sales.group(&g, counts, "US".to_string()).unwrap();
+    assert_eq!(g.get(us_count)?, 2);
+
+    // A new group appears with its first row.
+    sales.upsert(&mut g, "s4", &[region.is("APAC".into()), amount.is(1.0)])?;
+    g.stabilize();
+    let apac = sales.group(&g, by_region, "APAC".to_string()).unwrap();
+    assert_eq!(g.get(apac)?, 1.0);
+    assert!(sales.group(&g, by_region, "LATAM".to_string()).is_none());
+
+    // A group that empties keeps its node (at 0) but leaves the keys.
+    sales.remove(&mut g, "s1")?;
+    g.stabilize();
+    assert_eq!(g.get(eu)?, 0.0);
+    assert_eq!(sales.group_keys(by_region), ["APAC", "US"]);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn changing_one_rows_group_recalculates_only_that_row_and_its_two_groups() -> Result {
+    let mut g = Graph::new();
+    let mut c = Collection::new(&g, "c");
+    let key = c.field::<i64>("key")?;
+    let x = c.field::<f64>("x")?;
+    let totals = c.group_sum(&mut g, "t", key, x)?;
+    for i in 0..1000 {
+        c.upsert(&mut g, &format!("r{i}"), &[key.is(i % 10), x.is(1.0)])?;
+    }
+    g.stabilize();
+    c.upsert(&mut g, "r5", &[key.is(7)])?;
+    let report = g.stabilize();
+    // r5's "in group 5" turns false and its new "in group 7" turns true; the
+    // two group totals update. Nothing else in 1,000 rows and 10 groups.
+    assert_eq!(recalculated(&g), ["c[5].t=5", "c[5].t=7", "t[5]", "t[7]"]);
+    assert_eq!(report.recalculated, 4);
+    let five = c.group(&g, totals, 5).unwrap();
+    let seven = c.group(&g, totals, 7).unwrap();
+    assert_eq!((g.get(five)?, g.get(seven)?), (99.0, 101.0));
+    Ok(())
+}
+
+#[test]
+fn a_grouping_added_after_rows_includes_them() -> Result {
+    let mut g = Graph::new();
+    let mut c = Collection::new(&g, "c");
+    let team = c.field::<String>("team")?;
+    let points = c.field::<i64>("points")?;
+    c.upsert(&mut g, "a", &[team.is("red".into()), points.is(3)])?;
+    c.upsert(&mut g, "b", &[team.is("blue".into()), points.is(4)])?;
+    c.upsert(&mut g, "c", &[team.is("red".into()), points.is(5)])?;
+    g.stabilize();
+    let best = c.group_max(&mut g, "best", team, points)?;
+    g.stabilize();
+    let red = c.group(&g, best, "red".to_string()).unwrap();
+    assert_eq!(g.get(red)?, 5);
+    assert!(matches!(
+        c.group_sum(&mut g, "best", team, points),
+        Err(CalcError::DuplicateName(_))
+    ));
+    Ok(())
+}
