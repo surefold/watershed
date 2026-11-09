@@ -13,6 +13,9 @@ concurrency:
 permissions:
   contents: read
 
+# Every job runs on the surefold organisation's self-hosted runner (DESKTOP-BVAR25E), the
+# same one Doorlist uses. With one runner instance the jobs run one after another.
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -20,7 +23,7 @@ env:
 jobs:
   format:
     name: Formatting
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,7 +33,7 @@ jobs:
 
   lint:
     name: Lint (clippy)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,7 +46,7 @@ jobs:
 
   test:
     name: Tests (Rust ${{ matrix.rust }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     strategy:
       fail-fast: false
       matrix:
@@ -63,7 +66,7 @@ jobs:
 
   docs:
     name: Docs
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -74,7 +77,7 @@ jobs:
 
   examples:
     name: Examples
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -89,7 +92,7 @@ jobs:
 
   web:
     name: Web demo (WebAssembly)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -100,7 +103,7 @@ jobs:
 
   python:
     name: Python bindings (uv)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
