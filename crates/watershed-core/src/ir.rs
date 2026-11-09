@@ -111,6 +111,23 @@ impl Ir {
         }
     }
 
+    /// Whether two expressions have exactly the same structure, using
+    /// [`Value::same_as`] for constants.
+    pub fn same_as(&self, other: &Ir) -> bool {
+        match (self, other) {
+            (Ir::Const(a), Ir::Const(b)) => a.same_as(b) && a.type_of() == b.type_of(),
+            (Ir::Ref(a), Ir::Ref(b)) => a == b,
+            (Ir::Unary(o1, a1), Ir::Unary(o2, a2)) => o1 == o2 && a1.same_as(a2),
+            (Ir::Binary(o1, a1, b1), Ir::Binary(o2, a2, b2)) => {
+                o1 == o2 && a1.same_as(a2) && b1.same_as(b2)
+            }
+            (Ir::If(c1, t1, e1), Ir::If(c2, t2, e2)) => {
+                c1.same_as(c2) && t1.same_as(t2) && e1.same_as(e2)
+            }
+            _ => false,
+        }
+    }
+
     /// Every node this expression refers to (possibly with repeats).
     pub fn refs(&self, out: &mut Vec<NodeRef>) {
         match self {

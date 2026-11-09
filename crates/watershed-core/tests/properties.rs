@@ -159,13 +159,34 @@ fn add_random_node(rng: &mut Rng, g: &mut Graph, n: usize, nonsense: bool) -> bo
         let ir = random_untyped_expr(rng, g, 3);
         // May be refused, but must never panic, and if accepted the rest of
         // the test checks that its values always have its declared type.
-        g.define_ir(&name, ir).is_ok()
+        match g.define_ir(&name, ir.clone()) {
+            Ok(id) => {
+                let rebuilt = g
+                    .expression(id)
+                    .expect("a calculated node has an expression");
+                assert!(
+                    rebuilt.same_as(&ir),
+                    "compiling and rebuilding changed the expression"
+                );
+                true
+            }
+            Err(_) => false,
+        }
     } else {
         let ty = rng.pick(&TYPES);
         let ir = random_expr(rng, g, ty, 3);
         let id = g
-            .define_ir(&name, ir)
+            .define_ir(&name, ir.clone())
             .expect("a well-typed expression must be accepted");
+        // The consistency check evaluates expressions rebuilt from compiled
+        // programs, so rebuilding must give back exactly what was compiled.
+        let rebuilt = g
+            .expression(id)
+            .expect("a calculated node has an expression");
+        assert!(
+            rebuilt.same_as(&ir),
+            "compiling and rebuilding changed the expression:\n  {ir:?}\n  {rebuilt:?}"
+        );
         assert_eq!(g.node_type(id), ty);
         true
     }
@@ -173,15 +194,20 @@ fn add_random_node(rng: &mut Rng, g: &mut Graph, n: usize, nonsense: bool) -> bo
 
 /// Builds a random graph, then applies random updates. After each one it
 /// checks every rule. Returns a description of the first rule broken.
+/// With `parallel`, every level is recalculated on all cores, however small.
 fn run(
     seed: u64,
     inputs: usize,
     calculated: usize,
     updates: usize,
     nonsense: bool,
+    parallel: bool,
 ) -> Result<(), String> {
     let mut rng = Rng(seed);
     let mut g = Graph::new();
+    if parallel {
+        g.set_parallel_threshold(1);
+    }
     let mut input_ids = Vec::new();
     for i in 0..inputs {
         let ty = rng.pick(&TYPES);
@@ -265,7 +291,7 @@ fn run(
             .map(|(i, &id)| (id, i))
             .collect();
         for &id in &recalculated {
-            for dep in g.dependencies(id) {
+            for dep in &g.dependencies(id) {
                 if let Some(&p) = position.get(dep) {
                     if p > position[&id] {
                         return Err(format!(
@@ -290,8 +316,9 @@ proptest! {
         inputs in 1usize..8,
         calculated in 0usize..40,
         updates in 1usize..20,
+        parallel in any::<bool>(),
     ) {
-        run(seed, inputs, calculated, updates, false).map_err(TestCaseError::fail)?;
+        run(seed, inputs, calculated, updates, false, parallel).map_err(TestCaseError::fail)?;
     }
 
     #[test]
@@ -300,8 +327,9 @@ proptest! {
         inputs in 1usize..8,
         calculated in 0usize..40,
         updates in 1usize..10,
+        parallel in any::<bool>(),
     ) {
-        run(seed, inputs, calculated, updates, true).map_err(TestCaseError::fail)?;
+        run(seed, inputs, calculated, updates, true, parallel).map_err(TestCaseError::fail)?;
     }
 }
 
@@ -310,6 +338,7 @@ proptest! {
 #[test]
 fn larger_random_graphs_always_match_a_full_recalculation() {
     for seed in 0..20 {
-        run(seed, 30, 2000, 50, false).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        run(seed, 30, 2000, 50, false, seed % 2 == 1)
+            .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
     }
 }

@@ -126,29 +126,53 @@ above.
 cargo run --release --example benchmark
 ```
 
-On a graph of about a million nodes shaped like a real workload (10,000 market
-prices → 500,000 trades → a tree of totals), on one core, median of many runs:
+On a graph shaped like a real workload (10,000 market prices → trades → a
+tree of totals), on a 4-core machine, median of many runs:
 
-| | time | nodes recalculated |
-|---|---|---|
-| recalculate everything | 28 ms | 1,000,000 |
-| one price changes | 0.21 ms | ~1,300 |
-| 1% of prices change together | 14 ms | ~68,000 |
+| about 1,000,000 nodes | 1 core | 4 cores | nodes recalculated |
+|---|---|---|---|
+| recalculate everything | 18.6 ms | 9–11 ms | 1,000,000 |
+| one price changes | 0.16 ms | 0.16 ms | ~1,300 |
+| 1% of prices change together | 7.4 ms | 7.7 ms | ~68,000 |
+| 10% of prices change together | 24 ms | 25 ms | ~353,000 |
 
-One price changing is over 100× faster than recalculating everything. With 1%
-changing it is only about 2×, because changes near the bottom of a tree of
-totals reach a large share of the totals above them.
+It scales to very large graphs, at about 170–190 bytes per node:
 
-How it is fast:
+| nodes | memory | build | recalculate everything (4 cores) | one price changes |
+|---|---|---|---|---|
+| 1,000,000 | 184 MB | 0.8 s | 11 ms | 0.16 ms |
+| 10,000,000 | 1.8 GB | 10 s | 93 ms | 2.5 ms |
+| 50,000,000 | 8.5 GB | 59 s | 444 ms | 17 ms |
+
+(One price changing costs more in bigger graphs because each of the 10,000
+prices then feeds more trades.)
+
+```bash
+cargo run --release --example benchmark -- 25000000   # 25 million trades, ~50 million nodes
+```
+
+How it is fast and small:
 
 - **Expressions are compiled** to a flat list of instructions chosen for the
-  exact types involved. Pure `f64` arithmetic, the most common case, gets its
-  own instructions that work on raw numbers, stored back to back for every
-  node in one array.
-- **What the update loop needs is kept apart** from what it doesn't (names,
-  the original expression), in small arrays indexed by node.
+  exact types involved. Pure `f64` arithmetic, the most common case, gets
+  8-byte instructions that work on raw numbers, stored back to back for
+  every node in one array.
+- **No per-node heap allocations** for ordinary nodes: values, a packed
+  16-byte record per node, names (one shared string) and the links between
+  nodes (linked lists in flat arrays) all live in a few large arrays.
+  Expressions are not stored; `explain` rebuilds them from the compiled code.
+- **Levels are processed in node-id order**, which reads memory roughly front
+  to back.
+- **Large levels run on all cores** (the `parallel` feature, on by default).
+  Nodes on one level never use each other, so they are recalculated at once;
+  marking the nodes above uses atomic flags, so each is queued exactly once.
+  Below about 30,000 nodes a level stays on one core: the threads would spend
+  longer waiting for each other than working. So parallelism speeds up
+  recalculating everything, but small and medium updates, which mostly wait
+  on memory, do not gain from it.
 - The simple tree-walking evaluator is kept as the reference: the tests check
-  the compiled code against it after every update.
+  the compiled code against it after every update, and check that rebuilding
+  an expression from its compiled code gives back exactly what was compiled.
 
 ## Layout
 
@@ -169,8 +193,10 @@ web/                    the interactive page and its build script
 
 ## Not done yet
 
-- **Speed:** recalculating each level in parallel; better memory locality for
-  small updates, which are now limited by waiting on memory.
+- **Speed:** small and medium updates are limited by waiting on memory, as
+  they jump between nodes scattered across the graph; placing nodes that
+  change together near each other would help. Building is about 1 µs per
+  node.
 - **Dynamic dependencies** (a node that changes what it uses), **collections**
   (one node per row, updated per row), **removing nodes**, **pull mode**
   (only calculating what someone is watching).

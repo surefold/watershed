@@ -38,6 +38,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The engine without the `parallel` feature, as the WebAssembly build uses it.
+      - run: cargo clippy --locked -p watershed-core --no-default-features --all-targets -- -D warnings
 
   test:
     name: Tests (Rust ${{ matrix.rust }})

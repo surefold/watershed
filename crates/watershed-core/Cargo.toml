@@ -5,10 +5,17 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Recalculate large levels on all CPU cores. Turn off for WebAssembly.
+default = ["parallel"]
+parallel = ["dep:rayon"]
+
 [dependencies]
+rayon = { version = "1.12.0", optional = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 proptest = "1.11.0"
+

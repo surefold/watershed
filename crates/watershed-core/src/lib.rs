@@ -68,7 +68,7 @@ pub use expr::{Expr, IntoExpr, when};
 pub use graph::{Graph, Report};
 pub use handle::{Handle, Input, Node, NodeId};
 pub use ir::{BinOp, Ir, TypeError, UnOp};
-pub use value::{CalcType, Numeric, Ordered, Type, Value};
+pub use value::{CalcType, Numeric, Ordered, Text, Type, Value};
 
 /// Everything you need to build and use a graph: `use watershed_core::prelude::*;`
 pub mod prelude {
