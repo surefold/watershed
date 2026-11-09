@@ -97,3 +97,15 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release --target wasm32-unknown-unknown -p watershed-web
+
+  python:
+    name: Python bindings (uv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+      - uses: Swatinem/rust-cache@v2
+      # Builds the extension with maturin into a fresh environment, then tests it.
+      - run: uv run --locked pytest -q
+        working-directory: crates/watershed-py

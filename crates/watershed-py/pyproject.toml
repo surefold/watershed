@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "watershed"
+version = "0.1.0"
+description = "An incremental calculation engine: change an input, and only what depends on it is recalculated."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+classifiers = ["Programming Language :: Rust", "Programming Language :: Python :: Implementation :: CPython"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.maturin]
+# Built as a Python extension module; the Rust crate itself does not link libpython.
+features = ["pyo3/extension-module"]
+module-name = "watershed"
+
+[tool.uv]
+# Rebuild the extension whenever the Rust code changes.
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "src/**/*.rs" }, { file = "../watershed-core/src/**/*.rs" }]

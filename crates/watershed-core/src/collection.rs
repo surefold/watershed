@@ -195,6 +195,13 @@ impl Collection {
 
     /// Adds a field. Fields come before the first row.
     pub fn field<T: CalcType>(&mut self, name: &str) -> Result<Field<T>, CalcError> {
+        Ok(Field {
+            at: self.field_of_type(name, T::TYPE)?,
+            _type: PhantomData,
+        })
+    }
+
+    fn field_of_type(&mut self, name: &str, ty: Type) -> Result<NodeRef, CalcError> {
         if !self.slots.is_empty() {
             return Err(CalcError::Invalid(format!(
                 "{}: add fields before the first row",
@@ -205,11 +212,8 @@ impl Collection {
             return Err(CalcError::DuplicateName(format!("{}.{name}", self.name)));
         }
         let index = u32::try_from(self.fields.len()).expect("too many fields");
-        self.fields.push((name.to_string(), T::TYPE));
-        Ok(Field {
-            at: self.placeholder(index),
-            _type: PhantomData,
-        })
+        self.fields.push((name.to_string(), ty));
+        Ok(self.placeholder(index))
     }
 
     /// Adds a column, worked out in every row by `formula`, which can use
@@ -220,16 +224,30 @@ impl Collection {
         name: &str,
         formula: impl IntoExpr<T>,
     ) -> Result<Column<T>, CalcError> {
+        let (at, _) = self.column_of(g, name, formula.into_expr().ir, Some(T::TYPE))?;
+        Ok(Column {
+            at,
+            _type: PhantomData,
+        })
+    }
+
+    /// Adds a column; if `expected` is given, the formula must have that type.
+    fn column_of(
+        &mut self,
+        g: &mut Graph,
+        name: &str,
+        formula: Arc<Ir>,
+        expected: Option<Type>,
+    ) -> Result<(NodeRef, Type), CalcError> {
         self.check_graph(g)?;
         if self.part_named(name) {
             return Err(CalcError::DuplicateName(format!("{}.{name}", self.name)));
         }
-        let formula = formula.into_expr().ir;
         let ty = formula.type_check(&|r| self.type_of(g, r))?;
-        if ty != T::TYPE {
+        if let Some(expected) = expected.filter(|&e| e != ty) {
             return Err(CalcError::TypeMismatch {
                 node: name.to_string(),
-                expected: T::TYPE,
+                expected,
                 found: Some(ty),
             });
         }
@@ -252,10 +270,7 @@ impl Collection {
             let node = self.define_column(g, s, index as usize)?;
             self.slots[s].columns.push(node);
         }
-        Ok(Column {
-            at: self.placeholder(COLUMN | index),
-            _type: PhantomData,
-        })
+        Ok((self.placeholder(COLUMN | index), ty))
     }
 
     /// A total: the sum of a field or column over the present rows.
@@ -342,9 +357,23 @@ impl Collection {
     /// Adds a row, or changes the given fields of an existing one. A new row
     /// needs every field. Takes effect at the next update.
     pub fn upsert(&mut self, g: &mut Graph, key: &str, row: &[Set]) -> Result<(), CalcError> {
+        let row: Vec<(NodeRef, Value)> = row.iter().map(|s| (s.field, s.value.clone())).collect();
+        self.upsert_values(g, key, &row)
+    }
+
+    fn upsert_values(
+        &mut self,
+        g: &mut Graph,
+        key: &str,
+        row: &[(NodeRef, Value)],
+    ) -> Result<(), CalcError> {
         self.check_graph(g)?;
         let mut values: Vec<Option<Value>> = vec![None; self.fields.len()];
-        for set in row {
+        for (field, value) in row {
+            let set = Set {
+                field: *field,
+                value: value.clone(),
+            };
             if set.field.graph != self.template || set.field.node.0 & COLUMN != 0 {
                 return Err(CalcError::Invalid(format!(
                     "{}: that is not one of its fields",
@@ -436,6 +465,119 @@ impl Collection {
     /// The rows' keys, in no particular order.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.keys.keys().map(String::as_str)
+    }
+
+    // ---------------------------------------------------------------- untyped
+
+    // For front ends whose types are only known at run time, such as Python.
+    // Fields and columns are passed around as their placeholder expressions.
+
+    /// Adds a field of type `ty`; returns its placeholder for formulas.
+    pub fn add_field(&mut self, name: &str, ty: Type) -> Result<Ir, CalcError> {
+        Ok(Ir::Ref(self.field_of_type(name, ty)?))
+    }
+
+    /// Adds a column from an untyped formula; returns its placeholder and type.
+    pub fn add_column(
+        &mut self,
+        g: &mut Graph,
+        name: &str,
+        formula: Ir,
+    ) -> Result<(Ir, Type), CalcError> {
+        let (at, ty) = self.column_of(g, name, Arc::new(formula), None)?;
+        Ok((Ir::Ref(at), ty))
+    }
+
+    /// Adds a total of a field or column (given by its placeholder), or a
+    /// count of rows when `of` is `None` (only for [`AggregateOp::Count`]).
+    pub fn add_total(
+        &mut self,
+        g: &mut Graph,
+        name: &str,
+        op: AggregateOp,
+        of: Option<&Ir>,
+    ) -> Result<NodeId, CalcError> {
+        let (target, value_type) = match (op, of) {
+            (AggregateOp::Count, None) => (Target::Presence, Type::I64),
+            (AggregateOp::Count, Some(_)) => {
+                return Err(CalcError::Invalid(
+                    "a count counts rows, not a field".into(),
+                ));
+            }
+            (_, Some(Ir::Ref(r))) => {
+                let ty = self.part_type(&Ir::Ref(*r)).ok_or_else(|| {
+                    CalcError::Invalid(format!("{op} needs a field or column of {}", self.name))
+                })?;
+                (Target::Placeholder(*r), ty)
+            }
+            _ => {
+                return Err(CalcError::Invalid(format!(
+                    "{op} needs a field or column of {}",
+                    self.name
+                )));
+            }
+        };
+        let node: Node<()> = self.total(g, name, op, value_type, target)?;
+        Ok(node.id())
+    }
+
+    /// Adds a row, or changes fields of an existing one, by field name.
+    pub fn upsert_named(
+        &mut self,
+        g: &mut Graph,
+        key: &str,
+        row: &[(&str, Value)],
+    ) -> Result<(), CalcError> {
+        let mut values = Vec::with_capacity(row.len());
+        for (name, value) in row {
+            let k = self
+                .fields
+                .iter()
+                .position(|(n, _)| n == name)
+                .ok_or_else(|| {
+                    CalcError::Invalid(format!("{} has no field {name:?}", self.name))
+                })?;
+            values.push((self.placeholder(k as u32), value.clone()));
+        }
+        self.upsert_values(g, key, &values)
+    }
+
+    /// A row's field or column (given by its placeholder), as of the last update.
+    pub fn get_value(&self, g: &Graph, key: &str, of: &Ir) -> Result<Value, CalcError> {
+        self.check_graph(g)?;
+        let Ir::Ref(r) = of else {
+            return Err(CalcError::Invalid(format!(
+                "not a field or column of {}",
+                self.name
+            )));
+        };
+        if self.part_type(of).is_none() {
+            return Err(CalcError::Invalid(format!(
+                "not a field or column of {}",
+                self.name
+            )));
+        }
+        let slot = *self
+            .keys
+            .get(key)
+            .ok_or_else(|| CalcError::Invalid(format!("{} has no row {key:?}", self.name)))?;
+        Ok(g.value(self.member(slot, Target::Placeholder(*r))).clone())
+    }
+
+    /// The type of a field or column given by its placeholder; `None` if it
+    /// is not one of this collection's.
+    pub fn part_type(&self, of: &Ir) -> Option<Type> {
+        match of {
+            Ir::Ref(r) if r.graph == self.template => {
+                let i = r.node.0;
+                if i & COLUMN != 0 {
+                    self.columns.get((i & !COLUMN) as usize).map(|c| c.ty)
+                } else {
+                    self.fields.get(i as usize).map(|f| f.1)
+                }
+            }
+            _ => None,
+        }
     }
 
     // ---------------------------------------------------------------- inside
