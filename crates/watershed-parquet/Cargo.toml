@@ -1,0 +1,16 @@
+[package]
+name = "watershed-parquet"
+version = "0.1.0"
+description = "Writes a watershed graph's changes to Parquet files, on a background thread"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+watershed-core = { path = "../watershed-core" }
+arrow-array = "60.1.0"
+arrow-schema = "60.1.0"
+parquet = { version = "60.1.0", default-features = false, features = ["arrow", "zstd"] }
+
+[lints]
+workspace = true

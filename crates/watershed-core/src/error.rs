@@ -29,6 +29,17 @@ pub enum CalcError {
     /// The node's current value is an error, for example a division by zero
     /// in it or in something it depends on.
     Evaluation { node: String, message: String },
+    /// An earlier value was asked for, but history is not being kept.
+    HistoryOff,
+    /// An update was asked for that history does not cover: forgotten,
+    /// before history started, or not happened yet.
+    EpochUnavailable {
+        epoch: u64,
+        oldest: u64,
+        latest: u64,
+    },
+    /// The node was made after the update that was asked for.
+    NotCreatedYet { node: String, epoch: u64 },
 }
 
 impl fmt::Display for CalcError {
@@ -51,6 +62,18 @@ impl fmt::Display for CalcError {
             },
             CalcError::Type(e) => write!(f, "type error: {e}"),
             CalcError::Invalid(message) => f.write_str(message),
+            CalcError::HistoryOff => f.write_str("history is not being kept"),
+            CalcError::EpochUnavailable {
+                epoch,
+                oldest,
+                latest,
+            } => write!(
+                f,
+                "update {epoch} cannot be read: history covers updates {oldest} to {latest}"
+            ),
+            CalcError::NotCreatedYet { node, epoch } => {
+                write!(f, "{node:?} did not exist at update {epoch}")
+            }
             CalcError::Evaluation { node, message } => {
                 write!(f, "{node:?} could not be calculated: {message}")
             }

@@ -33,7 +33,9 @@ use crate::compile::{
 use crate::error::CalcError;
 use crate::expr::IntoExpr;
 use crate::handle::{GraphId, Handle, Input, Node, NodeId, NodeRef};
+use crate::history::History;
 use crate::ir::{Ir, TypeError};
+use crate::sink::ChangeSink;
 use crate::value::{CalcType, Type, Value};
 
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
@@ -231,6 +233,12 @@ pub struct Graph {
     /// dependencies still list it as a user, or an edge holds an old height).
     /// The next update rebuilds every link from the nodes' expressions.
     relink_pending: bool,
+    /// Values overwritten by earlier updates, if they are being kept.
+    history: Option<History>,
+    /// Where each update's changes are sent, if anywhere.
+    sink: Option<Box<dyn ChangeSink>>,
+    /// The nodes changed by the update in progress, while a sink is attached.
+    changed: Vec<NodeId>,
 }
 
 /// The level size from which recalculating in parallel pays off. Measured on
@@ -275,6 +283,9 @@ impl Graph {
             changed_ids: Vec::new(),
             redefined: HashSet::new(),
             relink_pending: false,
+            history: None,
+            sink: None,
+            changed: Vec::new(),
         }
     }
 
@@ -947,8 +958,7 @@ impl Graph {
 
         for (id, value) in std::mem::take(&mut self.pending) {
             if !self.values[id.index()].same_as(&value) {
-                self.values[id.index()] = value;
-                self.changed_in[id.index()] = epoch;
+                self.store(id.index(), value, epoch);
                 report.inputs_changed += 1;
                 self.mark_dependents(id);
             }
@@ -979,8 +989,7 @@ impl Graph {
                         }
                         Outcome::Same => {}
                         Outcome::Changed(new_value) => {
-                            self.values[i] = new_value;
-                            self.changed_in[i] = epoch;
+                            self.store(i, new_value, epoch);
                             report.changed += 1;
                             changed_ids.push(id);
                         }
@@ -1001,7 +1010,47 @@ impl Graph {
             self.queue[height] = level;
         }
         self.redefined.clear();
+        let nodes = self.hot.len();
+        if let Some(history) = &mut self.history {
+            history.finish_update(epoch, nodes);
+        }
+        if let Some(mut sink) = self.sink.take() {
+            let changed = std::mem::take(&mut self.changed);
+            sink.update(self, epoch, &changed);
+            self.changed = changed;
+            self.changed.clear();
+            self.sink = Some(sink);
+        }
         report
+    }
+
+    /// Sends every later update's changes to `sink`, replacing any sink
+    /// attached before (which is returned). The sink is first given every
+    /// node, as the state at the current update.
+    pub fn attach_sink(&mut self, mut sink: Box<dyn ChangeSink>) -> Option<Box<dyn ChangeSink>> {
+        let all: Vec<NodeId> = self.node_ids().collect();
+        sink.update(self, self.epoch, &all);
+        self.changed.clear();
+        self.sink.replace(sink)
+    }
+
+    /// Stops sending changes, and returns the sink.
+    pub fn detach_sink(&mut self) -> Option<Box<dyn ChangeSink>> {
+        self.sink.take()
+    }
+
+    /// Gives a node a new value in update `epoch`, keeping the old one if
+    /// history is on. Every change made by an update goes through here.
+    #[inline]
+    fn store(&mut self, i: usize, value: Value, epoch: u64) {
+        let old = std::mem::replace(&mut self.values[i], value);
+        if let Some(history) = &mut self.history {
+            history.record(i, old, self.changed_in[i]);
+        }
+        self.changed_in[i] = epoch;
+        if self.sink.is_some() {
+            self.changed.push(NodeId(i as u32));
+        }
     }
 
     /// Records that a node was recalculated and, if its value changed
@@ -1012,8 +1061,7 @@ impl Graph {
         report.recalculated += 1;
         self.last_recalculated.push(id);
         if let Some(new_value) = change {
-            self.values[i] = new_value;
-            self.changed_in[i] = report.epoch;
+            self.store(i, new_value, report.epoch);
             report.changed += 1;
             self.mark_dependents(id);
         }
@@ -1192,20 +1240,91 @@ impl Graph {
         }
     }
 
+    // ---------------------------------------------------------------- history
+
+    /// Starts keeping earlier values, or changes how many are kept. The
+    /// latest update and the `updates` before it stay readable; `u64::MAX`
+    /// keeps everything. The state at the moment this is first called can be
+    /// read as the current update.
+    ///
+    /// Shortening forgets straight away, and lengthening cannot bring back
+    /// what has been forgotten. Each value an update overwrites costs 32
+    /// bytes until it is forgotten.
+    pub fn keep_history(&mut self, updates: u64) {
+        let (epoch, nodes) = (self.epoch, self.hot.len());
+        self.history
+            .get_or_insert_with(|| History::new(epoch, nodes, updates))
+            .set_keep(epoch, updates);
+    }
+
+    /// Stops keeping earlier values and forgets those kept so far.
+    pub fn stop_history(&mut self) {
+        self.history = None;
+    }
+
+    /// The earliest and latest updates that can be read, if history is on.
+    pub fn history_range(&self) -> Option<(u64, u64)> {
+        self.history.as_ref().map(|h| (h.oldest(), self.epoch))
+    }
+
+    /// How many earlier values are being kept.
+    pub fn history_versions(&self) -> usize {
+        self.history.as_ref().map_or(0, History::versions)
+    }
+
+    /// The node's value as of the end of update `epoch`, untyped.
+    ///
+    /// A node made between updates does not exist until the next update
+    /// finishes. Changes recorded by `set` and not yet applied are not seen.
+    pub fn value_at(&self, id: NodeId, epoch: u64) -> Result<&Value, CalcError> {
+        let history = self.history.as_ref().ok_or(CalcError::HistoryOff)?;
+        let i = id.index();
+        if i >= self.hot.len() {
+            return Err(CalcError::UnknownNode(id));
+        }
+        if epoch < history.oldest() || epoch > self.epoch {
+            return Err(CalcError::EpochUnavailable {
+                epoch,
+                oldest: history.oldest(),
+                latest: self.epoch,
+            });
+        }
+        if !history.existed(i, epoch) {
+            return Err(CalcError::NotCreatedYet {
+                node: self.name(id).to_string(),
+                epoch,
+            });
+        }
+        if self.changed_in[i] <= epoch {
+            return Ok(&self.values[i]);
+        }
+        Ok(history.value(i, epoch))
+    }
+
+    /// The node's value as of the end of update `epoch`, or why it has none.
+    pub fn get_at<T: CalcType>(&self, node: impl Handle<T>, epoch: u64) -> Result<T, CalcError> {
+        let at = node.node_ref();
+        self.check_ref(at)?;
+        self.typed(at.node, self.value_at(at.node, epoch)?)
+    }
+
     // ---------------------------------------------------------------- reading
 
     /// The node's value as of the last update, or why it has none.
     pub fn get<T: CalcType>(&self, node: impl Handle<T>) -> Result<T, CalcError> {
         let at = node.node_ref();
         self.check_ref(at)?;
-        let value = &self.values[at.node.index()];
+        self.typed(at.node, &self.values[at.node.index()])
+    }
+
+    fn typed<T: CalcType>(&self, id: NodeId, value: &Value) -> Result<T, CalcError> {
         match value {
             Value::Error(message) => Err(CalcError::Evaluation {
-                node: self.name(at.node).to_string(),
+                node: self.name(id).to_string(),
                 message: message.to_string(),
             }),
             _ => T::from_value(value).ok_or_else(|| CalcError::TypeMismatch {
-                node: self.name(at.node).to_string(),
+                node: self.name(id).to_string(),
                 expected: T::TYPE,
                 found: value.type_of(),
             }),
