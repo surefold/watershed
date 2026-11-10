@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 30
     steps:
       # Written out once here; the other jobs reuse it as `*rust-homes`. It runs first
-      # because the toolchain and cache steps read these variables. In a shared
+      # because the toolchain and build steps read these variables. In a shared
       # ~/.cargo, one job's cache clean-up deletes crate sources another job is
       # compiling; in a shared ~/.rustup, `rustup default` switches another job's Rust.
       # Installing rustup here means dtolnay/rust-toolchain skips its own install, which
@@ -45,6 +45,11 @@ jobs:
           curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none --no-modify-path -y
           echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
           echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          # Compiled crates stay on disk between runs, one folder per job and Rust
+          # version, so a run only rebuilds what changed. This replaces
+          # Swatinem/rust-cache, whose save step runs `sudo purge` on macOS and so
+          # waits for a password that never comes.
+          echo "CARGO_TARGET_DIR=$RUNNER_WORKSPACE/target/${{ github.job }}-${{ matrix.rust || 'stable' }}" >> "$GITHUB_ENV"
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -62,7 +67,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The engine without the `parallel` feature, as the WebAssembly build uses it.
       - run: cargo clippy --locked -p watershed-core --no-default-features --all-targets -- -D warnings
@@ -83,9 +87,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.rust }}
       # Debug build: internal checks are on, so a type-checker gap fails loudly.
       - run: cargo test --locked --workspace
 
@@ -97,7 +98,6 @@ jobs:
       - *rust-homes
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - run: cargo doc --locked --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
@@ -110,7 +110,6 @@ jobs:
       - *rust-homes
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - run: cargo run --locked --example tour
       # Timings on shared CI machines are too noisy to compare, so this only
       # checks the benchmark runs and that its million-node result matches a
@@ -132,7 +131,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release --target wasm32-unknown-unknown -p watershed-web
 
   python:
@@ -144,7 +142,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v6
-      - uses: Swatinem/rust-cache@v2
       # Builds the extension with maturin into a fresh environment, then tests it.
       - run: uv run --locked pytest -q
         working-directory: crates/watershed-py
