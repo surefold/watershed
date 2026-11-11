@@ -132,7 +132,8 @@ python3 -m http.server -d web/dist 8000             # then open http://localhost
 ## A data grid
 
 `crates/watershed-grid` is a data grid on the engine, compiled to
-WebAssembly: `web/build.sh` also builds it, at
+WebAssembly: `web/build.sh` also builds it. It is the "Data grid" tab of
+the page above (http://localhost:8000/#grid), and a page of its own at
 http://localhost:8000/grid/.
 
 Rows are a collection, so every cell is a node. Calculated columns are

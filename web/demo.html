@@ -64,6 +64,13 @@ a { color: var(--water); }
   border: 1px solid var(--rule); border-radius: 999px; padding: 6px 14px; cursor: pointer;
 }
 .tab[aria-selected="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+/* The page's two views: the playground, and the data grid (web/grid, in a frame). */
+.views { border-bottom: 1px solid var(--rule); padding-bottom: 14px; }
+.views .tab { font-size: 0.95rem; padding: 8px 18px; }
+.view { display: grid; gap: 40px; }
+.view-grid { gap: 10px; }
+.view-grid iframe { width: 100%; height: max(640px, calc(100vh - 120px)); border: 0; border-radius: 8px; background: var(--paper); }
+.view-grid p { color: var(--muted); font-size: 0.9rem; }
 .tab:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, .node:focus-visible { outline: 2px solid var(--water); outline-offset: 2px; }
 
 .workbench { display: grid; grid-template-columns: 250px minmax(0, 1fr) 320px; gap: 20px; align-items: start; }
@@ -222,6 +229,17 @@ footer { color: var(--muted); font-size: 0.85rem; }
     <p class="lede">This is <strong>watershed</strong>, running in your browser: the same Rust engine its tests check, compiled to WebAssembly. Move a slider and watch the change flow up the graph. Where a recalculated value comes out the same as before, the update stops.</p>
   </header>
 
+  <div class="tabs views" role="tablist" aria-label="Views">
+    <button class="tab" type="button" role="tab" id="view-tab-playground" aria-controls="view-playground" aria-selected="true">Playground</button>
+    <button class="tab" type="button" role="tab" id="view-tab-grid" aria-controls="view-grid" aria-selected="false">Data grid</button>
+  </div>
+
+  <div class="view view-grid" id="view-grid" role="tabpanel" aria-labelledby="view-tab-grid" hidden>
+    <iframe id="grid-frame" title="Watershed data grid"></iframe>
+    <p>A data grid built on the engine: every cell is a node, and its totals are aggregates. <a href="grid/">Open it on its own page.</a></p>
+  </div>
+
+  <div class="view" id="view-playground" role="tabpanel" aria-labelledby="view-tab-playground">
   <section class="plate" aria-labelledby="models-title">
     <div class="plate-head">
       <h2 id="models-title">Try a model</h2>
@@ -388,7 +406,33 @@ footer { color: var(--muted); font-size: 0.85rem; }
   </section>
 
   <footer>Timings are measured in this browser on this device, as the median of several runs. Nothing is sent anywhere: the engine runs entirely on your machine.</footer>
+  </div>
 </div>
+
+<script>
+// The two views. `#grid` in the address opens the grid, so it can be linked to.
+// The grid's page and its engine load the first time its tab is opened.
+(() => {
+  const views = ["playground", "grid"];
+  const show = (name) => {
+    for (const view of views) {
+      document.getElementById(`view-${view}`).hidden = view !== name;
+      document.getElementById(`view-tab-${view}`).setAttribute("aria-selected", String(view === name));
+    }
+    const frame = document.getElementById("grid-frame");
+    if (name === "grid" && !frame.getAttribute("src")) frame.src = "grid/?embed";
+  };
+  for (const view of views) {
+    document.getElementById(`view-tab-${view}`).addEventListener("click", () => {
+      history.replaceState(null, "", view === "grid" ? "#grid" : location.pathname + location.search);
+      show(view);
+    });
+  }
+  const fromAddress = () => show(location.hash === "#grid" ? "grid" : "playground");
+  addEventListener("hashchange", fromAddress);
+  fromAddress();
+})();
+</script>
 
 <script type="module">
 import init, { Model, Benchmark, Edits } from "./pkg/watershed_web.js";
