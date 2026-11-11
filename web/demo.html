@@ -68,6 +68,8 @@ a { color: var(--water); }
 .views { border-bottom: 1px solid var(--rule); padding-bottom: 14px; }
 .views .tab { font-size: 0.95rem; padding: 8px 18px; }
 .view { display: grid; gap: 40px; }
+/* `display` above would otherwise win over the hidden attribute, and both views would show. */
+.view[hidden] { display: none; }
 .view-grid { gap: 10px; }
 .view-grid iframe { width: 100%; height: max(640px, calc(100vh - 120px)); border: 0; border-radius: 8px; background: var(--paper); }
 .view-grid p { color: var(--muted); font-size: 0.9rem; }
