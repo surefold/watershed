@@ -1261,6 +1261,9 @@ fn in_pull_mode_only_what_a_watched_node_uses_is_calculated() -> Result {
         "\"right_top\" is not being calculated: nothing that is watched uses it"
     );
     assert_eq!(g.value(right_top.id()).to_string(), "30");
+    g.keep_history(10);
+    assert!(g.get_at(right_top, g.epoch()).is_err());
+    assert_eq!(g.get_at(left_top, g.epoch())?, 60.0);
     g.check_consistency().map_err(CalcError::Invalid)?;
     Ok(())
 }

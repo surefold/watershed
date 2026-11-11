@@ -502,9 +502,8 @@ web/grid/               the grid's page, the script that draws it, and the chart
   each build and total in under two seconds, about 0.45 µs per node.
 - **Reusing removed nodes' memory**: a removed node keeps its slot, and a
   removed row of a collection keeps its membership nodes.
-- **Pull mode** reads: `get_at` and the untyped `value` do not yet refuse a
-  node that is not being calculated, and what a collection's groupings are
-  built on is always calculated.
+- **Pull mode:** what a collection's groupings are built on is always
+  calculated, watched or not.
 - **More time travel:** restoring an earlier update, a redefined node's
   earlier expressions (so `explain_at` can go back past a `redefine`), a
   collection's groups as of an earlier update, and a sink that writes to S3.
