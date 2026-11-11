@@ -98,21 +98,34 @@ impl Names {
     }
 
     fn find(&self, name: &str) -> Option<NodeId> {
-        match self.index.get(&self.hasher.hash_one(name)) {
+        self.find_hashed(name, self.hash(name))
+    }
+
+    /// A name's hash, so that checking a name is new and then adding it
+    /// hashes it once.
+    fn hash(&self, name: &str) -> u64 {
+        self.hasher.hash_one(name)
+    }
+
+    fn find_hashed(&self, name: &str, hash: u64) -> Option<NodeId> {
+        match self.index.get(&hash) {
             Some(&id) if self.get(id) == name => Some(id),
+            // Nearly every graph has no two names with one hash, and then
+            // the name is not hashed a second time to look for one.
+            _ if self.collisions.is_empty() => None,
             _ => self.collisions.get(name).copied(),
         }
     }
 
-    /// Adds the next node's name. The caller has checked it is new.
-    fn push(&mut self, name: &str, id: NodeId) {
+    /// Adds the next node's name, whose hash is `hash`. The caller has
+    /// checked it is new.
+    fn push(&mut self, name: &str, hash: u64, id: NodeId) {
         if self.starts.is_empty() {
             self.starts.push(0);
         }
         self.text.push_str(name);
         self.starts
             .push(u32::try_from(self.text.len()).expect("node names exceed 4 GB in total"));
-        let hash = self.hasher.hash_one(name);
         match self.index.entry(hash) {
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(id);
@@ -217,6 +230,8 @@ pub struct Graph {
     last_recalculated: Vec<NodeId>,
     /// Scratch space for evaluating programs.
     scratch: Scratch,
+    /// Scratch space for the nodes a new node uses.
+    deps_scratch: Vec<NodeId>,
     /// Levels with at least this many nodes to recalculate are spread over
     /// all CPU cores (with the `parallel` feature).
     parallel_threshold: usize,
@@ -289,6 +304,7 @@ impl Graph {
             epoch: 0,
             last_recalculated: Vec::new(),
             scratch: Scratch::default(),
+            deps_scratch: Vec::new(),
             parallel_threshold: DEFAULT_PARALLEL_THRESHOLD,
             levels: None,
             changes: Vec::new(),
@@ -325,21 +341,21 @@ impl Graph {
 
     /// Adds an input with a starting value.
     pub fn input<T: CalcType>(&mut self, name: &str, value: T) -> Result<Input<T>, CalcError> {
-        self.check_name(name)?;
+        let hash = self.check_name(name)?;
         let hot = Hot {
             code: 0,
             len: 0,
             height: 0,
             kind: Kind::Input,
         };
-        let id = self.push(name, hot, T::TYPE, &[], value.into_value());
+        let id = self.push((name, hash), hot, T::TYPE, &[], value.into_value());
         Ok(Input::new(self.node_ref(id)))
     }
 
     /// Adds an input through the untyped API. Its type is the type of `value`,
     /// which therefore cannot be an error.
     pub fn input_value(&mut self, name: &str, value: Value) -> Result<NodeId, CalcError> {
-        self.check_name(name)?;
+        let hash = self.check_name(name)?;
         let ty = value
             .type_of()
             .ok_or_else(|| TypeError("an input's starting value cannot be an error".into()))?;
@@ -349,7 +365,7 @@ impl Graph {
             height: 0,
             kind: Kind::Input,
         };
-        Ok(self.push(name, hot, ty, &[], value))
+        Ok(self.push((name, hash), hot, ty, &[], value))
     }
 
     /// Adds a calculated node. Its value is worked out straight away.
@@ -375,7 +391,7 @@ impl Graph {
     /// Adds a calculated node from an untyped expression, checking it first.
     /// This is the entry point for front ends other than the typed Rust API.
     pub fn define_ir(&mut self, name: &str, ir: Ir) -> Result<NodeId, CalcError> {
-        self.check_name(name)?;
+        let hash = self.check_name(name)?;
 
         let mut refs = Vec::new();
         ir.refs(&mut refs);
@@ -427,7 +443,102 @@ impl Graph {
         };
         // Worked out from the values of the last update, like every other node.
         let value = self.evaluate(hot);
-        Ok(self.push(name, hot, ty, &deps, value))
+        Ok(self.push((name, hash), hot, ty, &deps, value))
+    }
+
+    /// Adds a calculated node with the same expression as `like`, reading
+    /// node `swap(n)` wherever `like` reads node `n`. This is how a
+    /// collection makes a column's node in each row after the first: the
+    /// first row's expression was checked and compiled, and the others copy
+    /// its instructions. The caller makes sure each node swapped in exists
+    /// and has the type of the node it replaces, so the copy is as well
+    /// typed as the original.
+    pub(crate) fn define_like(
+        &mut self,
+        name: &str,
+        like: NodeId,
+        swap: impl Fn(NodeId) -> NodeId,
+    ) -> Result<NodeId, CalcError> {
+        let hash = self.check_name(name)?;
+        let model = self.hot[like.index()];
+        let mut deps = std::mem::take(&mut self.deps_scratch);
+        deps.clear();
+        let mut swapped = |n: u32| {
+            let to = swap(NodeId(n));
+            debug_assert_eq!(self.types[n as usize], self.types[to.index()]);
+            deps.push(to);
+            to.0
+        };
+        let (code, len) = match model.kind {
+            Kind::Float => {
+                let start = self.float_ops.len();
+                let from = model.code as usize;
+                for k in from..from + model.len as usize {
+                    let op = match self.float_ops[k] {
+                        FloatOp::Load(n) => FloatOp::Load(swapped(n)),
+                        other => other,
+                    };
+                    self.float_ops.push(op);
+                }
+                let start = u32::try_from(start).expect("too many instructions in one graph");
+                (start, model.len)
+            }
+            Kind::General => {
+                let program = self.general[model.code as usize].with_loads(&mut swapped);
+                self.general.push(program);
+                self.reads.push(Box::default());
+                let code = u32::try_from(self.general.len() - 1).expect("too many programs");
+                (code, 0)
+            }
+            Kind::Input | Kind::Aggregate => {
+                self.deps_scratch = deps;
+                return Err(CalcError::Invalid(format!(
+                    "{:?} has no expression to copy",
+                    self.name(like)
+                )));
+            }
+        };
+        deps.sort_unstable();
+        deps.dedup();
+        let height = deps
+            .iter()
+            .map(|d| self.hot[d.index()].height + 1)
+            .max()
+            .unwrap_or(1);
+        let hot = Hot {
+            code,
+            len,
+            height,
+            kind: model.kind,
+        };
+        let value = self.evaluate(hot);
+        let id = self.push((name, hash), hot, self.types[like.index()], &deps, value);
+        self.deps_scratch = deps;
+        Ok(id)
+    }
+
+    /// Parses a formula written as text, such as `qty * price * (1 + tax)`,
+    /// reading each name as the node of that name. Returns the expression
+    /// and its type. See the [`formula`](crate::formula) module for what a
+    /// formula can say.
+    pub fn parse_formula(&self, source: &str) -> Result<(Ir, Type), CalcError> {
+        let ir =
+            crate::formula::parse(source, &|name| self.find(name).map(|id| self.reference(id)))
+                .map_err(CalcError::Invalid)?;
+        let ty = ir.type_check(&|r| {
+            self.types
+                .get(r.node.index())
+                .copied()
+                .ok_or_else(|| TypeError(format!("there is no node {}", r.node)))
+        })?;
+        Ok((ir, ty))
+    }
+
+    /// Adds a calculated node from a formula written as text. See
+    /// [`parse_formula`](Self::parse_formula).
+    pub fn define_formula(&mut self, name: &str, source: &str) -> Result<NodeId, CalcError> {
+        let (ir, _) = self.parse_formula(source)?;
+        self.define_ir(name, ir)
     }
 
     /// Gives a calculated node a new expression, of the same type as before.
@@ -670,14 +781,21 @@ impl Graph {
         self.relink_pending = false;
     }
 
-    fn push(&mut self, name: &str, hot: Hot, ty: Type, deps: &[NodeId], value: Value) -> NodeId {
+    fn push(
+        &mut self,
+        (name, hash): (&str, u64),
+        hot: Hot,
+        ty: Type,
+        deps: &[NodeId],
+        value: Value,
+    ) -> NodeId {
         let id =
             NodeId(u32::try_from(self.hot.len()).expect("a graph holds at most u32::MAX nodes"));
         self.values.push(value);
         self.hot.push(hot);
         self.types.push(ty);
         self.changed_in.push(self.epoch);
-        self.names.push(name, id);
+        self.names.push(name, hash, id);
         self.first_user.push(NONE);
         self.last_user.push(NONE);
         for d in deps {
@@ -780,7 +898,7 @@ impl Graph {
         height: usize,
         members: &[(NodeId, NodeId)],
     ) -> Result<NodeId, CalcError> {
-        self.check_name(name)?;
+        let hash = self.check_name(name)?;
         if !value_type.is_numeric() {
             return Err(CalcError::Invalid(format!(
                 "{name:?}: an aggregate's values must be f64 or i64, not {value_type}"
@@ -812,7 +930,7 @@ impl Graph {
             height: u32::try_from(height).expect("graph too deep"),
             kind: Kind::Aggregate,
         };
-        Ok(self.push(name, hot, op.result_type(value_type), &nodes, value))
+        Ok(self.push((name, hash), hot, op.result_type(value_type), &nodes, value))
     }
 
     /// An aggregate's operation and members (value node, presence node), in
@@ -852,12 +970,12 @@ impl Graph {
             )));
         }
         let value_type = self.aggregates[hot.code as usize].value_type;
-        let name = self.name(aggregate).to_string();
-        self.check_member(&name, value_type, value, present)?;
+        self.check_member(self.name(aggregate), value_type, value, present)?;
         let top = self.height(value).max(self.height(present));
         if top >= hot.height as usize {
             return Err(CalcError::Invalid(format!(
-                "{name:?} sits at height {}, so a member at height {top} cannot join it",
+                "{:?} sits at height {}, so a member at height {top} cannot join it",
+                self.name(aggregate),
                 hot.height
             )));
         }
@@ -910,16 +1028,13 @@ impl Graph {
         let code = hot.code as usize;
         // One link per node, even when the value and presence are the same
         // node (as in a count) or the node is already part of a member.
-        let mut nodes = vec![value];
-        if present != value {
-            nodes.push(present);
+        let (new_value, new_present) = self.aggregates[code].push(value.0, present.0);
+        if new_value {
+            self.add_user(value, aggregate);
         }
-        for node in nodes {
-            if !self.aggregates[code].has_node(node.0) {
-                self.add_user(node, aggregate);
-            }
+        if new_present {
+            self.add_user(present, aggregate);
         }
-        self.aggregates[code].push(value.0, present.0);
     }
 
     // ---------------------------------------------------------------- updating
@@ -1842,11 +1957,14 @@ impl Graph {
         }
     }
 
-    fn check_name(&self, name: &str) -> Result<(), CalcError> {
-        if self.names.find(name).is_some() {
+    /// Checks that no node has this name yet, and returns the name's hash
+    /// for [`Graph::push`].
+    fn check_name(&self, name: &str) -> Result<u64, CalcError> {
+        let hash = self.names.hash(name);
+        if self.names.find_hashed(name, hash).is_some() {
             return Err(CalcError::DuplicateName(name.to_string()));
         }
-        Ok(())
+        Ok(hash)
     }
 
     fn check_ref(&self, r: NodeRef) -> Result<(), CalcError> {
@@ -1954,10 +2072,10 @@ mod tests {
     #[test]
     fn a_name_whose_hash_is_taken_is_still_found() {
         let mut names = Names::default();
-        names.push("a", NodeId(0));
+        names.push("a", names.hash("a"), NodeId(0));
         let hash_of_b = names.hasher.hash_one("b");
         names.index.insert(hash_of_b, NodeId(0));
-        names.push("b", NodeId(1));
+        names.push("b", names.hash("b"), NodeId(1));
         assert_eq!(names.find("a"), Some(NodeId(0)));
         assert_eq!(names.find("b"), Some(NodeId(1)));
         assert_eq!(names.find("c"), None);

@@ -567,6 +567,19 @@ impl Graph {
         Ok(Graph::node(slf, id))
     }
 
+    /// A formula written as text, such as `"qty * price * (1 + tax)"`, as an
+    /// expression. Each name is the node of that name; a name with spaces or
+    /// punctuation goes between backticks. Use it wherever an expression goes:
+    /// `g.define("total", g.formula("qty * price"))`.
+    fn formula(slf: &Bound<'_, Self>, source: &str) -> PyResult<Expr> {
+        let (ir, ty) = slf
+            .borrow()
+            .inner
+            .parse_formula(source)
+            .map_err(to_py_err)?;
+        Ok(Expr::new(ir, ty))
+    }
+
     /// Records a new value for an input; it takes effect at the next `stabilize()`.
     fn set(
         slf: &Bound<'_, Self>,
@@ -758,6 +771,18 @@ impl Collection {
         let (ir, ty) = self
             .inner
             .add_column(&mut graph.borrow_mut().inner, name, (*formula.ir).clone())
+            .map_err(to_py_err)?;
+        Ok(Expr::new(ir, ty))
+    }
+
+    /// A formula written as text, such as `"qty * price * fx"`, as an
+    /// expression for `column`. A name is one of this collection's fields
+    /// or columns, or else the graph's node of that name.
+    fn formula(&self, py: Python<'_>, source: &str) -> PyResult<Expr> {
+        let graph = self.graph.bind(py);
+        let (ir, ty) = self
+            .inner
+            .parse_formula(&graph.borrow().inner, source)
             .map_err(to_py_err)?;
         Ok(Expr::new(ir, ty))
     }

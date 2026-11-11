@@ -134,6 +134,28 @@ cd crates/watershed-py
 uv sync && uv run pytest
 ```
 
+## Formulas as text
+
+For people who type a formula rather than write Rust or Python (a grid's
+column, a rule in a settings file), `watershed_core::formula` turns text into
+the same checked expression:
+
+```rust
+let total = g.define_formula("total", "qty * price * (1 + `tax rate`)")?;
+let (line, _) = orders.add_formula_column(&mut g, "line", "qty * price * fx")?;
+```
+
+```python
+net = g.define("net", g.formula("qty * price * (1 - discount)"))
+line = orders.column("line", orders.formula("qty * price * fx"))
+```
+
+It has `+ - * /`, comparisons, `&&`, `||`, `!`, `if(c, a, b)`, `min`, `max`,
+`abs`, `text`, `concat`, `join`, `choose` and lists of strings. A name is a
+node (in a collection, a field or column first); a name with spaces or
+punctuation goes between backticks. Numbers are always `f64`. The grid's
+formula box uses the same parser.
+
 Calling from Python adds little: on a 210,000-node graph, changing one price
 and updating takes about 29 µs from Python.
 
@@ -312,6 +334,8 @@ and the tests failed every time:
 | Evaluate the wrong branch of an `if` | ✅ |
 | Forget to recalculate a node given a new formula by `redefine` | ✅ |
 | Skip a redefined node with an `if` because what it read under its old formula did not change | ✅ |
+| Copy a column's node to a new row still reading the first row's fields | ✅ |
+| When many rows change at once, rebuild only the lower half of a total's partial results | ✅ |
 | Never move a row whose calculated group changed during an update | ✅ |
 | Count a row that joins a group during an update from the next update instead | ✅ |
 
@@ -391,6 +415,7 @@ crates/watershed-core/
   src/ir.rs       expressions as data, the type checker and the reference evaluator
   src/compile.rs  compiles expressions to fast instructions
   src/expr.rs     the typed Rust front end: + - * /, comparisons, when/then/otherwise
+  src/formula.rs  formulas written as text, parsed into expressions
   src/handle.rs   typed handles to nodes (Input<T>, Node<T>)
   src/graph.rs    the graph and the incremental update (stabilize)
   src/aggregate.rs  totals over many nodes, kept as a tree of partial results
@@ -414,14 +439,14 @@ web/grid/               the grid's page, the script that draws it, and the chart
   they jump between nodes scattered across the graph; placing nodes that
   change together near each other would help. Building is about 1 µs per
   node.
-- **Collections:** building rows faster (about 2.4 µs per node), and the
-  grid grouping its rows by a formula column (the engine can; the grid's
-  view cannot yet).
+- **Collections:** the grid grouping its rows by a formula column (the
+  engine can; the grid's view cannot yet). A million rows of four nodes
+  each build and total in under two seconds, about 0.45 µs per node.
 - **Removing nodes** in general (collections reuse rows instead, and build
   files redefine a removed value as a constant), and **pull mode** (only
   calculating what someone is watching).
 - **More time travel:** restoring an earlier update, `explain` and formulas
   as of an earlier update (full lineage), a collection's groups as of an
   earlier update, and a sink that writes to S3.
-- **Bindings** for the JVM, a formula parser for end users, publishing the
-  Python package, and the cluster.
+- **Bindings** for the JVM, publishing the Python package, and the cluster.
+  Formulas as text have no whole-number constants yet.
