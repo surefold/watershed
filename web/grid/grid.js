@@ -38,7 +38,7 @@ export class WatershedGrid {
   constructor(root, grid, options = {}) {
     this.root = root;
     this.grid = grid;
-    this.rowH = options.rowHeight ?? 30;
+    this.rowH = options.rowHeight ?? 32;
     this.keyTitle = options.keyTitle ?? "key";
     this.label = options.label ?? "Data grid";
     this.formats = options.formats ?? {};
@@ -105,6 +105,8 @@ export class WatershedGrid {
     this.body.addEventListener("scroll", () => {
       this.head.scrollLeft = this.body.scrollLeft;
       this.foot.scrollLeft = this.body.scrollLeft;
+      this.root.classList.toggle("wg-scrolled", this.body.scrollTop > 0);
+      this.root.classList.toggle("wg-scrolled-x", this.body.scrollLeft > 0);
       this.schedule();
       if (this.nearEnd()) this.fetchMore();
     });
@@ -154,7 +156,7 @@ export class WatershedGrid {
     });
     for (let pos = this.widths.length; pos <= this.cols.length; pos++) {
       const col = this.cols[pos - 1];
-      this.widths[pos] = pos === 0 ? 156 : (this.formats[col.name]?.width ?? (col.kind === "number" ? 112 : 124));
+      this.widths[pos] = pos === 0 ? 176 : (this.formats[col.name]?.width ?? (col.kind === "number" ? 112 : 124));
     }
     this.rebuildColumns();
     this.refresh();
@@ -841,8 +843,12 @@ export class WatershedGrid {
       (!group && this.selected.has(data.k) ? " wg-selected" : "");
     const cells = row._cells;
     const first = cells[0];
-    const label = group ? `${data.o ? "▾" : "▸"} ${data.g || "(blank)"}  ·  ${data.n.toLocaleString("en-US")}` : data.k;
-    if (first._text !== label) first.textContent = first._text = label;
+    const label = group ? `${data.g || "(blank)"} ${data.n}` : data.k;
+    if (first._text !== label) {
+      first._text = label;
+      if (group) first.replaceChildren(el("span", "wg-gname", data.g || "(blank)"), el("span", "wg-gcount", data.n.toLocaleString("en-US")));
+      else first.textContent = label;
+    }
     const was = this.before.get(id);
     const focus = this.focus && this.focus.line === line ? this.focus.pos : -1;
     const box = this.box && !group && line >= this.box.l0 && line <= this.box.l1 ? this.box : null;
@@ -875,7 +881,7 @@ export class WatershedGrid {
     if (typeof value === "number" && typeof was === "number" && value !== was) {
       cell.animate(
         [{ backgroundColor: `var(${value > was ? "--wg-up" : "--wg-down"})` }, { backgroundColor: "transparent" }],
-        { duration: 700, easing: "ease-out" },
+        { duration: 900, easing: "cubic-bezier(0.2, 0.6, 0.2, 1)" },
       );
     }
   }
