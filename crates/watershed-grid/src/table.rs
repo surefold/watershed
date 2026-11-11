@@ -283,10 +283,39 @@ struct Col {
     formula: Option<String>,
     agg: Agg,
     /// The node holding this column's total over every row.
-    total: Option<NodeId>,
+    /// The nodes holding this column's sum, minimum and maximum over every
+    /// row, for those it has had as its total (see [`slot`]).
+    totals: [Option<NodeId>; 3],
     filter: Option<Filter>,
     filter_text: String,
 }
+
+impl Col {
+    /// The node behind this column's total, if the graph keeps one for it.
+    fn total(&self) -> Option<NodeId> {
+        self.totals[slot(self.agg.op()?)]
+    }
+}
+
+/// Where a total's node is kept among a column's three.
+fn slot(op: AggregateOp) -> usize {
+    match op {
+        AggregateOp::Sum | AggregateOp::Count => 0,
+        AggregateOp::Min => 1,
+        AggregateOp::Max => 2,
+    }
+}
+
+/// A cell someone set, and what it held before.
+struct Edit {
+    key: String,
+    col: usize,
+    before: Value,
+    after: Value,
+}
+
+/// The most steps that can be undone.
+const MOST_UNDO: usize = 200;
 
 /// One group's row in the view.
 struct Group {
@@ -341,7 +370,7 @@ pub struct Table {
     quick: String,
     group_by: Option<usize>,
     /// For each column that has been grouped by, each column's grouping in the collection.
-    groupings: HashMap<usize, Vec<Option<usize>>>,
+    groupings: HashMap<usize, Vec<[Option<usize>; 3]>>,
     open: HashSet<String>,
 
     /// The rows that pass the filters, sorted, and with each group's rows together.
@@ -361,6 +390,12 @@ pub struct Table {
     value_touched: bool,
     /// Something was set, added or removed since the last update.
     pending: bool,
+    /// What [`set_cell`](Table::set_cell) changed, newest last, a step at a
+    /// time; and the steps undone, for doing again.
+    undo: Vec<Vec<Edit>>,
+    redo: Vec<Vec<Edit>>,
+    /// The step being gathered between `begin_edits` and `end_edits`.
+    batch: Option<Vec<Edit>>,
     /// The rows with cells set since the last update (a row may be noted twice).
     changed_rows: Vec<u32>,
     /// More rows were set than `changed_rows` holds.
@@ -412,6 +447,9 @@ impl Table {
             touched: Vec::new(),
             value_touched: false,
             pending: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            batch: None,
             changed_rows: Vec::new(),
             changed_unknown: false,
             as_of: None,
@@ -493,21 +531,21 @@ impl Table {
         formula: Option<String>,
         agg: Agg,
     ) -> Result<usize, String> {
-        let total = match agg.op() {
-            None => None,
-            Some(op) => Some(
+        let mut totals = [None; 3];
+        if let Some(op) = agg.op() {
+            totals[slot(op)] = Some(
                 self.c
                     .add_total(&mut self.g, &format!("{op}({name})"), op, Some(&part))
                     .map_err(|e| e.to_string())?,
-            ),
-        };
+            );
+        }
         self.cols.push(Col {
             name: name.to_string(),
             kind,
             part,
             formula,
             agg,
-            total,
+            totals,
             filter: None,
             filter_text: String::new(),
         });
@@ -526,7 +564,7 @@ impl Table {
         }
         self.nodes = nodes;
         for per_column in self.groupings.values_mut() {
-            per_column.push(None);
+            per_column.push([None; 3]);
         }
         if let Some(by) = self.group_by {
             self.ensure_groupings(by)?;
@@ -629,8 +667,160 @@ impl Table {
         let row = *self
             .index
             .get(key)
-            .ok_or_else(|| format!("there is no row {key:?}"))?;
-        self.set_at(row as usize, col, value)
+            .ok_or_else(|| format!("there is no row {key:?}"))? as usize;
+        let before = self
+            .g
+            .value(self.nodes[row * self.cols.len() + col])
+            .clone();
+        self.set_at(row, col, value.clone())?;
+        if before.same_as(&value) {
+            return Ok(());
+        }
+        let edit = Edit {
+            key: key.to_string(),
+            col,
+            before,
+            after: value,
+        };
+        self.redo.clear();
+        match &mut self.batch {
+            Some(batch) => batch.push(edit),
+            None => self.push_undo(vec![edit]),
+        }
+        Ok(())
+    }
+
+    fn push_undo(&mut self, step: Vec<Edit>) {
+        if step.is_empty() {
+            return;
+        }
+        if self.undo.len() == MOST_UNDO {
+            self.undo.remove(0);
+        }
+        self.undo.push(step);
+    }
+
+    /// From here to [`end_edits`](Table::end_edits), every cell set with
+    /// [`set_cell`](Table::set_cell) is one step to undo: a paste, say.
+    pub fn begin_edits(&mut self) {
+        self.end_edits();
+        self.batch = Some(Vec::new());
+    }
+
+    pub fn end_edits(&mut self) {
+        if let Some(step) = self.batch.take() {
+            self.push_undo(step);
+        }
+    }
+
+    /// Puts back what the last [`set_cell`](Table::set_cell) (or step of
+    /// several) changed. Returns what was put back, in words, or `None` if
+    /// there was nothing to undo. Cells of rows since removed are left out.
+    pub fn undo(&mut self) -> Result<Option<String>, String> {
+        self.step(true)
+    }
+
+    /// Does again what the last [`undo`](Table::undo) put back.
+    pub fn redo(&mut self) -> Result<Option<String>, String> {
+        self.step(false)
+    }
+
+    fn step(&mut self, back: bool) -> Result<Option<String>, String> {
+        self.check_now()?;
+        self.end_edits();
+        let Some(step) = (if back {
+            self.undo.pop()
+        } else {
+            self.redo.pop()
+        }) else {
+            return Ok(None);
+        };
+        let mut set = 0;
+        // Backwards when undoing, so a cell set twice in a step ends at its first value.
+        let order: Vec<usize> = if back {
+            (0..step.len()).rev().collect()
+        } else {
+            (0..step.len()).collect()
+        };
+        for k in order {
+            let edit = &step[k];
+            let Some(&row) = self.index.get(&edit.key) else {
+                continue;
+            };
+            let value = if back { &edit.before } else { &edit.after };
+            if self.set_at(row as usize, edit.col, value.clone()).is_ok() {
+                set += 1;
+            }
+        }
+        let what = match step.as_slice() {
+            [one] => format!("{} of {}", self.cols[one.col].name, one.key),
+            many => format!("{set} of {} cells", many.len()),
+        };
+        if back {
+            self.redo.push(step);
+        } else {
+            self.undo.push(step);
+        }
+        Ok(Some(what))
+    }
+
+    /// Changes a column's total: in the bottom row, and in each group's row.
+    pub fn set_agg(&mut self, col: usize, agg: Agg) -> Result<(), String> {
+        let c = self.col(col)?;
+        if !matches!(agg, Agg::None | Agg::Count) && c.kind != Kind::Number {
+            return Err(format!(
+                "{}: only number columns have totals (any column can have a count)",
+                c.name
+            ));
+        }
+        if let Some(op) = agg.op().filter(|&op| c.totals[slot(op)].is_none()) {
+            // The total's node is made now, so it has no past to show.
+            self.check_now()?;
+            let c = &self.cols[col];
+            let id = self
+                .c
+                .add_total(&mut self.g, &format!("{op}({})", c.name), op, Some(&c.part))
+                .map_err(|e| e.to_string())?;
+            self.cols[col].totals[slot(op)] = Some(id);
+            self.pending = true;
+        }
+        self.cols[col].agg = agg;
+        if let Some(by) = self.group_by {
+            if agg.op().is_some_and(|op| {
+                self.groupings
+                    .get(&by)
+                    .is_none_or(|per_column| per_column[col][slot(op)].is_none())
+            }) {
+                self.check_now()?;
+            }
+            self.ensure_groupings(by)?;
+        }
+        self.structural = true;
+        Ok(())
+    }
+
+    /// The rows with these keys, in the view's order, as tab-separated text
+    /// for the clipboard: the key, then each of `cols`.
+    pub fn tsv(&self, keys: &HashSet<&str>, cols: &[usize]) -> String {
+        let clean = |text: &str| text.replace(['\t', '\n', '\r'], " ");
+        let mut out = String::new();
+        for &r in &self.sorted {
+            let key = self.keys[r as usize].as_str();
+            if !keys.contains(key) {
+                continue;
+            }
+            out.push_str(&clean(key));
+            for &col in cols.iter().filter(|&&col| col < self.cols.len()) {
+                out.push('\t');
+                match self.cell(r, col) {
+                    Value::Str(s) => out.push_str(&clean(s)),
+                    Value::Error(_) => out.push_str("#ERROR"),
+                    other => out.push_str(&other.to_string()),
+                }
+            }
+            out.push('\n');
+        }
+        out
     }
 
     /// Sets one cell of the row at `row` (its position in arrival order).
@@ -789,10 +979,10 @@ impl Table {
         let mut per_column = self
             .groupings
             .remove(&by)
-            .unwrap_or_else(|| vec![None; self.cols.len()]);
+            .unwrap_or_else(|| vec![[None; 3]; self.cols.len()]);
         let mut result = Ok(());
         for (k, col) in self.cols.iter().enumerate() {
-            let (None, Some(op)) = (per_column[k], col.agg.op()) else {
+            let Some(op) = col.agg.op().filter(|&op| per_column[k][slot(op)].is_none()) else {
                 continue;
             };
             let name = format!("{op}({}) by {}", col.name, self.cols[by].name);
@@ -800,7 +990,7 @@ impl Table {
                 .c
                 .add_grouping(&mut self.g, &name, op, &self.cols[by].part, Some(&col.part))
             {
-                Ok(index) => per_column[k] = Some(index),
+                Ok(index) => per_column[k][slot(op)] = Some(index),
                 Err(e) => {
                     result = Err(e.to_string());
                     break;
@@ -1213,7 +1403,8 @@ impl Table {
 
     /// A group's total of a column over every row, from the graph.
     fn group_node(&self, by: usize, key: &str, col: usize) -> Option<NodeId> {
-        let index = (*self.groupings.get(&by)?.get(col)?)?;
+        let op = self.cols.get(col)?.agg.op()?;
+        let index = self.groupings.get(&by)?.get(col)?[slot(op)]?;
         self.c.group_node(index, &Value::Str(key.into()))
     }
 
@@ -1340,7 +1531,7 @@ impl Table {
             } else if self.filter_on {
                 self.plain_totals[k]
             } else {
-                let number = col.total.and_then(|id| match self.read(id) {
+                let number = col.total().and_then(|id| match self.read(id) {
                     Value::F64(x) => Some(*x),
                     _ => None,
                 });
@@ -1384,7 +1575,9 @@ impl Table {
                 self.sorted.len()
             ));
         }
-        let id = c.total.ok_or_else(|| format!("{} has no total", c.name))?;
+        let id = c
+            .total()
+            .ok_or_else(|| format!("{} has no total", c.name))?;
         Ok(self.with_filter_note(self.with_average_note(c, self.g.explain_node(id))))
     }
 
@@ -1586,7 +1779,7 @@ impl Table {
             .cols
             .get(col)
             .filter(|_| !self.filter_on)
-            .and_then(|c| Some((c.total?, c.agg)))
+            .and_then(|c| Some((c.total()?, c.agg)))
             .and_then(|(id, agg)| {
                 self.trend(id, points, agg.of_graph(Some(1.0), self.sorted.len()))
             });

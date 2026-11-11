@@ -188,6 +188,10 @@ their order. Nothing can be changed until it is back at now.
 A text column's filter can name several values (`=Rates|FX`); the column's
 menu lists its values to tick.
 
+Edits can be undone and done again (a paste is one step), a column's total
+can be changed from its menu, and cells copy and paste as tab-separated
+text, to and from a spreadsheet.
+
 While a filter is on, totals are of the rows that pass it, added up the
 plain way; the graph's totals are of every row.
 

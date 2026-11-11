@@ -32,7 +32,8 @@ export class WatershedGrid {
    *     (`trend` draws how the cell moved over recent updates; needs `grid.keep_history`),
    *   loadMore: async () => boolean, called as the person nears the end: add
    *     rows to the grid and resolve to whether there may be more,
-   *   onStatus(status), onFocus(focus), onError(message), onGroup(col)
+   *   onStatus(status), onFocus(focus), onError(message), onNote(message),
+   *   onGroup(col), onColumns() (a column's total was changed from its menu)
    */
   constructor(root, grid, options = {}) {
     this.root = root;
@@ -44,6 +45,8 @@ export class WatershedGrid {
     this.onStatus = options.onStatus ?? (() => {});
     this.onFocus = options.onFocus ?? (() => {});
     this.onGroup = options.onGroup ?? (() => {});
+    this.onNote = options.onNote ?? (() => {});
+    this.onColumns = options.onColumns ?? (() => {});
     this.onError = options.onError ?? ((message) => console.warn(message));
 
     this.cols = [];
@@ -109,6 +112,8 @@ export class WatershedGrid {
       if (hit && hit.data.k !== undefined) this.edit(hit.line, hit.pos);
     });
     this.body.addEventListener("keydown", (e) => this.key(e));
+    this.body.addEventListener("copy", (e) => this.copy(e));
+    this.body.addEventListener("paste", (e) => this.paste(e));
     this.footRow.addEventListener("click", (e) => {
       const cell = e.target.closest(".wg-cell");
       if (!cell || cell._pos === 0) return;
@@ -451,6 +456,7 @@ export class WatershedGrid {
         else item(`Group by ${info.name}`, () => this.setGroup(col));
       }
       menu.append(el("hr"));
+      this.totalChoice(menu, col, info);
       if (info.kind === "text") this.valueFilter(menu, col);
     }
     menu.append(el("div", "wg-menu-title", "Columns"));
@@ -480,6 +486,29 @@ export class WatershedGrid {
     this.menuPos = pos;
     document.addEventListener("pointerdown", this.outside, true);
     document.addEventListener("keydown", this.escape);
+  }
+
+  /** Adds the choice of a column's total to its menu. */
+  totalChoice(menu, col, info) {
+    menu.append(el("div", "wg-menu-title", "Total"));
+    const chips = el("div", "wg-chips");
+    for (const agg of info.kind === "number" ? ["sum", "avg", "min", "max", "count", "none"] : ["count", "none"]) {
+      const chip = el("button", "wg-chip", agg);
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", String(info.agg === agg));
+      chip.addEventListener("click", () => {
+        this.closeMenu();
+        try {
+          this.grid.set_agg(col, agg);
+        } catch (error) {
+          return this.onError(error.message);
+        }
+        this.columnsChanged();
+        this.onColumns();
+      });
+      chips.append(chip);
+    }
+    menu.append(chips, el("hr"));
   }
 
   /** Adds a tick list of a text column's values to its menu; unticking one filters it out. */
@@ -890,7 +919,11 @@ export class WatershedGrid {
       Home: e.metaKey || e.ctrlKey ? [0, across] : [f.line, 0],
       End: e.metaKey || e.ctrlKey ? [this.viewLen - 1, across] : [f.line, this.display.length - 1],
     };
-    if (moves[e.key]) {
+    const command = e.metaKey || e.ctrlKey;
+    if (command && (e.key === "z" || e.key === "Z" || e.key === "y")) {
+      e.preventDefault();
+      this.undo(e.key === "y" || e.shiftKey);
+    } else if (moves[e.key]) {
       e.preventDefault();
       this.moveFocus(...moves[e.key]);
     } else if (this.focus?.kind === "group" && (e.key === "Enter" || e.key === " ")) {
@@ -966,6 +999,69 @@ export class WatershedGrid {
     if (commit && moveDown && this.focus?.kind === "cell") {
       this.moveFocus(this.focus.line + moveDown, this.display.indexOf(this.focus.pos));
     }
+  }
+
+  // ------------------------------------------------- undo, copy and paste
+
+  /** Puts back the last edit (or pasted block), or with `again` does it again. */
+  undo(again = false) {
+    try {
+      const what = again ? this.grid.redo() : this.grid.undo();
+      this.refresh();
+      this.onNote(what ? `${again ? "Did again" : "Undid"}: ${what}.` : `Nothing to ${again ? "do again" : "undo"}.`);
+    } catch (error) {
+      this.onError(error.message);
+    }
+  }
+
+  /** Copies the selected rows, or with one or none selected the focused cell, as tab-separated text. */
+  copy(e) {
+    if (this.editing) return;
+    let text = null;
+    if (this.selected.size > 1) {
+      text = this.grid.tsv([...this.selected], Uint32Array.from(this.display.filter((pos) => pos > 0).map((pos) => pos - 1)));
+      this.onNote(`Copied ${this.selected.size.toLocaleString("en-US")} rows.`);
+    } else if (this.focus?.kind === "cell") {
+      const data = this.live.get(this.focus.line)?._data;
+      const value = this.focus.pos === 0 ? data?.k : data?.c[this.focus.col];
+      if (value !== undefined && value !== null && typeof value !== "object") text = String(value);
+    }
+    if (text === null) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", text);
+  }
+
+  /**
+   * Pastes tab-separated text into cells, from the focused cell rightwards
+   * and downwards, as a spreadsheet does. Calculated columns and what does
+   * not read as the column's kind are skipped. The whole paste is one step to undo.
+   */
+  paste(e) {
+    if (this.editing) return;
+    e.preventDefault();
+    if (this.focus?.kind !== "cell") return this.onError("Click a cell to paste from there.");
+    const block = e.clipboardData.getData("text/plain").replace(/\r/g, "").replace(/\n$/, "").split("\n").map((line) => line.split("\t"));
+    const across = Math.max(1, this.display.indexOf(this.focus.pos));
+    // The rows from the focused one down, passing over group lines.
+    const rows = JSON.parse(this.grid.rows(this.focus.line, block.length * 2 + 64)).filter((line) => line.k !== undefined);
+    let [set, skipped] = [0, 0];
+    this.grid.begin_edits();
+    block.slice(0, rows.length).forEach((cells, r) => {
+      cells.forEach((text, c) => {
+        const pos = this.display[across + c];
+        try {
+          if (pos === undefined || !this.cols[pos - 1].editable) throw new Error("not a cell that can be set");
+          this.grid.set_cell(rows[r].k, pos - 1, text);
+          set += 1;
+        } catch {
+          skipped += 1;
+        }
+      });
+    });
+    this.grid.end_edits();
+    this.refresh();
+    const count = (n) => `${n.toLocaleString("en-US")} cell${n === 1 ? "" : "s"}`;
+    this.onNote(`Pasted ${count(set)}${skipped ? `; skipped ${count(skipped)}` : ""}.`);
   }
 
   // -------------------------------------------------------------- selection

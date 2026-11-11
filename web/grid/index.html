@@ -116,7 +116,7 @@ body.embed header { display: none; }
     <button id="collapse" disabled>Close all</button>
     <span class="sep"></span>
     <button id="stream" aria-pressed="false">Stream prices</button>
-    <label>marks per frame <input type="range" id="rate" min="0" max="3.5" step="0.01" value="2"> <output id="rate-out">100</output></label>
+    <label title="How many trades' marks move each second. Slow enough to follow by default; drag right for thousands.">price changes a second <input type="range" id="rate" min="0" max="5.3" step="0.01" value="1.3"> <output id="rate-out">20</output></label>
     <span class="sep"></span>
     <label title="A named value used by the net column. Changing it recalculates net in every row.">fee_bps <input type="number" id="fee" value="2" min="0" max="100" step="0.5"></label>
     <span class="sep"></span>
@@ -180,7 +180,7 @@ body.embed header { display: none; }
   <span id="f-groups-wrap" hidden><b id="f-groups">0</b> groups</span>
   <span><b id="f-selected">0</b> selected</span>
   <span id="f-more-wrap" hidden><span id="f-more"></span> <button id="more">Load more</button></span>
-  <span class="hint">Click a header to sort (<kbd>Shift</kbd> adds), drag it to move, <kbd>⋮</kbd> to pin, hide or group. Filters: <kbd>&gt;100</kbd> <kbd>5..10</kbd> <kbd>=Rates</kbd>. <kbd>Enter</kbd> edits.</span>
+  <span class="hint">Click a header to sort (<kbd>Shift</kbd> adds), drag it to move, <kbd>⋮</kbd> to pin, hide or group. Filters: <kbd>&gt;100</kbd> <kbd>5..10</kbd> <kbd>=Rates</kbd>. <kbd>Enter</kbd> edits, <kbd>⌘Z</kbd> undoes, copy and paste work on cells.</span>
 </footer>
 
 <script>
@@ -310,6 +310,11 @@ async function build(size) {
     onStatus: status,
     onFocus: showWhy,
     onError: (message) => note(message, "bad"),
+    onNote: (message) => note(message, "good"),
+    onColumns: () => {
+      columns = JSON.parse(grid.columns());
+      listChartColumns();
+    },
     onGroup: (col) => {
       $("group").value = String(col);
       $("expand").disabled = $("collapse").disabled = col < 0;
@@ -382,6 +387,7 @@ function setStreaming(on) {
   streaming = on;
   $("stream").setAttribute("aria-pressed", String(on));
   $("stream").textContent = on ? "Stop prices" : "Stream prices";
+  lastTick = 0;
   if (on) requestAnimationFrame(tick);
 }
 
@@ -396,12 +402,24 @@ function showing() {
   }
 }
 
-function tick() {
+let lastTick = 0; // when the last frame was, while streaming
+let due = 0; // changes owed, as a fraction builds up between frames
+
+function tick(now) {
   if (!streaming || building) return;
   // Not showing (its tab is not the one open): rest, and look again shortly.
   if (!showing()) return void setTimeout(() => requestAnimationFrame(tick), 400);
-  grid.demo_tick(rate());
-  view.refresh();
+  // Changes come due at the chosen rate; a slow rate skips frames, so each
+  // change can be seen, and a fast one sends many at once.
+  const elapsed = lastTick ? Math.min(now - lastTick, 250) : 16;
+  lastTick = now;
+  due += (rate() * elapsed) / 1000;
+  const changes = Math.floor(due);
+  if (changes > 0) {
+    due -= changes;
+    grid.demo_tick(changes);
+    view.refresh();
+  }
   requestAnimationFrame(tick);
 }
 
