@@ -352,6 +352,13 @@ value, and the page shows its count, sum, average, least and greatest,
 kept current as prices move. The grid names its rows, cells and headers for
 a screen reader and says what is in the cell the focus moves to.
 
+The grid has themes: `new WatershedGrid(el, grid, { theme: "dark" })`, or
+`view.setTheme("paper")` later. `WatershedGrid.themes` lists them (light,
+dark, paper, dusk, terminal, high contrast), and the page has a list to pick
+from. With none, the grid takes the page's colours. A theme is one rule in
+`web/grid/grid.css` that sets the grid's `--wg-` colours, fonts and corners,
+so one of your own is one more rule, `[data-wg-theme="mine"] { ... }`.
+
 While a filter is on, totals are of the rows that pass it, added up the
 plain way; the graph's totals are of every row.
 
