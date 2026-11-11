@@ -309,6 +309,7 @@ def test_a_collections_formula_reads_its_fields_and_columns():
     assert revenue.value == 15.0
     assert orders.get("a", big) is False
     assert orders.get("b", big) is True
+    g.check_consistency()
 
 
 def test_groups_by_a_calculated_column_follow_it_within_the_update():

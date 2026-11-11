@@ -99,7 +99,14 @@ g.keep_history(1_000);                      // the latest update and the 1,000 b
 g.get_at(total, 41)?;                       // `total` after update 41
 orders.get_at(&g, "o-1042", line, 41)?;     // a row's column then
 orders.keys_at(&g, 41)?;                    // the rows there were
+g.explain_at(total, 41)?;                   // why it had that value then
 ```
+
+`explain_at` is `explain` for an earlier update: the values of then, the
+branch of an `if` each node took then, the members a total had then, and
+`[changed]` on what that update changed. Expressions are today's: a node
+given a new one by `redefine` since is shown with its value and a note. The
+grid's "why this value" uses it while the grid is looking back.
 
 An update moves each value it overwrites into a chain for that node, 32
 bytes each, and a value that comes out the same is never recorded. On a
@@ -338,6 +345,8 @@ and the tests failed every time:
 | When many rows change at once, rebuild only the lower half of a total's partial results | ✅ |
 | Never move a row whose calculated group changed during an update | ✅ |
 | Count a row that joins a group during an update from the next update instead | ✅ |
+| Explain an earlier update by the branch of an `if` that was not taken then | ✅ |
+| Explain a total as of an earlier update with members that joined later | ✅ |
 
 ### 4. Ask for a second opinion
 
@@ -445,8 +454,8 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **Removing nodes** in general (collections reuse rows instead, and build
   files redefine a removed value as a constant), and **pull mode** (only
   calculating what someone is watching).
-- **More time travel:** restoring an earlier update, `explain` and formulas
-  as of an earlier update (full lineage), a collection's groups as of an
-  earlier update, and a sink that writes to S3.
+- **More time travel:** restoring an earlier update, a redefined node's
+  earlier expressions (so `explain_at` can go back past a `redefine`), a
+  collection's groups as of an earlier update, and a sink that writes to S3.
 - **Bindings** for the JVM, publishing the Python package, and the cluster.
   Formulas as text have no whole-number constants yet.

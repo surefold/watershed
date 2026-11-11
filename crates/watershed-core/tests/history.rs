@@ -367,3 +367,125 @@ fn an_empty_collection_still_says_when_an_update_cannot_be_read() -> Result {
     assert_eq!(orders.keys_at(&g, 1)?, Vec::<String>::new());
     Ok(())
 }
+
+#[test]
+fn a_node_can_be_explained_as_of_an_earlier_update() -> Result {
+    let mut g = Graph::new();
+    let qty = g.input("qty", 10.0)?;
+    let price = g.input("price", 2.5)?;
+    let tax = g.input("tax_rate", 0.2)?;
+    let subtotal = g.define("subtotal", qty * price)?;
+    let total = g.define("total", subtotal * (1.0 + tax))?;
+    g.keep_history(100);
+    g.set(qty, 12.0)?;
+    g.stabilize(); // update 1
+    g.set(tax, 0.5)?;
+    g.stabilize(); // update 2
+    g.set(price, 1.0)?;
+    g.stabilize(); // update 3
+
+    assert_eq!(
+        g.explain_at(total, 1)?,
+        "\
+total = 36  ← subtotal * (1 + tax_rate)  [changed]
+├── tax_rate = 0.2  (input)
+└── subtotal = 30  ← qty * price  [changed]
+    ├── qty = 12  (input)  [changed]
+    └── price = 2.5  (input)
+"
+    );
+    // Update 2 changed the tax rate and the total, and nothing under subtotal.
+    assert_eq!(
+        g.explain_at(total, 2)?,
+        "\
+total = 45  ← subtotal * (1 + tax_rate)  [changed]
+├── tax_rate = 0.5  (input)  [changed]
+└── subtotal = 30  ← qty * price
+    ├── qty = 12  (input)
+    └── price = 2.5  (input)
+"
+    );
+    // The latest update explains the same either way.
+    assert_eq!(g.explain_at(total, 3)?, g.explain(total));
+    assert!(matches!(
+        g.explain_at(total, 9),
+        Err(CalcError::EpochUnavailable { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn explaining_an_earlier_update_follows_the_branch_taken_then() -> Result {
+    let mut g = Graph::new();
+    let use_a = g.input("use_a", true)?;
+    let a = g.input("a", 1.0)?;
+    let b = g.input("b", 2.0)?;
+    let pick = g.define("pick", when(use_a).then(a).otherwise(b))?;
+    g.keep_history(100);
+    g.set(a, 5.0)?;
+    g.stabilize(); // update 1: reads a
+    g.set(use_a, false)?;
+    g.stabilize(); // update 2: reads b
+
+    assert_eq!(
+        g.explain_at(pick, 1)?,
+        "\
+pick = 5  ← if(use_a, a, b)  [changed]
+├── use_a = true  (input)
+└── a = 5  (input)  [changed]
+"
+    );
+    assert_eq!(
+        g.explain_at(pick, 2)?,
+        "\
+pick = 2  ← if(use_a, a, b)  [changed]
+├── use_a = false  (input)  [changed]
+└── b = 2  (input)
+"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_redefined_node_is_not_explained_before_its_new_expression() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 3.0)?;
+    let b = g.input("b", 4.0)?;
+    let out = g.define("out", a + b)?;
+    let top = g.define("top", out * 2.0)?;
+    g.keep_history(100);
+    g.stabilize(); // update 1
+    g.redefine(out, a * b)?;
+    g.stabilize(); // update 2
+
+    assert_eq!(
+        g.explain_at(top, 1)?,
+        "\
+top = 14  ← out * 2
+└── out = 7  ← (redefined at update 2; its earlier expression is not kept)
+"
+    );
+    assert_eq!(g.explain_at(top, 2)?, g.explain(top));
+    Ok(())
+}
+
+#[test]
+fn a_total_explained_as_of_an_earlier_update_lists_the_rows_it_had() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    let total = orders.sum(&mut g, "total", qty)?;
+    orders.upsert(&mut g, "a", &[qty.is(1.0)])?;
+    g.keep_history(100);
+    g.stabilize(); // update 1
+    orders.upsert(&mut g, "b", &[qty.is(2.0)])?;
+    g.stabilize(); // update 2
+
+    let then = g.explain_at(total, 1)?;
+    assert!(then.starts_with("total = 1  ← sum of 1 members"), "{then}");
+    assert!(!then.contains("orders[1]"), "{then}");
+    let now = g.explain_at(total, 2)?;
+    assert!(now.starts_with("total = 3  ← sum of 2 members"), "{now}");
+    assert_eq!(now, g.explain(total));
+    Ok(())
+}

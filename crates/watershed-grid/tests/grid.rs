@@ -631,6 +631,13 @@ fn the_grid_can_show_itself_as_of_an_earlier_update() {
             .contains("is not kept")
     );
 
+    // A cell and a total say why they had the values of then.
+    let why = t.explain("a", 1).unwrap();
+    assert!(why.contains("= 1  (input)"), "{why}");
+    let why = t.explain_total(1).unwrap();
+    assert!(why.contains("= 11  ← sum of 2 members"), "{why}");
+    assert!(!why.contains("50"), "{why}");
+
     t.set_as_of(None).unwrap();
     t.update();
     assert_eq!(t.view_keys(), ["a", "b", "c"]);

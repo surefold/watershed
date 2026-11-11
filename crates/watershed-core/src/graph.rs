@@ -266,6 +266,10 @@ pub struct Graph {
     rekey: Vec<u32>,
     /// Whether an update is in progress.
     updating: bool,
+    /// For each node given a new expression by `redefine`, the update from
+    /// which it has had its current one. Earlier expressions are not kept,
+    /// so this is how far back the node can be explained.
+    redefined_from: HashMap<NodeId, u64>,
 }
 
 /// The level size from which recalculating in parallel pays off. Measured on
@@ -318,6 +322,7 @@ impl Graph {
             watched: HashMap::new(),
             rekey: Vec::new(),
             updating: false,
+            redefined_from: HashMap::new(),
         }
     }
 
@@ -604,7 +609,7 @@ impl Graph {
         // Members waiting to join aggregates are links too: join them now,
         // so the search for a cycle below sees them.
         for (aggregate, value, present) in std::mem::take(&mut self.pending_members) {
-            self.join_aggregate(aggregate, value, present);
+            self.join_aggregate(aggregate, value, present, self.epoch + 1);
             self.redefined.insert(aggregate);
         }
 
@@ -660,6 +665,7 @@ impl Graph {
         }
         self.raise_users(id);
         self.redefined.insert(id);
+        self.redefined_from.insert(id, self.epoch + 1);
         self.relink_pending = true;
         self.levels = None;
         Ok(())
@@ -913,6 +919,7 @@ impl Graph {
         }
         let code = u32::try_from(self.aggregates.len()).expect("too many aggregates");
         let mut aggregate = Aggregate::new(op, value_type);
+        aggregate.joining_from(self.epoch);
         for &(value, present) in members {
             aggregate.push(value.0, present.0);
         }
@@ -983,7 +990,7 @@ impl Graph {
             // A row joining a group during an update: the total is above
             // the level being recalculated, so it is still to come, and
             // counts the member in this update.
-            self.join_aggregate(aggregate, value, present);
+            self.join_aggregate(aggregate, value, present, self.epoch);
             self.redefined.insert(aggregate);
             self.queue[hot.height as usize].push(aggregate);
         } else {
@@ -1023,9 +1030,10 @@ impl Graph {
 
     /// Adds a member staged by `extend_aggregate` and links it. The caller
     /// queues the aggregate, so that it is recalculated to count the member.
-    fn join_aggregate(&mut self, aggregate: NodeId, value: NodeId, present: NodeId) {
+    fn join_aggregate(&mut self, aggregate: NodeId, value: NodeId, present: NodeId, from: u64) {
         let hot = self.hot[aggregate.index()];
         let code = hot.code as usize;
+        self.aggregates[code].joining_from(from);
         // One link per node, even when the value and presence are the same
         // node (as in a count) or the node is already part of a member.
         let (new_value, new_present) = self.aggregates[code].push(value.0, present.0);
@@ -1081,7 +1089,7 @@ impl Graph {
             self.repack();
         }
         for (aggregate, value, present) in std::mem::take(&mut self.pending_members) {
-            self.join_aggregate(aggregate, value, present);
+            self.join_aggregate(aggregate, value, present, epoch);
             self.redefined.insert(aggregate);
         }
         // Queued now, not when they were redefined, because a later
@@ -1746,21 +1754,113 @@ impl Graph {
         }
         let mut out = String::new();
         let mut shown = HashSet::new();
-        self.explain_into(id, "", "", &mut shown, &mut out);
+        self.explain_into(id, None, "", "", &mut shown, &mut out);
         out
+    }
+
+    /// [`explain`](Self::explain) as of the end of update `epoch`, with
+    /// history on: the value the node had then, what it read to get it
+    /// (the branch of an `if` it took then), and what changed in that
+    /// update.
+    ///
+    /// The values are those of the update; expressions are today's. A node
+    /// given a new expression by [`redefine`](Self::redefine) after that
+    /// update is shown with its value and a note, and not explained
+    /// further, since its earlier expression is not kept. A total lists the
+    /// members that existed then.
+    pub fn explain_at<T>(&self, node: impl Handle<T>, epoch: u64) -> Result<String, CalcError> {
+        let at = node.node_ref();
+        self.check_ref(at)?;
+        self.explain_node_at(at.node, epoch)
+    }
+
+    /// [`explain_at`](Self::explain_at) for a node given by id.
+    pub fn explain_node_at(&self, id: NodeId, epoch: u64) -> Result<String, CalcError> {
+        self.value_at(id, epoch)?;
+        let mut out = String::new();
+        let mut shown = HashSet::new();
+        self.explain_into(id, Some(epoch), "", "", &mut shown, &mut out);
+        Ok(out)
+    }
+
+    /// Whether the node has had its current expression since update
+    /// `epoch` or before, so that it says how the node was calculated then.
+    fn expression_covers(&self, id: NodeId, epoch: u64) -> bool {
+        self.redefined_from
+            .get(&id)
+            .is_none_or(|&from| from <= epoch)
+    }
+
+    /// The node's value at update `at` (now, if `None`). The caller has
+    /// checked the update can be read and the node existed.
+    fn value_then(&self, id: NodeId, at: Option<u64>) -> &Value {
+        match at {
+            None => &self.values[id.index()],
+            Some(epoch) => self.value_at(id, epoch).unwrap_or(&self.values[id.index()]),
+        }
+    }
+
+    /// Whether update `at` (the latest, if `None`) changed the node's value.
+    fn changed_then(&self, id: NodeId, at: Option<u64>) -> bool {
+        let i = id.index();
+        let epoch = at.unwrap_or(self.epoch);
+        if epoch == 0 {
+            return false;
+        }
+        if self.changed_in[i] <= epoch {
+            return self.changed_in[i] == epoch;
+        }
+        self.history
+            .as_ref()
+            .is_some_and(|history| history.since(i, epoch) == epoch)
+    }
+
+    /// What the node read to get its value at update `at` (now, if
+    /// `None`); `None` if its expression then is not kept.
+    fn reads_then(&self, id: NodeId, at: Option<u64>) -> Option<Vec<NodeId>> {
+        let Some(epoch) = at else {
+            return Some(self.reads(id));
+        };
+        if !self.expression_covers(id, epoch) {
+            return None;
+        }
+        let hot = self.hot[id.index()];
+        let reads = if self.is_dynamic(hot) {
+            let mut reads = Vec::new();
+            self.general[hot.code as usize]
+                .decompile(self.id)
+                .reads_given(&|node| self.value_then(node, at).clone(), &mut reads);
+            reads.sort();
+            reads.dedup();
+            reads
+        } else if hot.kind == Kind::Aggregate {
+            // The members it had then; later ones had not joined.
+            let mut nodes: Vec<NodeId> = self.aggregates[hot.code as usize]
+                .members_at(epoch)
+                .iter()
+                .flat_map(|&(value, present)| [NodeId(value), NodeId(present)])
+                .collect();
+            nodes.sort();
+            nodes.dedup();
+            nodes
+        } else {
+            self.dependencies(id)
+        };
+        Some(reads)
     }
 
     fn explain_into(
         &self,
         id: NodeId,
+        at: Option<u64>,
         first: &str,
         rest: &str,
         shown: &mut HashSet<NodeId>,
         out: &mut String,
     ) {
-        let _ = write!(out, "{first}{}", self.summary(id));
+        let _ = write!(out, "{first}{}", self.summary(id, at));
         // What the node actually read, which is what its value depends on.
-        let deps = self.reads(id);
+        let deps = self.reads_then(id, at).unwrap_or_default();
         if !deps.is_empty() && !shown.insert(id) {
             out.push_str("  (see above)\n");
             return;
@@ -1779,6 +1879,7 @@ impl Graph {
             };
             self.explain_into(
                 dep,
+                at,
                 &format!("{rest}{branch}"),
                 &format!("{rest}{indent}"),
                 shown,
@@ -1790,12 +1891,16 @@ impl Graph {
         }
     }
 
-    fn summary(&self, id: NodeId) -> String {
-        let how = match self.formula(id) {
-            None => "(input)".to_string(),
-            Some(formula) => format!("← {formula}"),
+    fn summary(&self, id: NodeId, at: Option<u64>) -> String {
+        let how = match (self.formula(id, at), at) {
+            (None, _) => "(input)".to_string(),
+            (Some(_), Some(epoch)) if !self.expression_covers(id, epoch) => format!(
+                "← (redefined at update {}; its earlier expression is not kept)",
+                self.redefined_from[&id]
+            ),
+            (Some(formula), _) => format!("← {formula}"),
         };
-        let changed = if self.epoch > 0 && self.changed_in[id.index()] == self.epoch {
+        let changed = if self.changed_then(id, at) {
             "  [changed]"
         } else {
             ""
@@ -1803,18 +1908,23 @@ impl Graph {
         format!(
             "{} = {}  {how}{changed}",
             self.name(id),
-            self.values[id.index()]
+            self.value_then(id, at)
         )
     }
 
     /// How a node is calculated, for people to read; `None` for an input.
-    fn formula(&self, id: NodeId) -> Option<String> {
+    /// A total counts the members it had at update `at` (now, if `None`).
+    fn formula(&self, id: NodeId, at: Option<u64>) -> Option<String> {
         let hot = self.hot[id.index()];
         match hot.kind {
             Kind::Input => None,
             Kind::Aggregate => {
                 let a = &self.aggregates[hot.code as usize];
-                Some(format!("{} of {} members", a.op, a.members.len()))
+                let members = match at {
+                    Some(epoch) => a.members_at(epoch).len(),
+                    None => a.members.len(),
+                };
+                Some(format!("{} of {members} members", a.op))
             }
             Kind::Float | Kind::General => self.expression(id).map(|ir| self.render(&ir)),
         }
@@ -1839,7 +1949,9 @@ impl Graph {
         let rows: Vec<(usize, [String; 5], String)> = self
             .node_ids()
             .map(|id| {
-                let how = self.formula(id).unwrap_or_else(|| "input".to_string());
+                let how = self
+                    .formula(id, None)
+                    .unwrap_or_else(|| "input".to_string());
                 let mut marks = String::new();
                 if recalculated.contains(&id) {
                     marks.push('*');
@@ -1903,7 +2015,7 @@ impl Graph {
         );
         for id in self.node_ids() {
             let changed = self.epoch > 0 && self.changed_in[id.index()] == self.epoch;
-            let (shape, how) = match self.formula(id) {
+            let (shape, how) = match self.formula(id, None) {
                 None => ("box", "input".to_string()),
                 Some(formula) => ("ellipse", formula),
             };
