@@ -926,6 +926,140 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
     Ok(())
 }
 
+/// Random inserts, updates and removals on a collection with history on.
+/// After every update, every key is read at every update history covers and
+/// compared with a plain copy of the rows taken at that update. Removed rows'
+/// slots are reused, so a key moves between slots and a slot between keys.
+fn run_collection_history(
+    seed: u64,
+    keys: usize,
+    steps: usize,
+    keep: Option<u64>,
+    warm_up: usize,
+) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    use watershed_core::Collection;
+    let e = |e: CalcError| e.to_string();
+    let keep = keep.unwrap_or(u64::MAX);
+    let mut rng = Rng(seed);
+    let mut g = Graph::new();
+    let bonus = g.input("bonus", 1_i64).map_err(e)?;
+    let mut c = Collection::new(&g, "rows");
+    let x = c.field::<i64>("x").map_err(e)?;
+    let y = c.field::<i64>("y").map_err(e)?;
+    let score = c.column(&mut g, "score", x * 2 + y + bonus).map_err(e)?;
+    let mut model: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    let mut bonus_value = 1_i64;
+    // What each update should have left: key -> (x, score).
+    let mut snapshots: BTreeMap<u64, BTreeMap<String, (i64, i64)>> = BTreeMap::new();
+    let all_keys: Vec<String> = (0..keys).map(|k| format!("k{k}")).collect();
+    // The rows as of the last update, for when history starts.
+    let mut last: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    for step in 0..steps {
+        let changes = 1 + rng.below(4);
+        // History starts part way through a step's changes, so some changes
+        // made while it was off count from its first update.
+        let start_after = rng.below(changes + 1);
+        for change in 0..changes {
+            if step == warm_up && change == start_after {
+                g.keep_history(keep);
+                snapshots.insert(g.epoch(), last.clone());
+            }
+            let key = rng.pick(&all_keys);
+            let (vx, vy) = (rng.below(21) as i64 - 10, rng.below(21) as i64 - 10);
+            match rng.below(4) {
+                0 => {
+                    c.remove(&mut g, &key).map_err(e)?;
+                    model.remove(&key);
+                }
+                1 if model.contains_key(&key) => {
+                    c.upsert(&mut g, &key, &[y.is(vy)]).map_err(e)?;
+                    model.get_mut(&key).unwrap().1 = vy;
+                }
+                _ => {
+                    c.upsert(&mut g, &key, &[x.is(vx), y.is(vy)]).map_err(e)?;
+                    model.insert(key, (vx, vy));
+                }
+            }
+        }
+        if step == warm_up && start_after == changes {
+            g.keep_history(keep);
+            snapshots.insert(g.epoch(), last.clone());
+        }
+        if rng.percent(15) {
+            bonus_value = rng.below(5) as i64;
+            g.set(bonus, bonus_value).map_err(e)?;
+        }
+        let report = g.stabilize();
+        last = model
+            .iter()
+            .map(|(k, &(vx, vy))| (k.clone(), (vx, vx * 2 + vy + bonus_value)))
+            .collect();
+        if step < warm_up {
+            continue;
+        }
+        snapshots.insert(report.epoch, last.clone());
+        let (oldest, latest) = g.history_range().ok_or("history is off")?;
+        for (&epoch, then) in &snapshots {
+            if epoch < oldest {
+                if !matches!(
+                    c.keys_at(&g, epoch),
+                    Err(CalcError::EpochUnavailable { .. })
+                ) {
+                    return Err(format!("update {epoch} should be forgotten"));
+                }
+                continue;
+            }
+            let found = c.keys_at(&g, epoch).map_err(e)?;
+            let expected: Vec<String> = then.keys().cloned().collect();
+            if found != expected {
+                return Err(format!(
+                    "at update {epoch} (latest {latest}): keys {found:?}, expected {expected:?}"
+                ));
+            }
+            for key in &all_keys {
+                let had = c.contains_at(&g, key, epoch).map_err(e)?;
+                match then.get(key) {
+                    Some(&(vx, vscore)) => {
+                        let got = (
+                            c.get_at(&g, key, x, epoch).map_err(e)?,
+                            c.get_at(&g, key, score, epoch).map_err(e)?,
+                        );
+                        if !had || got != (vx, vscore) {
+                            return Err(format!(
+                                "row {key} at update {epoch}: {got:?} (present {had}), expected {:?}",
+                                (vx, vscore)
+                            ));
+                        }
+                    }
+                    None => {
+                        if had || !matches!(c.get_at(&g, key, x, epoch), Err(CalcError::Invalid(_)))
+                        {
+                            return Err(format!("row {key} should be absent at update {epoch}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    #[test]
+    fn a_collection_reads_as_it_was_at_every_update_history_covers(
+        seed in any::<u64>(),
+        keys in 1usize..12,
+        steps in 1usize..25,
+        keep in proptest::option::of(0u64..8),
+        warm_up in 0usize..5,
+    ) {
+        run_collection_history(seed, keys, steps, keep, warm_up).map_err(TestCaseError::fail)?;
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
