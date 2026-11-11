@@ -115,26 +115,20 @@ impl Agg {
         }
     }
 
-    /// The total of these values, worked out the plain way. Used while a
-    /// filter is on, when the graph's totals (of every row) are not the ones
-    /// to show.
-    fn fold<'a>(self, values: impl Iterator<Item = &'a Value>) -> f64 {
-        if self == Agg::Count {
-            return values.count() as f64;
-        }
-        let numbers = values.filter_map(|v| match v {
-            Value::F64(x) => Some(*x),
-            _ => None,
-        });
+    /// The total of these numbers, worked out the plain way. Used where
+    /// the graph's totals are not the ones to show: while a filter is on,
+    /// and for the groups of a table too big for the graph to keep them. A
+    /// cell that holds no number (an error) comes as not-a-number, and makes
+    /// a sum or an average not a number too.
+    fn fold(self, numbers: impl ExactSizeIterator<Item = f64>) -> f64 {
+        let rows = numbers.len();
         match self {
-            Agg::None | Agg::Count => f64::NAN,
+            Agg::None => f64::NAN,
+            Agg::Count => rows as f64,
             Agg::Sum => numbers.sum(),
+            Agg::Avg => numbers.sum::<f64>() / rows as f64,
             Agg::Min => numbers.fold(f64::INFINITY, f64::min),
             Agg::Max => numbers.fold(f64::NEG_INFINITY, f64::max),
-            Agg::Avg => {
-                let (sum, n) = numbers.fold((0.0, 0usize), |(sum, n), x| (sum + x, n + 1));
-                sum / n as f64
-            }
         }
     }
 
@@ -340,6 +334,26 @@ const GROUP_BUDGET: usize = 100_000;
 /// out from scratch, which is quicker by then anyway.
 const MOST_TRACKED: usize = 1 << 16;
 
+/// A group's rows while the view is being worked out, in sorted order; or
+/// every row, when rows are not grouped.
+struct Bucket {
+    key: String,
+    rows: Vec<u32>,
+    /// Each column's total over these rows, if it is already known: the
+    /// bucket is a group that did not change since it was last added up.
+    plain: Option<Vec<f64>>,
+}
+
+impl Bucket {
+    fn new(key: &str, rows: Vec<u32>) -> Bucket {
+        Bucket {
+            key: key.to_string(),
+            rows,
+            plain: None,
+        }
+    }
+}
+
 /// One entry of the view with this bit set is a group; otherwise a row.
 const GROUP: u32 = 1 << 31;
 
@@ -379,6 +393,14 @@ pub struct Table {
     group_by: Option<usize>,
     /// For each column that has been grouped by, each column's grouping in the collection.
     groupings: HashMap<usize, Vec<[Option<usize>; 3]>>,
+    /// For each column with a total worked out from its numbers, every
+    /// row's number in that column, side by side (empty for other columns).
+    /// The grid adds totals up from these rather than from the graph, whose
+    /// values for one column are scattered among every other node's. Kept
+    /// up to date only while the grid is adding totals up: see `copies_fresh`.
+    copies: Vec<Vec<f64>>,
+    /// Whether `copies` matches the graph for every row.
+    copies_fresh: bool,
     /// See [`GROUP_BUDGET`].
     group_budget: usize,
     /// The groups in view have their totals added up by the grid, not kept by the graph.
@@ -449,6 +471,8 @@ impl Table {
             quick: String::new(),
             group_by: None,
             groupings: HashMap::new(),
+            copies: Vec::new(),
+            copies_fresh: false,
             group_budget: GROUP_BUDGET,
             plain_groups: false,
             open: HashSet::new(),
@@ -1054,6 +1078,7 @@ impl Table {
     pub fn update(&mut self) -> Update {
         // With nothing to apply, the graph is left alone: an update would
         // only use up one of the updates history keeps.
+        let changed = self.pending;
         let report = if self.pending {
             self.g.stabilize()
         } else {
@@ -1071,6 +1096,10 @@ impl Table {
         let rebuilt = stale && !patched;
         if rebuilt {
             self.rebuild();
+        }
+        if changed && !patched && !rebuilt {
+            // Cells moved and nothing was added up, so the copies are behind.
+            self.copies_fresh = false;
         }
         self.structural = false;
         self.value_touched = false;
@@ -1243,23 +1272,23 @@ impl Table {
         }
 
         let buckets = match self.group_by {
-            None => vec![(String::new(), rows)],
+            None => vec![Bucket::new("", rows)],
             Some(by) => {
                 // Each group's rows, in sorted order.
                 let mut slots: HashMap<&str, usize> = HashMap::new();
-                let mut buckets: Vec<(String, Vec<u32>)> = Vec::new();
+                let mut buckets: Vec<Bucket> = Vec::new();
                 for &r in &rows {
                     let key = self.group_key(r, by);
                     let slot = *slots.entry(key).or_insert_with(|| {
-                        buckets.push((key.to_string(), Vec::new()));
+                        buckets.push(Bucket::new(key, Vec::new()));
                         buckets.len() - 1
                     });
-                    buckets[slot].1.push(r);
+                    buckets[slot].rows.push(r);
                 }
                 buckets
             }
         };
-        self.finish(buckets, filter_on);
+        self.finish(buckets, filter_on, None);
     }
 
     fn group_key(&self, row: u32, by: usize) -> &str {
@@ -1276,6 +1305,7 @@ impl Table {
     /// from scratch.
     fn patch(&mut self) -> bool {
         let filter_on = self.filtering();
+        let n = self.cols.len();
         let mut is_changed = vec![false; self.keys.len()];
         for &r in &self.changed_rows {
             is_changed[r as usize] = true;
@@ -1287,13 +1317,42 @@ impl Table {
                 .collect()
         };
         // One bucket per group, or a single one when rows are not grouped.
-        let mut buckets: Vec<(String, Vec<u32>)> = match self.group_by {
-            None => vec![(String::new(), kept(&self.sorted))],
-            Some(_) => self
-                .groups
-                .iter()
-                .map(|g| (g.key.clone(), kept(&self.sorted[g.start..g.start + g.len])))
-                .collect(),
+        // A row that was set is still in the group it was in (rows set into
+        // another group are not handled here), so only the groups of the
+        // rows that were set can have changed: the others keep their rows
+        // and, where the grid adds totals up itself, their totals.
+        let mut buckets: Vec<Bucket> = match self.group_by {
+            None => vec![Bucket::new("", kept(&self.sorted))],
+            Some(by) => {
+                let slots: HashMap<&str, usize> = self
+                    .groups
+                    .iter()
+                    .enumerate()
+                    .map(|(k, g)| (g.key.as_str(), k))
+                    .collect();
+                let mut touched = vec![false; self.groups.len()];
+                for &r in &self.changed_rows {
+                    if let Some(&k) = slots.get(self.group_key(r, by)) {
+                        touched[k] = true;
+                    }
+                }
+                self.groups
+                    .iter()
+                    .zip(touched)
+                    .map(|(g, touched)| {
+                        let rows = &self.sorted[g.start..g.start + g.len];
+                        if touched {
+                            Bucket::new(&g.key, kept(rows))
+                        } else {
+                            Bucket {
+                                key: g.key.clone(),
+                                rows: rows.to_vec(),
+                                plain: Some(g.plain.clone()).filter(|plain| plain.len() == n),
+                            }
+                        }
+                    })
+                    .collect()
+            }
         };
 
         let pass = self.row_test();
@@ -1303,7 +1362,7 @@ impl Table {
                 None => 0,
                 Some(by) => {
                     let key = self.group_key(r, by);
-                    match buckets.iter().position(|(k, _)| k == key) {
+                    match buckets.iter().position(|b| b.key == key) {
                         Some(bucket) => bucket,
                         // Its group has no rows showing, so it has no line yet.
                         None => return false,
@@ -1319,7 +1378,7 @@ impl Table {
                 continue;
             }
             rows.sort_by(|&a, &b| self.order(a, b));
-            let kept = std::mem::take(&mut bucket.1);
+            let kept = std::mem::take(&mut bucket.rows);
             let mut merged = Vec::with_capacity(kept.len() + rows.len());
             let mut from = 0;
             for r in rows {
@@ -1330,31 +1389,53 @@ impl Table {
                 from = at;
             }
             merged.extend_from_slice(&kept[from..]);
-            bucket.1 = merged;
+            bucket.rows = merged;
         }
         if self.group_by.is_some() {
-            buckets.retain(|(_, rows)| !rows.is_empty());
+            buckets.retain(|bucket| !bucket.rows.is_empty());
         }
-        self.finish(buckets, filter_on);
+        let changed = std::mem::take(&mut self.changed_rows);
+        self.finish(buckets, filter_on, Some(&changed));
         true
     }
 
     /// Stores the view from its rows in buckets, each in sorted order: one
     /// bucket per group, or a single one when rows are not grouped. Puts the
-    /// groups in order and adds up what a filter needs added up.
-    fn finish(&mut self, mut buckets: Vec<(String, Vec<u32>)>, filter_on: bool) {
+    /// groups in order and adds up what the grid has to add up itself.
+    ///
+    /// `changed` is the rows whose cells were set, when only they can differ
+    /// from last time; `None` when any row may.
+    fn finish(&mut self, mut buckets: Vec<Bucket>, filter_on: bool, changed: Option<&[u32]>) {
         let n = self.cols.len();
-        let fold = |col: usize, rows: &[u32]| {
-            self.cols[col]
-                .agg
-                .fold(rows.iter().map(|&r| self.cell(r, col)))
-        };
         // Whether the grid adds the groups' totals up, rather than reading the graph's.
         let plain = filter_on || self.plain_groups;
+        if plain {
+            self.copy_numbers(changed.filter(|_| self.copies_fresh));
+        } else {
+            self.copies_fresh = false;
+        }
+        let fold = |col: usize, rows: &[u32]| {
+            let numbers = &self.copies[col];
+            let agg = self.cols[col].agg;
+            if numbers.is_empty() {
+                // A count, or no total: nothing to read.
+                return agg.fold(rows.iter().map(|_| f64::NAN));
+            }
+            agg.fold(rows.iter().map(|&r| numbers[r as usize]))
+        };
         let mut groups: Vec<Group> = Vec::new();
         let rows = match self.group_by {
-            None => buckets.pop().map(|(_, rows)| rows).unwrap_or_default(),
+            None => buckets.pop().map(|bucket| bucket.rows).unwrap_or_default(),
             Some(by) => {
+                if plain {
+                    // A bucket that came with its totals did not change.
+                    for bucket in &mut buckets {
+                        if bucket.plain.is_none() {
+                            bucket.plain =
+                                Some((0..n).map(|col| fold(col, &bucket.rows)).collect());
+                        }
+                    }
+                }
                 // Groups go by the first sorted column's total if it has one, and by name otherwise.
                 let by_total = self
                     .sort
@@ -1365,19 +1446,20 @@ impl Table {
                 let mut order: Vec<(f64, usize)> = buckets
                     .iter()
                     .enumerate()
-                    .map(|(k, (key, rows))| {
-                        let total = match by_total {
-                            Some((col, _)) if plain => fold(col, rows),
-                            Some((col, _)) => self.cols[col]
-                                .agg
-                                .of_graph(self.group_number(by, key, col), rows.len()),
-                            None => 0.0,
+                    .map(|(k, bucket)| {
+                        let total = match (by_total, &bucket.plain) {
+                            (Some((col, _)), Some(plain)) => plain[col],
+                            (Some((col, _)), None) => self.cols[col].agg.of_graph(
+                                self.group_number(by, &bucket.key, col),
+                                bucket.rows.len(),
+                            ),
+                            (None, _) => 0.0,
                         };
                         (total, k)
                     })
                     .collect();
                 order.sort_by(|a, b| {
-                    let by_name = buckets[a.1].0.cmp(&buckets[b.1].0);
+                    let by_name = buckets[a.1].key.cmp(&buckets[b.1].key);
                     match by_total {
                         Some((_, desc)) => {
                             let order = a.0.total_cmp(&b.0);
@@ -1387,20 +1469,16 @@ impl Table {
                         None => by_name,
                     }
                 });
-                let mut rows = Vec::with_capacity(buckets.iter().map(|b| b.1.len()).sum());
+                let mut rows = Vec::with_capacity(buckets.iter().map(|b| b.rows.len()).sum());
                 for (_, k) in order {
-                    let (key, members) = &buckets[k];
+                    let bucket = &mut buckets[k];
                     groups.push(Group {
-                        key: key.clone(),
+                        key: std::mem::take(&mut bucket.key),
                         start: rows.len(),
-                        len: members.len(),
-                        plain: if plain {
-                            (0..n).map(|col| fold(col, members)).collect()
-                        } else {
-                            Vec::new()
-                        },
+                        len: bucket.rows.len(),
+                        plain: bucket.plain.take().unwrap_or_default(),
                     });
-                    rows.extend_from_slice(members);
+                    rows.extend_from_slice(&bucket.rows);
                 }
                 rows
             }
@@ -1416,6 +1494,39 @@ impl Table {
         self.sorted = rows;
         self.groups = groups;
         self.layout();
+    }
+
+    /// Brings `copies` up to date: for these rows, or for every row if `None`.
+    fn copy_numbers(&mut self, rows: Option<&[u32]>) {
+        let (n, count) = (self.cols.len(), self.keys.len());
+        let number = |value: &Value| match value {
+            Value::F64(x) => *x,
+            _ => f64::NAN,
+        };
+        let mut copies = std::mem::take(&mut self.copies);
+        copies.resize_with(n, Vec::new);
+        for (col, numbers) in copies.iter_mut().enumerate() {
+            if !matches!(
+                self.cols[col].agg,
+                Agg::Sum | Agg::Avg | Agg::Min | Agg::Max
+            ) {
+                numbers.clear();
+                continue;
+            }
+            match rows {
+                Some(rows) if numbers.len() == count => {
+                    for &r in rows {
+                        numbers[r as usize] = number(self.cell(r, col));
+                    }
+                }
+                _ => {
+                    numbers.clear();
+                    numbers.extend((0..count as u32).map(|r| number(self.cell(r, col))));
+                }
+            }
+        }
+        self.copies = copies;
+        self.copies_fresh = true;
     }
 
     /// Lays the view out: every row, or each group's row and, if it is open, its rows.
