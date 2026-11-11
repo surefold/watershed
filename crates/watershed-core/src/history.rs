@@ -141,6 +141,21 @@ impl History {
     }
 }
 
+impl History {
+    /// The update that gave a node the value it had at update `epoch`, on
+    /// the same conditions as [`History::value`].
+    pub(crate) fn since(&self, node: usize, epoch: u64) -> u64 {
+        let mut at = self.head[node];
+        loop {
+            let version = &self.versions[(at - self.base) as usize];
+            if version.since <= epoch {
+                return version.since;
+            }
+            at = version.prev;
+        }
+    }
+}
+
 fn node_count(nodes: usize) -> u32 {
     u32::try_from(nodes).expect("a graph holds at most u32::MAX nodes")
 }

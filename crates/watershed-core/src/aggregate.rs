@@ -130,6 +130,11 @@ pub(crate) struct Aggregate {
     tree: Vec<Value>,
     /// Nodes that changed since the last recalculation.
     pub(crate) changed: Vec<u32>,
+    /// When members joined: for each update that added some, the update
+    /// and how many members there were before it. Members are only ever
+    /// added at the end, so this says which members there were at any
+    /// earlier update, at the cost of an entry per update that added any.
+    joined: Vec<(u64, u32)>,
 }
 
 impl Aggregate {
@@ -141,6 +146,23 @@ impl Aggregate {
             by_node: HashMap::new(),
             tree: vec![identity(op, value_type); 2],
             changed: Vec::new(),
+            joined: Vec::new(),
+        }
+    }
+
+    /// Notes that members pushed from now on count from update `epoch`.
+    pub(crate) fn joining_from(&mut self, epoch: u64) {
+        if self.joined.last().is_none_or(|&(last, _)| last < epoch) {
+            self.joined.push((epoch, self.members.len() as u32));
+        }
+    }
+
+    /// The members there were at the end of update `epoch`.
+    pub(crate) fn members_at(&self, epoch: u64) -> &[(u32, u32)] {
+        let later = self.joined.partition_point(|&(from, _)| from <= epoch);
+        match self.joined.get(later) {
+            Some(&(_, before)) => &self.members[..before as usize],
+            None => &self.members,
         }
     }
 

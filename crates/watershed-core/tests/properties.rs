@@ -685,6 +685,10 @@ fn run_history(
         snapshot(&g)
     }];
     let mut recorded: Vec<usize> = vec![0];
+    // How every node explained itself after each update.
+    let explained =
+        |g: &Graph| -> Vec<String> { g.node_ids().map(|id| g.explain_node(id)).collect() };
+    let mut explanations: Vec<Vec<String>> = vec![Vec::new()];
 
     for _ in 0..updates {
         for _ in 0..1 + rng.below(3) {
@@ -721,6 +725,7 @@ fn run_history(
         let report = g.stabilize();
         snapshots.push(snapshot(&g));
         recorded.push(report.inputs_changed + report.changed);
+        explanations.push(explained(&g));
 
         let latest = report.epoch;
         let oldest = latest.saturating_sub(keep);
@@ -758,6 +763,20 @@ fn run_history(
                             g.name(id),
                             then[id.index()]
                         ));
+                    }
+                    // Explained as of then, it says what it said then,
+                    // unless something under it has a new expression since
+                    // (which is not kept, and says so).
+                    let said = &explanations[epoch as usize];
+                    if epoch > 0 && id.index() < said.len() {
+                        let now = g.explain_node_at(id, epoch).map_err(|e| e.to_string())?;
+                        if now != said[id.index()] && !now.contains("(redefined at update ") {
+                            return Err(format!(
+                                "{} explained as of update {epoch}:\n{now}but at the time:\n{}",
+                                g.name(id),
+                                said[id.index()]
+                            ));
+                        }
                     }
                 }
             }
