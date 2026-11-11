@@ -119,6 +119,27 @@ update's changes to a `ChangeSink`. `crates/watershed-parquet` is one that
 writes them to Parquet files on a background thread, about 10 bytes per
 change.
 
+### Pull mode
+
+By default an update recalculates everything that depends on what changed.
+In pull mode it recalculates only what someone is watching, and what that
+uses:
+
+```rust
+g.watch(total)?;
+g.calculate_only_watched(true);
+g.set(price, 3.0)?;
+g.stabilize();              // total and what it uses; nothing else
+g.get(total)?;              // up to date
+g.get(elsewhere);           // an error: it is not being calculated
+```
+
+A node that is not needed and would have been recalculated is parked with
+its old value, and nothing above it hears of the change. Watching more (or
+turning pull mode off) brings what was parked up to date at the next update,
+and passes it on from there as usual. Off, pull mode costs one test per
+level of an update.
+
 ### Removing nodes
 
 A node that nothing uses can be removed:
@@ -363,6 +384,8 @@ and the tests failed every time:
 | Count a row that joins a group during an update from the next update instead | ✅ |
 | Leave the links to a removed node in place | ✅ |
 | Remove a node that something still uses | ✅ |
+| In pull mode, skip a woken node because what it read did not change in this update | ✅ |
+| In pull mode, watch a node without what it uses | ✅ |
 | Explain an earlier update by the branch of an `if` that was not taken then | ✅ |
 | Explain a total as of an earlier update with members that joined later | ✅ |
 
@@ -469,9 +492,11 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **Collections:** the grid grouping its rows by a formula column (the
   engine can; the grid's view cannot yet). A million rows of four nodes
   each build and total in under two seconds, about 0.45 µs per node.
-- **Reusing removed nodes' memory** (a removed node keeps its slot, and a
-  removed row of a collection keeps its membership nodes), and **pull
-  mode** (only calculating what someone is watching).
+- **Reusing removed nodes' memory**: a removed node keeps its slot, and a
+  removed row of a collection keeps its membership nodes.
+- **Pull mode** reads: `get_at` and the untyped `value` do not yet refuse a
+  node that is not being calculated, and what a collection's groupings are
+  built on is always calculated.
 - **More time travel:** restoring an earlier update, a redefined node's
   earlier expressions (so `explain_at` can go back past a `redefine`), a
   collection's groups as of an earlier update, and a sink that writes to S3.

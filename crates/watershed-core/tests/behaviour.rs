@@ -1224,6 +1224,146 @@ fn the_nodes_a_collection_groups_by_cannot_be_removed() -> Result {
     Ok(())
 }
 
+// ---------------------------------------------------------------- pull mode
+
+/// Two chains off one input: a → left → left_top, and a → right → right_top.
+fn two_chains(g: &mut Graph) -> std::result::Result<(Input<f64>, [Node<f64>; 4]), CalcError> {
+    let a = g.input("a", 1.0)?;
+    let left = g.define("left", a + 1.0)?;
+    let left_top = g.define("left_top", left * 10.0)?;
+    let right = g.define("right", a + 2.0)?;
+    let right_top = g.define("right_top", right * 10.0)?;
+    Ok((a, [left, left_top, right, right_top]))
+}
+
+#[test]
+fn in_pull_mode_only_what_a_watched_node_uses_is_calculated() -> Result {
+    let mut g = Graph::new();
+    let (a, [left, left_top, right, right_top]) = two_chains(&mut g)?;
+    g.watch(left_top)?;
+    g.calculate_only_watched(true);
+
+    g.set(a, 5.0)?;
+    let report = g.stabilize();
+    assert_eq!(report.recalculated, 2);
+    assert_eq!(
+        g.last_recalculated(),
+        &[left.id(), left_top.id()],
+        "only the watched chain"
+    );
+    assert_eq!(g.get(left_top)?, 60.0);
+    assert_eq!(g.get(a)?, 5.0);
+
+    // What nobody watches keeps its old value, and says so when read.
+    assert!(!g.is_calculated(right.id()));
+    assert_eq!(
+        g.get(right_top).unwrap_err().to_string(),
+        "\"right_top\" is not being calculated: nothing that is watched uses it"
+    );
+    assert_eq!(g.value(right_top.id()).to_string(), "30");
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn watching_a_node_brings_it_up_to_date_at_the_next_update() -> Result {
+    let mut g = Graph::new();
+    let (a, [_, left_top, right, right_top]) = two_chains(&mut g)?;
+    g.watch(left_top)?;
+    g.calculate_only_watched(true);
+    g.set(a, 5.0)?;
+    g.stabilize();
+    g.set(a, 7.0)?;
+    g.stabilize();
+
+    // Nothing has changed since, but the right chain missed two updates.
+    g.watch(right_top)?;
+    let report = g.stabilize();
+    assert_eq!(report.inputs_changed, 0);
+    assert_eq!(g.last_recalculated(), &[right.id(), right_top.id()]);
+    assert_eq!(g.get(right_top)?, 90.0);
+
+    // Unwatched again, it is left alone again.
+    g.unwatch(right_top)?;
+    g.set(a, 8.0)?;
+    assert_eq!(g.stabilize().recalculated, 2);
+    assert!(g.get(right_top).is_err());
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn turning_pull_mode_off_catches_everything_up() -> Result {
+    let mut g = Graph::new();
+    let (a, [_, left_top, _, right_top]) = two_chains(&mut g)?;
+    g.calculate_only_watched(true);
+    g.set(a, 5.0)?;
+    assert_eq!(g.stabilize().recalculated, 0, "nothing is watched");
+    g.set(a, 6.0)?;
+    assert_eq!(g.stabilize().recalculated, 0);
+
+    g.calculate_only_watched(false);
+    assert_eq!(g.stabilize().recalculated, 4);
+    assert_eq!((g.get(left_top)?, g.get(right_top)?), (70.0, 80.0));
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn a_node_woken_after_its_inputs_went_back_stops_there() -> Result {
+    let mut g = Graph::new();
+    let (a, [_, _, right, right_top]) = two_chains(&mut g)?;
+    g.calculate_only_watched(true);
+    g.set(a, 5.0)?;
+    g.stabilize();
+    g.set(a, 1.0)?;
+    g.stabilize();
+
+    // `right` missed a change and its undoing: it is recalculated, comes
+    // out the same, and `right_top` is not touched.
+    g.watch(right_top)?;
+    let report = g.stabilize();
+    assert_eq!(g.last_recalculated(), &[right.id()]);
+    assert_eq!(report.changed, 0);
+    assert_eq!(g.get(right_top)?, 30.0);
+    Ok(())
+}
+
+#[test]
+fn a_watched_total_keeps_only_its_own_rows_calculated() -> Result {
+    let mut g = Graph::new();
+    let fx = g.input("fx", 2.0)?;
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    let line = orders.column(&mut g, "line", qty * fx)?;
+    let double = orders.column(&mut g, "double", line * 2.0)?;
+    let revenue = orders.sum(&mut g, "revenue", line)?;
+    let doubled = orders.sum(&mut g, "doubled", double)?;
+    for i in 0..10 {
+        orders.upsert(&mut g, &format!("o{i}"), &[qty.is(i as f64)])?;
+    }
+    g.stabilize();
+    g.watch(revenue)?;
+    g.calculate_only_watched(true);
+
+    // Every row's line and the watched total; no `double`, no `doubled`.
+    g.set(fx, 3.0)?;
+    assert_eq!(g.stabilize().recalculated, 11);
+    assert_eq!(g.get(revenue)?, 135.0);
+    assert!(g.get(doubled).is_err());
+
+    // A row added while watching joins the watched total.
+    orders.upsert(&mut g, "new", &[qty.is(100.0)])?;
+    g.stabilize();
+    assert_eq!(g.get(revenue)?, 435.0);
+
+    g.watch(doubled)?;
+    g.stabilize();
+    assert_eq!(g.get(doubled)?, 870.0);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
 #[test]
 fn concat_joins_two_strings() -> Result {
     let mut g = Graph::new();
