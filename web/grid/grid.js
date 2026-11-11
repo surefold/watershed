@@ -5,6 +5,7 @@
 //   const view = new WatershedGrid(element, grid, { keyTitle: "trade" });
 //   grid.set_cell("T-000001", 4, "500");
 //   view.refresh();          // apply changes and redraw
+//   view.setTheme("dark");   // one of WatershedGrid.themes (see grid.css)
 //
 // A column is known by its position in the engine (0, 1, 2…). On screen the
 // key column comes first, then pinned columns, then the rest, in whatever
@@ -23,11 +24,24 @@ function el(tag, className, text) {
 }
 
 export class WatershedGrid {
+  /** The themes grid.css has, for a list to choose from. "" takes the page's colours. */
+  static themes = [
+    { id: "", name: "Match the page" },
+    { id: "light", name: "Light" },
+    { id: "dark", name: "Dark" },
+    { id: "paper", name: "Paper" },
+    { id: "dusk", name: "Dusk" },
+    { id: "terminal", name: "Terminal" },
+    { id: "contrast", name: "High contrast" },
+  ];
+
   /**
    * @param {HTMLElement} root an element with a height
    * @param grid the WebAssembly `Grid`
    * @param options
    *   rowHeight, keyTitle, keyWidth, label (what a screen reader calls the grid),
+   *   theme: one of `WatershedGrid.themes`' ids, or the name of a theme of
+   *     your own (a `[data-wg-theme="name"]` rule); the page's colours if not given,
    *   formats: { column: { decimals, signed, width, trend } }
    *     (`trend` draws how the cell moved over recent updates; needs `grid.keep_history`),
    *   loadMore: async () => boolean, called as the person nears the end: add
@@ -42,6 +56,7 @@ export class WatershedGrid {
     this.keyTitle = options.keyTitle ?? "key";
     this.keyWidth = options.keyWidth ?? 176;
     this.label = options.label ?? "Data grid";
+    this.theme = options.theme ?? "";
     this.formats = options.formats ?? {};
     this.loadMore = options.loadMore ?? null;
     this.onStatus = options.onStatus ?? (() => {});
@@ -84,6 +99,7 @@ export class WatershedGrid {
 
   build() {
     this.root.classList.add("wg");
+    this.setTheme(this.theme);
     this.root.style.setProperty("--wg-row", `${this.rowH}px`);
     this.root.replaceChildren();
     this.head = el("div", "wg-head");
@@ -137,6 +153,13 @@ export class WatershedGrid {
       if (this.menu && !this.menu.contains(e.target) && !e.target.closest?.(".wg-more")) this.closeMenu();
     };
     this.escape = (e) => e.key === "Escape" && this.closeMenu();
+  }
+
+  /** Changes how the grid looks: a theme's name, or "" for the page's colours. */
+  setTheme(theme) {
+    this.theme = theme || "";
+    if (this.theme) this.root.dataset.wgTheme = this.theme;
+    else delete this.root.dataset.wgTheme;
   }
 
   destroy() {

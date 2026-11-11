@@ -9,19 +9,22 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
 <link rel="stylesheet" href="grid.css">
 <style>
+/* The page's tokens. When a grid theme is chosen (the Theme list puts
+   data-wg-theme on <html> as well as on the grid) they take the theme's
+   colours, so the page around the grid goes with it. */
 :root {
-  --paper: #f2f5f4; --surface: #ffffff; --band: #f7f9f9; --head: #e8eeee;
-  --ink: #13242c; --muted: #56676e; --rule: #d3dcdc;
-  --water: #1d6c88; --rain: #23794a; --sediment: #b9541f; --select: #d6eaf1;
-  --up: rgba(44, 140, 88, 0.28); --down: rgba(196, 95, 39, 0.28);
+  --paper: var(--wg-backdrop, #f2f5f4); --surface: var(--wg-surface, #ffffff); --band: var(--wg-wash, #f7f9f9); --head: #e8eeee;
+  --ink: var(--wg-ink, #13242c); --muted: var(--wg-muted, #56676e); --rule: var(--wg-line, #d3dcdc);
+  --water: var(--wg-accent, #1d6c88); --rain: var(--wg-good, #23794a); --sediment: var(--wg-bad, #b9541f); --select: #d6eaf1;
+  --up: var(--wg-up, rgba(44, 140, 88, 0.28)); --down: var(--wg-down, rgba(196, 95, 39, 0.28));
   --wash: color-mix(in srgb, var(--ink) 5%, var(--surface));
   --lift: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent), 0 12px 32px -18px color-mix(in srgb, var(--ink) 30%, transparent);
   --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
-  --body: "Figtree", "Segoe UI", system-ui, sans-serif;
+  --body: var(--wg-font, "Figtree", "Segoe UI", system-ui, sans-serif);
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-wg-theme]) {
     --paper: #0e161a; --surface: #142026; --band: #17252c; --head: #1b2b33;
     --ink: #e2eaeb; --muted: #94a4a9; --rule: #2a3c43;
     --water: #63b4d0; --rain: #5bc68b; --sediment: #f0894a; --select: #1f4250;
@@ -141,6 +144,8 @@ footer b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
 /* Inside the playground's tab (?embed), the page around it already says what this is. */
 body.embed { grid-template-rows: auto auto minmax(0, 1fr) auto; padding: 4px 2px 6px; background: transparent; }
 body.embed header { display: none; }
+/* A chosen theme brings its own backdrop, whatever the page around the frame looks like. */
+:root[data-wg-theme] body.embed { background: var(--paper); padding: 10px; border-radius: 8px; }
 
 @media (max-width: 980px) {
   html, body { height: auto; }
@@ -184,6 +189,7 @@ body.embed header { display: none; }
       <option value="100000">100,000</option>
       <option value="scroll">load as you scroll</option>
     </select></label>
+    <label>Theme <select id="theme"></select></label>
     <span class="grow"></span>
     <button id="delete">Delete selected</button>
     <button id="csv">Export CSV</button>
@@ -248,6 +254,11 @@ body.embed header { display: none; }
 
 <script>
   if (new URLSearchParams(location.search).has("embed")) document.body.classList.add("embed");
+  // The theme chosen last time, before anything is drawn.
+  try {
+    const theme = localStorage.getItem("watershed-grid-theme");
+    if (theme) document.documentElement.dataset.wgTheme = theme;
+  } catch {}
 </script>
 <script type="module">
 import init, { Grid } from "./pkg/watershed_grid.js";
@@ -271,6 +282,8 @@ const formats = {
 };
 
 const WHY_HINT = $("why").textContent;
+const THEME_KEY = "watershed-grid-theme";
+let theme = ""; // the grid's theme, and the page's with it
 let grid = null;
 let view = null;
 let layout = null; // how the columns were arranged, kept when the rows are rebuilt
@@ -422,6 +435,7 @@ async function build(size) {
     keyTitle: "trade",
     keyWidth: 164,
     label: "Trades",
+    theme,
     formats,
     onStatus: status,
     onFocus: showWhy,
@@ -547,6 +561,24 @@ $("rate").addEventListener("input", () => {
   pill();
 });
 $("size").addEventListener("change", () => build($("size").value));
+
+/** Sets the grid's theme, and puts it on the page so the rest goes with it. */
+function setTheme(id) {
+  theme = WatershedGrid.themes.some((t) => t.id === id) ? id : "";
+  $("theme").value = theme;
+  if (theme) document.documentElement.dataset.wgTheme = theme;
+  else delete document.documentElement.dataset.wgTheme;
+  view?.setTheme(theme);
+  try {
+    if (theme) localStorage.setItem(THEME_KEY, theme);
+    else localStorage.removeItem(THEME_KEY);
+  } catch {
+    // No storage (a private window): the choice lasts as long as the page.
+  }
+}
+$("theme").replaceChildren(...WatershedGrid.themes.map((t) => new Option(t.name, t.id)));
+$("theme").addEventListener("change", () => setTheme($("theme").value));
+setTheme(document.documentElement.dataset.wgTheme ?? "");
 $("more").addEventListener("click", () => view.fetchMore());
 $("time").addEventListener("input", () => {
   const epoch = Number($("time").value);

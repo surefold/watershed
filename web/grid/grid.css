@@ -1,31 +1,97 @@
-/* The grid. Colours come from the page's tokens (see index.html), with fallbacks.
-   The look: one quiet surface, hairlines between rows and none between columns,
-   colour kept for what is live (a moving number, the focus, what is picked out). */
+/* The grid. The look: one quiet surface, hairlines between rows and none
+   between columns, colour kept for what is live (a moving number, the focus,
+   what is picked out).
+
+   Everything it draws with is a `--wg-` token. With no theme the tokens come
+   from the page's own (see index.html), with fallbacks. A theme, below, sets
+   them outright. */
 .wg {
   --wg-surface: var(--surface, #fff);
   --wg-ink: var(--ink, #13242c);
   --wg-muted: var(--muted, #56676e);
   --wg-accent: var(--water, #1d6c88);
   --wg-line: var(--rule, #d3dcdc);
+  --wg-up: var(--up, rgba(44, 140, 88, 0.3));
+  --wg-down: var(--down, rgba(196, 95, 39, 0.3));
+  --wg-good: var(--rain, #2c8c58);
+  --wg-bad: var(--sediment, #c45f27);
+  --wg-font: var(--body, system-ui, sans-serif);
+  --wg-mono: var(--mono, ui-monospace, monospace);
+  --wg-radius: 12px;
+}
+/* Worked out from the ones above, so a theme need not give them (it may). */
+.wg, [data-wg-theme] {
   --wg-hair: color-mix(in srgb, var(--wg-line) 55%, var(--wg-surface));
   --wg-wash: color-mix(in srgb, var(--wg-ink) 3.5%, var(--wg-surface));
   --wg-hover: color-mix(in srgb, var(--wg-accent) 6%, var(--wg-surface));
   --wg-select: color-mix(in srgb, var(--wg-accent) 13%, var(--wg-surface));
   --wg-head: var(--wg-surface);
-  --wg-up: var(--up, rgba(44, 140, 88, 0.3));
-  --wg-down: var(--down, rgba(196, 95, 39, 0.3));
-  --wg-good: var(--rain, #2c8c58);
-  --wg-bad: var(--sediment, #c45f27);
+}
+
+/* ---------------------------------------------------------------- themes
+
+   `new WatershedGrid(el, grid, { theme: "dark" })` or `view.setTheme("dark")`
+   puts `data-wg-theme` on the grid. The attribute works on any element, so
+   a page can put it on <html> as well and read the same tokens for what is
+   around the grid (`--wg-backdrop` is a colour for the page behind it).
+   A theme of your own is one more rule like these. */
+
+[data-wg-theme="light"] {
+  --wg-surface: #ffffff; --wg-ink: #13242c; --wg-muted: #56676e; --wg-accent: #1d6c88; --wg-line: #d3dcdc;
+  --wg-good: #23794a; --wg-bad: #b9541f; --wg-up: rgba(44, 140, 88, 0.28); --wg-down: rgba(196, 95, 39, 0.28);
+  --wg-backdrop: #f2f5f4;
+  color-scheme: light;
+}
+[data-wg-theme="dark"] {
+  --wg-surface: #142026; --wg-ink: #e2eaeb; --wg-muted: #94a4a9; --wg-accent: #63b4d0; --wg-line: #2a3c43;
+  --wg-good: #5bc68b; --wg-bad: #f0894a; --wg-up: rgba(91, 198, 139, 0.3); --wg-down: rgba(240, 137, 74, 0.3);
+  --wg-backdrop: #0e161a;
+  color-scheme: dark;
+}
+/* Warm paper and brown ink, set in a book face. */
+[data-wg-theme="paper"] {
+  --wg-surface: #fbf6ea; --wg-ink: #2f2618; --wg-muted: #766850; --wg-accent: #9a4a1c; --wg-line: #e0d5bd;
+  --wg-good: #46722a; --wg-bad: #b23a2a; --wg-up: rgba(70, 114, 42, 0.26); --wg-down: rgba(178, 58, 42, 0.24);
+  --wg-backdrop: #f0e8d4;
+  --wg-font: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  color-scheme: light;
+}
+/* A purple dusk. */
+[data-wg-theme="dusk"] {
+  --wg-surface: #1d1a2e; --wg-ink: #ece8f7; --wg-muted: #a39cc0; --wg-accent: #c792ea; --wg-line: #353052;
+  --wg-good: #7fd6a4; --wg-bad: #ff8f8f; --wg-up: rgba(127, 214, 164, 0.28); --wg-down: rgba(255, 143, 143, 0.28);
+  --wg-backdrop: #14121f;
+  color-scheme: dark;
+}
+/* Green on black, one typewriter face, square corners. */
+[data-wg-theme="terminal"] {
+  --wg-surface: #0a0f0a; --wg-ink: #b6f2b6; --wg-muted: #62a06c; --wg-accent: #ffb000; --wg-line: #1d3320;
+  --wg-good: #5dff8f; --wg-bad: #ff6b5a; --wg-up: rgba(93, 255, 143, 0.25); --wg-down: rgba(255, 107, 90, 0.28);
+  --wg-backdrop: #050805;
+  --wg-font: var(--mono, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace);
+  --wg-radius: 0px;
+  color-scheme: dark;
+}
+/* Black on white with full-strength lines, for when the quiet look is too quiet. */
+[data-wg-theme="contrast"] {
+  --wg-surface: #ffffff; --wg-ink: #000000; --wg-muted: #3a3a3a; --wg-accent: #0037c4; --wg-line: #000000;
+  --wg-good: #006b2d; --wg-bad: #b00020; --wg-up: rgba(0, 107, 45, 0.3); --wg-down: rgba(176, 0, 32, 0.26);
+  --wg-hair: #8a8a8a; --wg-wash: #ededed;
+  --wg-backdrop: #ffffff;
+  color-scheme: light;
+}
+
+.wg {
   position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   border: 1px solid var(--wg-line);
-  border-radius: 12px;
+  border-radius: var(--wg-radius);
   overflow: hidden;
   background: var(--wg-surface);
   color: var(--wg-ink);
-  font: 13px/1 var(--body, system-ui, sans-serif);
+  font: 13px/1 var(--wg-font);
   box-shadow: 0 1px 2px color-mix(in srgb, var(--wg-ink) 6%, transparent), 0 12px 32px -18px color-mix(in srgb, var(--wg-ink) 30%, transparent);
 }
 .wg *, .wg *::before { box-sizing: border-box; }
@@ -42,7 +108,7 @@
 .wg-hcell {
   position: relative; flex: none; display: flex; align-items: center; gap: 6px;
   height: 38px; padding: 0 12px;
-  font: 600 10.5px/1 var(--mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.09em;
+  font: 600 10.5px/1 var(--wg-mono); text-transform: uppercase; letter-spacing: 0.09em;
   color: var(--wg-muted); background: var(--wg-head);
   cursor: pointer; user-select: none; touch-action: none;
   transition: color 0.12s, background-color 0.12s;
@@ -51,7 +117,7 @@
 .wg-hcell:hover { color: var(--wg-ink); background: var(--wg-wash); }
 .wg-hcell[aria-sort="ascending"], .wg-hcell[aria-sort="descending"] { color: var(--wg-ink); }
 .wg-hname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wg-fx { color: var(--wg-accent); font: italic 600 11px/1 var(--body, system-ui, sans-serif); text-transform: none; letter-spacing: 0; opacity: 0.8; }
+.wg-fx { color: var(--wg-accent); font: italic 600 11px/1 var(--wg-font); text-transform: none; letter-spacing: 0; opacity: 0.8; }
 .wg-sort { color: var(--wg-accent); font-size: 9px; letter-spacing: 0; }
 .wg-sort:empty { display: none; }
 
@@ -66,7 +132,7 @@
 .wg-more {
   position: absolute; top: 8px; right: 8px; width: 22px; height: 22px; padding: 0;
   border: 0; border-radius: 6px; background: var(--wg-wash); color: var(--wg-muted);
-  font: 700 14px/1 var(--body, system-ui, sans-serif); cursor: pointer; opacity: 0; transition: opacity 0.12s;
+  font: 700 14px/1 var(--wg-font); cursor: pointer; opacity: 0; transition: opacity 0.12s;
   box-shadow: 0 0 0 4px var(--wg-wash);
 }
 .wg-hcell.wg-num .wg-more { right: auto; left: 8px; }
@@ -81,7 +147,7 @@
   width: 100%; height: 26px; padding: 0 8px;
   border: 1px solid transparent; border-radius: 6px;
   background: var(--wg-wash); color: var(--wg-ink);
-  font: 12px/1 var(--mono, ui-monospace, monospace);
+  font: 12px/1 var(--wg-mono);
   transition: border-color 0.12s, background-color 0.12s;
 }
 .wg-fcell input::placeholder { color: var(--wg-muted); opacity: 0.45; }
@@ -113,7 +179,7 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   border-bottom: 1px solid var(--wg-hair);
 }
-.wg-cell.wg-num { text-align: right; font: 12.5px/var(--wg-row) var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
+.wg-cell.wg-num { text-align: right; font: 12.5px/var(--wg-row) var(--wg-mono); font-variant-numeric: tabular-nums; }
 .wg-cell.wg-calc { color: color-mix(in srgb, var(--wg-ink) 82%, var(--wg-accent)); }
 .wg-cell.wg-neg { color: var(--wg-bad); }
 .wg-cell.wg-pos { color: var(--wg-good); }
@@ -132,7 +198,7 @@
 .wg-rows .wg-row.wg-group:hover { background: color-mix(in srgb, var(--wg-accent) 8%, var(--wg-wash)); }
 .wg-group .wg-cell { border-bottom-color: var(--wg-line); }
 .wg-group .wg-cell.wg-num { font-weight: 600; }
-.wg-group .wg-cell:first-child { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--wg-ink); font: 600 13px/1 var(--body, system-ui, sans-serif); }
+.wg-group .wg-cell:first-child { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--wg-ink); font: 600 13px/1 var(--wg-font); }
 .wg-group .wg-cell:first-child::before {
   content: ""; flex: none; width: 6px; height: 6px; margin: 0 2px 0 1px;
   border: solid var(--wg-muted); border-width: 0 1.5px 1.5px 0;
@@ -143,20 +209,20 @@
 .wg-gcount {
   flex: none; padding: 2px 7px; border-radius: 999px;
   background: color-mix(in srgb, var(--wg-ink) 8%, transparent); color: var(--wg-muted);
-  font: 600 10.5px/1.2 var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums;
+  font: 600 10.5px/1.2 var(--wg-mono); font-variant-numeric: tabular-nums;
 }
 
 /* The totals. */
 .wg-row.wg-total { background: var(--wg-head); height: calc(var(--wg-row) + 6px); }
 .wg-total .wg-cell { border-bottom: 0; line-height: calc(var(--wg-row) + 6px); font-weight: 700; cursor: default; }
 .wg-total .wg-cell.wg-num { font-weight: 600; line-height: calc(var(--wg-row) + 6px); }
-.wg-total .wg-cell:first-child { font: 600 10.5px/calc(var(--wg-row) + 6px) var(--mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.09em; color: var(--wg-muted); overflow: visible; }
+.wg-total .wg-cell:first-child { font: 600 10.5px/calc(var(--wg-row) + 6px) var(--wg-mono); text-transform: uppercase; letter-spacing: 0.09em; color: var(--wg-muted); overflow: visible; }
 
 /* Pinned columns stay put while the rest scrolls sideways; the last one casts
    a shadow once something has scrolled under it. */
 .wg-pin { position: sticky; left: 0; z-index: 2; background: inherit; }
 .wg-hcell.wg-pin, .wg-fcell.wg-pin { z-index: 4; background: var(--wg-head); }
-.wg-cell.wg-pin:first-child { font: 12px/var(--wg-row) var(--mono, ui-monospace, monospace); color: var(--wg-muted); }
+.wg-cell.wg-pin:first-child { font: 12px/var(--wg-row) var(--wg-mono); color: var(--wg-muted); }
 .wg-pin-edge { border-right: 1px solid var(--wg-hair); transition: box-shadow 0.2s; }
 .wg-scrolled-x .wg-pin-edge { border-right-color: var(--wg-line); box-shadow: 8px 0 12px -10px color-mix(in srgb, var(--wg-ink) 55%, transparent); }
 .wg-row.wg-selected .wg-cell.wg-pin-edge:first-child { box-shadow: inset 3px 0 0 var(--wg-accent); }
@@ -174,9 +240,9 @@
 .wg-menu {
   position: absolute; z-index: 20; width: 228px; padding: 6px; overflow: auto;
   background: var(--wg-surface); color: var(--wg-ink);
-  border: 1px solid var(--wg-line); border-radius: 12px;
+  border: 1px solid var(--wg-line); border-radius: var(--wg-radius);
   box-shadow: 0 2px 6px color-mix(in srgb, #000 8%, transparent), 0 18px 40px -12px color-mix(in srgb, #000 35%, transparent);
-  font: 13px/1.3 var(--body, system-ui, sans-serif);
+  font: 13px/1.3 var(--wg-font);
   animation: wg-menu-in 0.12s ease-out;
   scrollbar-width: thin;
 }
@@ -186,11 +252,11 @@
 .wg-item:hover, .wg-check:hover, .wg-item:focus-visible { background: var(--wg-wash); outline: none; }
 .wg-item:focus-visible { box-shadow: inset 0 0 0 2px var(--wg-accent); }
 .wg-check input { accent-color: var(--wg-accent); margin: 0; }
-.wg-count { margin-left: auto; color: var(--wg-muted); font: 11.5px/1 var(--mono, ui-monospace, monospace); }
-.wg-menu-title { padding: 6px 9px 3px; font: 600 10px/1.3 var(--mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.1em; color: var(--wg-muted); }
+.wg-count { margin-left: auto; color: var(--wg-muted); font: 11.5px/1 var(--wg-mono); }
+.wg-menu-title { padding: 6px 9px 3px; font: 600 10px/1.3 var(--wg-mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--wg-muted); }
 .wg-menu-note { padding: 4px 9px; color: var(--wg-muted); font-size: 12.5px; }
 .wg-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 9px 3px; }
-.wg-chip { padding: 4px 10px; border: 1px solid var(--wg-line); border-radius: 999px; background: none; color: inherit; font: 11.5px/1.3 var(--mono, ui-monospace, monospace); cursor: pointer; transition: border-color 0.12s, background-color 0.12s; }
+.wg-chip { padding: 4px 10px; border: 1px solid var(--wg-line); border-radius: 999px; background: none; color: inherit; font: 11.5px/1.3 var(--wg-mono); cursor: pointer; transition: border-color 0.12s, background-color 0.12s; }
 .wg-chip:hover { border-color: var(--wg-accent); }
 .wg-chip[aria-pressed="true"] { background: var(--wg-accent); color: var(--wg-surface); border-color: var(--wg-accent); }
 .wg-chip:focus-visible { outline: 2px solid var(--wg-accent); outline-offset: 1px; }
@@ -214,26 +280,28 @@
 
 /* ------------------------------------- the chart of group totals (chart.js) */
 
+/* Not inside the grid, so it reads a theme's tokens from whatever element
+   around it carries the theme, and the page's own otherwise. */
 .gc { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 10px; min-height: 0; height: 100%; }
 .gc-figure { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.gc-total { font: 600 1.4rem/1.1 var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; color: var(--ink, #13242c); }
-.gc-caption { font-size: 12px; color: var(--muted, #56676e); text-align: right; }
+.gc-total { font: 600 1.4rem/1.1 var(--wg-mono, var(--mono, ui-monospace, monospace)); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; color: var(--wg-ink, var(--ink, #13242c)); }
+.gc-caption { font-size: 12px; color: var(--wg-muted, var(--muted, #56676e)); text-align: right; }
 .gc-line { width: 100%; height: 40px; overflow: visible; }
-.gc-line path { fill: none; stroke: var(--water, #1d6c88); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.gc-line path { fill: none; stroke: var(--wg-accent, var(--water, #1d6c88)); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .gc-bars { display: grid; gap: 1px; overflow: auto; min-height: 0; align-content: start; scrollbar-width: thin; }
 .gc-row {
   display: grid; grid-template-columns: minmax(64px, 30%) minmax(0, 1fr) auto; align-items: center; gap: 10px;
   height: 24px; padding: 0 6px; border: 0; border-radius: 6px; background: none; color: inherit; cursor: pointer; text-align: left;
-  font: 12.5px/1 var(--body, system-ui, sans-serif); transition: background-color 0.12s;
+  font: 12.5px/1 var(--wg-font, var(--body, system-ui, sans-serif)); transition: background-color 0.12s;
 }
-.gc-row:hover, .gc-row:focus-visible { background: color-mix(in srgb, var(--ink, #13242c) 5%, transparent); outline: none; }
-.gc-row:focus-visible { box-shadow: inset 0 0 0 2px var(--water, #1d6c88); }
-.gc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink, #13242c); }
+.gc-row:hover, .gc-row:focus-visible { background: color-mix(in srgb, var(--wg-ink, var(--ink, #13242c)) 5%, transparent); outline: none; }
+.gc-row:focus-visible { box-shadow: inset 0 0 0 2px var(--wg-accent, var(--water, #1d6c88)); }
+.gc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wg-ink, var(--ink, #13242c)); }
 .gc-track { position: relative; height: 8px; }
-.gc-both .gc-track::before { content: ""; position: absolute; left: 50%; top: -5px; bottom: -5px; width: 1px; background: var(--rule, #d3dcdc); }
-.gc-bar { position: absolute; top: 0; height: 100%; min-width: 2px; background: var(--water, #1d6c88); border-radius: 0 4px 4px 0; transition: width 0.25s ease-out, left 0.25s ease-out; }
-.gc-bar.gc-pos { background: var(--rain, #2c8c58); }
-.gc-bar.gc-neg { background: var(--sediment, #c45f27); border-radius: 4px 0 0 4px; }
-.gc-value { font: 12px/1 var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; color: var(--muted, #56676e); min-width: 9ch; text-align: right; }
-.gc-note { margin: 0; font-size: 13px; color: var(--muted, #56676e); }
+.gc-both .gc-track::before { content: ""; position: absolute; left: 50%; top: -5px; bottom: -5px; width: 1px; background: var(--wg-line, var(--rule, #d3dcdc)); }
+.gc-bar { position: absolute; top: 0; height: 100%; min-width: 2px; background: var(--wg-accent, var(--water, #1d6c88)); border-radius: 0 4px 4px 0; transition: width 0.25s ease-out, left 0.25s ease-out; }
+.gc-bar.gc-pos { background: var(--wg-good, var(--rain, #2c8c58)); }
+.gc-bar.gc-neg { background: var(--wg-bad, var(--sediment, #c45f27)); border-radius: 4px 0 0 4px; }
+.gc-value { font: 12px/1 var(--wg-mono, var(--mono, ui-monospace, monospace)); font-variant-numeric: tabular-nums; color: var(--wg-muted, var(--muted, #56676e)); min-width: 9ch; text-align: right; }
+.gc-note { margin: 0; font-size: 13px; color: var(--wg-muted, var(--muted, #56676e)); }
 .gc-note:empty { display: none; }
