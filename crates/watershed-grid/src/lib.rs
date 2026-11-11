@@ -105,6 +105,40 @@ impl Grid {
             .map_err(js_error)
     }
 
+    /// From here to `end_edits`, every cell set is one step to undo.
+    pub fn begin_edits(&mut self) {
+        self.table.begin_edits();
+    }
+
+    pub fn end_edits(&mut self) {
+        self.table.end_edits();
+    }
+
+    /// Puts back what the last `set_cell` (or step of several) changed.
+    /// Returns what was put back, in words, if anything was.
+    pub fn undo(&mut self) -> Result<Option<String>, JsError> {
+        self.table.undo().map_err(js_error)
+    }
+
+    /// Does again what the last `undo` put back.
+    pub fn redo(&mut self) -> Result<Option<String>, JsError> {
+        self.table.redo().map_err(js_error)
+    }
+
+    /// Changes a column's total: "sum", "avg", "min", "max", "count" or "none".
+    pub fn set_agg(&mut self, col: u32, agg: &str) -> Result<(), JsError> {
+        let agg = Agg::parse(agg).map_err(js_error)?;
+        self.table.set_agg(col as usize, agg).map_err(js_error)
+    }
+
+    /// The rows with these keys, in the view's order, as tab-separated text:
+    /// the key, then each of the columns at `cols`.
+    pub fn tsv(&self, keys: Vec<String>, cols: Vec<u32>) -> String {
+        let keys = keys.iter().map(String::as_str).collect();
+        let cols: Vec<usize> = cols.into_iter().map(|col| col as usize).collect();
+        self.table.tsv(&keys, &cols)
+    }
+
     /// Removes a row. Returns whether there was one.
     pub fn remove(&mut self, key: &str) -> Result<bool, JsError> {
         self.table.remove(key).map_err(js_error)

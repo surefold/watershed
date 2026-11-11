@@ -756,3 +756,90 @@ fn when_many_rows_change_at_once_the_view_is_worked_out_from_scratch() {
     t.set_value("tax", 1.0).unwrap();
     assert!(t.update().rebuilt);
 }
+
+#[test]
+fn a_columns_total_can_be_changed() {
+    let mut t = orders();
+    t.set_group(Some(REGION)).unwrap();
+    t.update();
+    assert_eq!(t.totals_json(), "[null,16,10,62]");
+    t.set_agg(QTY, Agg::Avg).unwrap();
+    t.set_agg(PRICE, Agg::Min).unwrap();
+    t.set_agg(LINE, Agg::None).unwrap();
+    t.set_agg(REGION, Agg::Count).unwrap();
+    t.update();
+    assert_eq!(t.totals_json(), "[5,3.2,1,null]");
+    assert_eq!(
+        t.groups_json(),
+        concat!(
+            r#"[{"g":"APAC","n":1,"c":[1,3,7,null]},"#,
+            r#"{"g":"EU","n":2,"c":[2,3,2.5,null]},"#,
+            r#"{"g":"US","n":2,"c":[2,3.5,1,null]}]"#
+        )
+    );
+    // And back: the sum is still kept, and still right after an edit.
+    t.set_agg(LINE, Agg::Sum).unwrap();
+    t.set_cell("o-1", QTY, "3").unwrap();
+    t.update();
+    assert_eq!(t.totals_json(), "[5,3.4,1,72]");
+    assert_eq!(
+        t.set_agg(REGION, Agg::Sum).unwrap_err(),
+        "region: only number columns have totals (any column can have a count)"
+    );
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn an_edit_can_be_undone_and_done_again() {
+    let mut t = orders();
+    assert_eq!(t.undo(), Ok(None));
+    t.set_cell("o-1", QTY, "9").unwrap();
+    t.update();
+    t.set_cell("o-2", REGION, "EU").unwrap();
+    t.update();
+    assert_eq!(t.undo(), Ok(Some("region of o-2".into())));
+    t.update();
+    assert_eq!(t.value("o-2", REGION).unwrap().to_string(), "\"US\"");
+    assert_eq!(t.undo(), Ok(Some("qty of o-1".into())));
+    t.update();
+    assert_eq!(t.totals_json(), "[null,16,10,62]");
+    assert_eq!(t.redo(), Ok(Some("qty of o-1".into())));
+    t.update();
+    assert_eq!(t.value("o-1", QTY).unwrap().to_string(), "9");
+    // A new edit means there is nothing to do again.
+    t.set_cell("o-3", QTY, "1").unwrap();
+    assert_eq!(t.redo(), Ok(None));
+    // Setting a cell to what it already holds is not a step.
+    t.update();
+    t.set_cell("o-3", QTY, "1").unwrap();
+    assert_eq!(t.undo(), Ok(Some("qty of o-3".into())));
+    assert_eq!(t.undo(), Ok(Some("qty of o-1".into())));
+    assert_eq!(t.undo(), Ok(None));
+}
+
+#[test]
+fn several_cells_set_together_undo_together_and_removed_rows_are_left_out() {
+    let mut t = orders();
+    t.begin_edits();
+    t.set_cell("o-1", QTY, "100").unwrap();
+    t.set_cell("o-2", QTY, "200").unwrap();
+    t.set_cell("o-3", PRICE, "300").unwrap();
+    t.end_edits();
+    t.update();
+    t.remove("o-2").unwrap();
+    t.update();
+    assert_eq!(t.undo(), Ok(Some("2 of 3 cells".into())));
+    t.update();
+    assert_eq!(t.value("o-1", QTY).unwrap().to_string(), "2");
+    assert_eq!(t.value("o-3", PRICE).unwrap().to_string(), "2.5");
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn rows_copy_as_tab_separated_text_in_the_views_order() {
+    let mut t = orders();
+    t.set_sort(&[(QTY, true)]).unwrap();
+    t.update();
+    let keys = ["o-2", "o-5", "nobody"].into_iter().collect();
+    assert_eq!(t.tsv(&keys, &[REGION, LINE]), "o-5\tUS\t6\no-2\tUS\t5\n");
+}
