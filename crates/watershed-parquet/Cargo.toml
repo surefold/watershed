@@ -1,0 +1,17 @@
+[package]
+name = "watershed-parquet"
+version = "0.1.0"
+description = "Writes a watershed graph's changes to Parquet files, on a background thread"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Arrow and Parquet 60 need Rust 1.88; 59 is the newest for this workspace's 1.85.
+watershed-core = { path = "../watershed-core" }
+arrow-array = "59"
+arrow-schema = "59"
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
+
+[lints]
+workspace = true

@@ -637,6 +637,151 @@ fn larger_random_graphs_always_match_a_full_recalculation() {
     }
 }
 
+/// Random updates with history on. After every update, every node at every
+/// update is compared with a full copy of the values taken at that update.
+fn run_history(
+    seed: u64,
+    keep: Option<u64>,
+    keep_from_start: bool,
+    updates: usize,
+    parallel: bool,
+) -> Result<(), String> {
+    let keep = keep.unwrap_or(u64::MAX);
+    let snapshot =
+        |g: &Graph| -> Vec<Value> { g.node_ids().map(|id| g.value(id).clone()).collect() };
+    let mut rng = Rng(seed);
+    let mut g = Graph::new();
+    if parallel {
+        g.set_parallel_threshold(1);
+    }
+    if keep_from_start {
+        g.keep_history(keep);
+    }
+    let mut input_ids = Vec::new();
+    for i in 0..1 + rng.below(7) {
+        let ty = rng.pick(&TYPES);
+        input_ids.push(
+            g.input_value(&format!("in{i}"), random_value(&mut rng, ty))
+                .unwrap(),
+        );
+    }
+    let mut n = 0;
+    for _ in 0..rng.below(40) {
+        add_random_node(&mut rng, &mut g, n, false);
+        n += 1;
+    }
+    let aggregates: Vec<(NodeId, AggregateOp, Type)> = (0..rng.below(4))
+        .map(|k| add_random_aggregate(&mut rng, &mut g, k))
+        .collect();
+    if !keep_from_start {
+        g.keep_history(keep);
+    }
+
+    // What each update should have left: all values, and how many were overwritten.
+    // A graph with history on from the start had no nodes at update 0.
+    let mut snapshots: Vec<Vec<Value>> = vec![if keep_from_start {
+        Vec::new()
+    } else {
+        snapshot(&g)
+    }];
+    let mut recorded: Vec<usize> = vec![0];
+
+    for _ in 0..updates {
+        for _ in 0..1 + rng.below(3) {
+            let id = rng.pick(&input_ids);
+            let value = if rng.percent(10) {
+                Value::Error("feed down".into())
+            } else {
+                random_value(&mut rng, g.node_type(id))
+            };
+            g.set_value(id, value).unwrap();
+        }
+        if rng.percent(20) {
+            add_random_node(&mut rng, &mut g, n, false);
+            n += 1;
+        }
+        if !aggregates.is_empty() && rng.percent(40) {
+            let (aggregate, op, value_type) = rng.pick(&aggregates);
+            if let Some((value, present)) = random_member(&mut rng, &g, op, value_type) {
+                let _ = g.extend_aggregate(aggregate, value, present);
+            }
+        }
+        if rng.percent(20) {
+            let calculated: Vec<NodeId> = g
+                .node_ids()
+                .filter(|&id| !g.is_input(id) && g.aggregate_members(id).is_none())
+                .collect();
+            if !calculated.is_empty() {
+                let id = rng.pick(&calculated);
+                let ir = random_expr(&mut rng, &g, g.node_type(id), 3);
+                let _ = g.redefine_ir(id, ir);
+            }
+        }
+
+        let report = g.stabilize();
+        snapshots.push(snapshot(&g));
+        recorded.push(report.inputs_changed + report.changed);
+
+        let latest = report.epoch;
+        let oldest = latest.saturating_sub(keep);
+        if g.history_range() != Some((oldest, latest)) {
+            return Err(format!("history covers {:?}", g.history_range()));
+        }
+        // Exactly the values overwritten by the updates after the oldest.
+        let expected: usize = recorded[oldest as usize + 1..].iter().sum();
+        if g.history_versions() != expected {
+            return Err(format!(
+                "{} versions kept at update {latest}, expected {expected}",
+                g.history_versions()
+            ));
+        }
+        for epoch in 0..=latest {
+            let then = &snapshots[epoch as usize];
+            for id in g.node_ids() {
+                let found = g.value_at(id, epoch);
+                if epoch < oldest {
+                    if !matches!(found, Err(CalcError::EpochUnavailable { .. })) {
+                        return Err(format!("update {epoch} should be forgotten: {found:?}"));
+                    }
+                } else if id.index() >= then.len() {
+                    if !matches!(found, Err(CalcError::NotCreatedYet { .. })) {
+                        return Err(format!(
+                            "{} should not exist at update {epoch}: {found:?}",
+                            g.name(id)
+                        ));
+                    }
+                } else {
+                    let value = found.map_err(|e| e.to_string())?;
+                    if !value.same_as(&then[id.index()]) {
+                        return Err(format!(
+                            "{} at update {epoch} reads {value}, but was {}",
+                            g.name(id),
+                            then[id.index()]
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    #[test]
+    fn every_node_reads_as_it_was_at_every_update_history_covers(
+        seed in any::<u64>(),
+        keep in proptest::option::of(0u64..12),
+        keep_from_start in any::<bool>(),
+        updates in 1usize..25,
+        parallel in any::<bool>(),
+    ) {
+        run_history(seed, keep, keep_from_start, updates, parallel)
+            .map_err(TestCaseError::fail)?;
+    }
+}
+
 /// Random inserts, updates and removals on a collection, checked after every
 /// update against a plain map added up from scratch.
 fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Result<(), String> {

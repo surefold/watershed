@@ -62,7 +62,9 @@ pub mod error;
 pub mod expr;
 pub mod graph;
 pub mod handle;
+mod history;
 pub mod ir;
+pub mod sink;
 pub mod value;
 
 pub use aggregate::AggregateOp;
@@ -72,6 +74,7 @@ pub use expr::{Expr, IntoExpr, choose, list, text, when};
 pub use graph::{Graph, Report};
 pub use handle::{Handle, Input, Node, NodeId};
 pub use ir::{BinOp, Ir, MAX_LIST_ITEMS, MAX_TEXT_BYTES, TypeError, UnOp};
+pub use sink::ChangeSink;
 pub use value::{CalcType, Numeric, Ordered, Text, TextList, Type, Value};
 
 /// Everything you need to build and use a graph: `use watershed_core::prelude::*;`
