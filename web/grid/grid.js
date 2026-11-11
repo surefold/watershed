@@ -27,23 +27,28 @@ export class WatershedGrid {
    * @param {HTMLElement} root an element with a height
    * @param grid the WebAssembly `Grid`
    * @param options
-   *   rowHeight, keyTitle,
+   *   rowHeight, keyTitle, keyWidth, label (what a screen reader calls the grid),
    *   formats: { column: { decimals, signed, width, trend } }
    *     (`trend` draws how the cell moved over recent updates; needs `grid.keep_history`),
    *   loadMore: async () => boolean, called as the person nears the end: add
    *     rows to the grid and resolve to whether there may be more,
-   *   onStatus(status), onFocus(focus), onError(message), onGroup(col)
+   *   onStatus(status), onFocus(focus), onError(message), onNote(message),
+   *   onGroup(col), onColumns() (a column's total was changed from its menu)
    */
   constructor(root, grid, options = {}) {
     this.root = root;
     this.grid = grid;
-    this.rowH = options.rowHeight ?? 30;
+    this.rowH = options.rowHeight ?? 32;
     this.keyTitle = options.keyTitle ?? "key";
+    this.keyWidth = options.keyWidth ?? 176;
+    this.label = options.label ?? "Data grid";
     this.formats = options.formats ?? {};
     this.loadMore = options.loadMore ?? null;
     this.onStatus = options.onStatus ?? (() => {});
     this.onFocus = options.onFocus ?? (() => {});
     this.onGroup = options.onGroup ?? (() => {});
+    this.onNote = options.onNote ?? (() => {});
+    this.onColumns = options.onColumns ?? (() => {});
     this.onError = options.onError ?? ((message) => console.warn(message));
 
     this.cols = [];
@@ -56,6 +61,9 @@ export class WatershedGrid {
     this.groupCol = -1;
     this.selected = new Set(); // row keys
     this.anchor = null; // the line a shift-click selects from
+    // A block of cells picked out by dragging or Shift+arrows: from the focused
+    // cell to (toLine, toAcross), where `across` counts columns along the screen.
+    this.range = null; // { line, across, toLine, toAcross }
     this.focus = null; // { line, pos, kind: "cell" | "group" | "total", key, col }
     this.live = new Map(); // line number → its row element
     this.spare = [];
@@ -81,9 +89,7 @@ export class WatershedGrid {
     this.head = el("div", "wg-head");
     this.headRow = el("div", "wg-hrow");
     this.filterRow = el("div", "wg-frow");
-    this.marker = el("div", "wg-marker");
-    this.marker.hidden = true;
-    this.head.append(this.headRow, this.filterRow, this.marker);
+    this.head.append(this.headRow, this.filterRow);
     this.body = el("div", "wg-body");
     this.body.tabIndex = 0;
     this.body.setAttribute("role", "grid");
@@ -100,15 +106,25 @@ export class WatershedGrid {
     this.body.addEventListener("scroll", () => {
       this.head.scrollLeft = this.body.scrollLeft;
       this.foot.scrollLeft = this.body.scrollLeft;
+      this.root.classList.toggle("wg-scrolled", this.body.scrollTop > 0);
+      this.root.classList.toggle("wg-scrolled-x", this.body.scrollLeft > 0);
       this.schedule();
       if (this.nearEnd()) this.fetchMore();
     });
     this.rows.addEventListener("click", (e) => this.clicked(e));
+    this.rows.addEventListener("pointerdown", (e) => this.dragRange(e));
+    this.said = el("div", "wg-said");
+    this.said.setAttribute("aria-live", "polite");
+    this.root.append(this.said);
+    this.body.setAttribute("aria-label", this.label);
+    this.body.setAttribute("aria-multiselectable", "true");
     this.rows.addEventListener("dblclick", (e) => {
       const hit = this.hit(e);
       if (hit && hit.data.k !== undefined) this.edit(hit.line, hit.pos);
     });
     this.body.addEventListener("keydown", (e) => this.key(e));
+    this.body.addEventListener("copy", (e) => this.copy(e));
+    this.body.addEventListener("paste", (e) => this.paste(e));
     this.footRow.addEventListener("click", (e) => {
       const cell = e.target.closest(".wg-cell");
       if (!cell || cell._pos === 0) return;
@@ -141,7 +157,7 @@ export class WatershedGrid {
     });
     for (let pos = this.widths.length; pos <= this.cols.length; pos++) {
       const col = this.cols[pos - 1];
-      this.widths[pos] = pos === 0 ? 156 : (this.formats[col.name]?.width ?? (col.kind === "number" ? 112 : 124));
+      this.widths[pos] = pos === 0 ? this.keyWidth : (this.formats[col.name]?.width ?? (col.kind === "number" ? 112 : 124));
     }
     this.rebuildColumns();
     this.refresh();
@@ -158,24 +174,19 @@ export class WatershedGrid {
   /** Lays the columns out again after their order, pinning or visibility changed. */
   rebuildColumns() {
     this.cols = JSON.parse(this.grid.columns());
-    const shown = this.order.filter((col) => !this.hidden.has(col));
-    this.display = [
-      0,
-      ...shown.filter((c) => this.pinned.has(c)).map((c) => c + 1),
-      ...shown.filter((c) => !this.pinned.has(c)).map((c) => c + 1),
-    ];
-    this.lastPinned = this.display.filter((pos) => this.isPinned(pos)).at(-1);
-    this.trendCols = this.display.filter((pos) => pos > 0 && this.trend(pos - 1)).map((pos) => pos - 1);
-    this.applyWidths();
+    this.arrange();
+    this.body.setAttribute("aria-colcount", this.display.length);
 
     this.headRow.replaceChildren();
     this.filterRow.replaceChildren();
     this.headCells = [];
+    this.filterCells = [];
     this.filterInputs = [];
     for (const pos of this.display) {
       const col = this.cols[pos - 1];
       const cell = el("div", "wg-hcell" + (col?.kind === "number" ? " wg-num" : ""));
       this.place(cell, pos);
+      cell.setAttribute("role", "columnheader");
       cell.append(el("span", "wg-hname", pos === 0 ? this.keyTitle : col.name));
       if (col?.formula) {
         cell.append(el("span", "wg-fx", "ƒ"));
@@ -207,6 +218,7 @@ export class WatershedGrid {
       this.place(filter, pos);
       if (pos > 0) filter.append(this.filterInput(pos - 1, col));
       this.filterRow.append(filter);
+      this.filterCells[pos] = filter;
     }
 
     this.footRow.replaceChildren();
@@ -222,15 +234,33 @@ export class WatershedGrid {
     this.showSort();
   }
 
-  /** Gives a cell its column's width, and pins it if its column is pinned. */
+  /** Works out which columns are on screen and in what order: the key, the pinned, the rest. */
+  arrange() {
+    const shown = this.order.filter((col) => !this.hidden.has(col));
+    this.display = [
+      0,
+      ...shown.filter((c) => this.pinned.has(c)).map((c) => c + 1),
+      ...shown.filter((c) => !this.pinned.has(c)).map((c) => c + 1),
+    ];
+    this.lastPinned = this.display.filter((pos) => this.isPinned(pos)).at(-1);
+    this.trendCols = this.display.filter((pos) => pos > 0 && this.trend(pos - 1)).map((pos) => pos - 1);
+    this.applyWidths();
+    // A block is counted in places across the screen, which have just changed.
+    if (this.range) {
+      this.range = null;
+      this.rangeChanged();
+    }
+  }
+
+  /** Gives a cell its column's width, and pins it if its column is pinned. Returns the cell. */
   place(cell, pos) {
+    const pinned = this.isPinned(pos);
     cell.style.width = `var(--wg-w${pos})`;
     cell._pos = pos;
-    if (this.isPinned(pos)) {
-      cell.classList.add("wg-pin");
-      cell.style.left = `var(--wg-l${pos})`;
-      if (pos === this.lastPinned) cell.classList.add("wg-pin-edge");
-    }
+    cell.classList.toggle("wg-pin", pinned);
+    cell.classList.toggle("wg-pin-edge", pinned && pos === this.lastPinned);
+    cell.style.left = pinned ? `var(--wg-l${pos})` : "";
+    return cell;
   }
 
   filterInput(col, info) {
@@ -264,6 +294,7 @@ export class WatershedGrid {
     const col = this.cols[pos - 1];
     const cell = el("div", "wg-cell" + (col?.kind === "number" ? " wg-num" : "") + (col?.formula ? " wg-calc" : ""));
     this.place(cell, pos);
+    cell.setAttribute("role", pos === 0 ? "rowheader" : "gridcell");
     cell._text = "";
     if (pos > 0 && this.trend(pos - 1)) {
       cell.classList.add("wg-trend");
@@ -317,60 +348,104 @@ export class WatershedGrid {
 
   // ------------------------------------------- column order, pins and menu
 
-  /** Dragging a header sideways moves its column among its neighbours (pinned or not). */
+  /**
+   * Dragging a header sideways moves its column, there and then: the whole
+   * column follows the pointer, stepping past each neighbour as the pointer
+   * crosses its middle. Dragging onto the pinned columns pins it, and
+   * dragging a pinned column off them unpins it. Near the grid's edges the
+   * grid scrolls.
+   */
   dragHeader(e, pos, cell) {
     if (e.button !== 0 || e.target.closest(".wg-resize, .wg-more")) return;
     const col = pos - 1;
     const startX = e.clientX;
-    const zone = this.display.filter((p) => p > 0 && this.pinned.has(p - 1) === this.pinned.has(col));
+    let x = startX;
     let dragging = false;
-    let before = -1; // the column this one will go in front of; -1 for the end
+    let frame = 0;
     cell.setPointerCapture(e.pointerId);
+
+    const settle = () => {
+      const rootBox = this.root.getBoundingClientRect();
+      const onPinned = x - rootBox.left < this.pinnedWidth;
+      let moved = onPinned !== this.pinned.has(col);
+      if (moved && onPinned) this.pinned.add(col);
+      else if (moved) this.pinned.delete(col);
+      // Its place among the columns of its kind: after each one whose middle the pointer has passed.
+      const zone = this.display.filter((p) => p > 0 && this.pinned.has(p - 1) === this.pinned.has(col)).map((p) => p - 1);
+      const others = zone.filter((c) => c !== col);
+      const place = others.filter((c) => {
+        const box = this.headCells[c + 1].getBoundingClientRect();
+        return x > box.left + box.width / 2;
+      }).length;
+      moved ||= place !== zone.indexOf(col);
+      if (!moved) return;
+      this.order.splice(this.order.indexOf(col), 1);
+      const at = others.length === 0 ? this.order.length : place < others.length ? this.order.indexOf(others[place]) : this.order.indexOf(others.at(-1)) + 1;
+      this.order.splice(at, 0, col);
+      this.reflow();
+    };
+    // While the pointer rests near an edge the grid keeps scrolling, and the column keeps up.
+    const scroll = () => {
+      const box = this.body.getBoundingClientRect();
+      const [left, right] = [box.left + this.pinnedWidth, box.left + this.body.clientWidth];
+      const before = this.body.scrollLeft;
+      if (x > right - 48) this.body.scrollLeft += 16;
+      else if (x >= left && x < left + 48) this.body.scrollLeft -= 16;
+      if (this.body.scrollLeft !== before) settle();
+      frame = requestAnimationFrame(scroll);
+    };
     const move = (m) => {
-      if (!dragging && Math.abs(m.clientX - startX) < 6) return;
-      dragging = true;
-      cell.classList.add("wg-dragging");
-      const headBox = this.head.getBoundingClientRect();
-      let x = 0;
-      before = -1;
-      for (const p of zone) {
-        const box = this.headCells[p].getBoundingClientRect();
-        if (m.clientX < box.left + box.width / 2) {
-          before = p - 1;
-          x = box.left;
-          break;
-        }
-        x = box.right;
+      x = m.clientX;
+      if (!dragging) {
+        if (Math.abs(x - startX) < 5) return;
+        dragging = true;
+        this.closeMenu();
+        this.root.classList.add("wg-moving-column");
+        this.markColumn(pos, true);
+        frame = requestAnimationFrame(scroll);
       }
-      this.marker.hidden = false;
-      this.marker.style.left = `${x - headBox.left + this.head.scrollLeft - 1}px`;
+      settle();
     };
     const done = () => {
       cell.removeEventListener("pointermove", move);
       cell.removeEventListener("pointerup", done);
       cell.removeEventListener("pointercancel", done);
-      this.marker.hidden = true;
-      cell.classList.remove("wg-dragging");
       if (!dragging) return;
+      cancelAnimationFrame(frame);
+      this.root.classList.remove("wg-moving-column");
+      this.markColumn(pos, false);
       // The click that follows a drag is not a request to sort.
       this.dragged = true;
       setTimeout(() => (this.dragged = false));
-      this.moveColumn(col, before, zone.map((p) => p - 1));
     };
     cell.addEventListener("pointermove", move);
     cell.addEventListener("pointerup", done);
     cell.addEventListener("pointercancel", done);
   }
 
-  /** Moves a column in front of another of its zone, or to the zone's end if `before` is negative. */
-  moveColumn(col, before, zone) {
-    if (before === col) return;
-    const others = zone.filter((c) => c !== col);
-    if (others.length === 0) return;
-    this.order.splice(this.order.indexOf(col), 1);
-    const at = before < 0 ? this.order.indexOf(others.at(-1)) + 1 : this.order.indexOf(before);
-    this.order.splice(at, 0, col);
-    this.layoutChanged();
+  /** Every cell on screen of the column at `pos`: header, filter, total and rows. */
+  columnCells(pos) {
+    const rows = [...this.live.values(), ...this.spare];
+    return [this.headCells[pos], this.filterCells[pos], this.footRow._cells[pos], ...rows.map((row) => row._cells[pos])];
+  }
+
+  markColumn(pos, on) {
+    for (const cell of this.columnCells(pos)) cell.classList.toggle("wg-moving", on);
+  }
+
+  /**
+   * Puts the columns on screen in their order again, moving the cells there
+   * are rather than making new ones. For a change of order or pinning; a
+   * column shown or hidden needs `layoutChanged`.
+   */
+  reflow() {
+    this.arrange();
+    const rows = [this.footRow, ...this.live.values(), ...this.spare];
+    for (const pos of this.display) {
+      this.headRow.append(this.place(this.headCells[pos], pos));
+      this.filterRow.append(this.place(this.filterCells[pos], pos));
+      for (const row of rows) row.append(this.place(row._cells[pos], pos));
+    }
   }
 
   layoutChanged() {
@@ -381,7 +456,7 @@ export class WatershedGrid {
   setPinned(col, pinned) {
     if (pinned) this.pinned.add(col);
     else this.pinned.delete(col);
-    this.layoutChanged();
+    this.reflow();
   }
 
   setHidden(col, hidden) {
@@ -451,6 +526,7 @@ export class WatershedGrid {
         else item(`Group by ${info.name}`, () => this.setGroup(col));
       }
       menu.append(el("hr"));
+      this.totalChoice(menu, col, info);
       if (info.kind === "text") this.valueFilter(menu, col);
     }
     menu.append(el("div", "wg-menu-title", "Columns"));
@@ -480,6 +556,29 @@ export class WatershedGrid {
     this.menuPos = pos;
     document.addEventListener("pointerdown", this.outside, true);
     document.addEventListener("keydown", this.escape);
+  }
+
+  /** Adds the choice of a column's total to its menu. */
+  totalChoice(menu, col, info) {
+    menu.append(el("div", "wg-menu-title", "Total"));
+    const chips = el("div", "wg-chips");
+    for (const agg of info.kind === "number" ? ["sum", "avg", "min", "max", "count", "none"] : ["count", "none"]) {
+      const chip = el("button", "wg-chip", agg);
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", String(info.agg === agg));
+      chip.addEventListener("click", () => {
+        this.closeMenu();
+        try {
+          this.grid.set_agg(col, agg);
+        } catch (error) {
+          return this.onError(error.message);
+        }
+        this.columnsChanged();
+        this.onColumns();
+      });
+      chips.append(chip);
+    }
+    menu.append(chips, el("hr"));
   }
 
   /** Adds a tick list of a text column's values to its menu; unticking one filters it out. */
@@ -657,6 +756,7 @@ export class WatershedGrid {
       selected: this.selected.size,
     });
     if (this.focus) this.onFocus(this.focus);
+    if (this.range && this.rangeCells <= 20000 && report.changed > 0) this.rangeChanged();
     return report;
   }
 
@@ -679,7 +779,9 @@ export class WatershedGrid {
       this.viewLen = viewLen;
       this.spacer.style.height = `${viewLen * this.rowH}px`;
       this.empty.hidden = viewLen > 0;
+      this.body.setAttribute("aria-rowcount", viewLen + 2);
     }
+    this.box = this.rangeBox();
     const first = Math.max(0, Math.floor(this.body.scrollTop / this.rowH) - OVERSCAN);
     const count = Math.ceil(this.body.clientHeight / this.rowH) + 2 * OVERSCAN;
     const lines = JSON.parse(this.grid.rows(first, count));
@@ -722,6 +824,7 @@ export class WatershedGrid {
 
   makeRow() {
     const row = el("div", "wg-row");
+    row.setAttribute("role", "row");
     row._cells = [];
     for (const pos of this.display) row.append((row._cells[pos] = this.makeCell(pos)));
     this.rows.append(row);
@@ -741,16 +844,27 @@ export class WatershedGrid {
       (!group && this.selected.has(data.k) ? " wg-selected" : "");
     const cells = row._cells;
     const first = cells[0];
-    const label = group ? `${data.o ? "▾" : "▸"} ${data.g || "(blank)"}  ·  ${data.n.toLocaleString("en-US")}` : data.k;
-    if (first._text !== label) first.textContent = first._text = label;
+    const label = group ? `${data.g || "(blank)"} ${data.n}` : data.k;
+    if (first._text !== label) {
+      first._text = label;
+      if (group) first.replaceChildren(el("span", "wg-gname", data.g || "(blank)"), el("span", "wg-gcount", data.n.toLocaleString("en-US")));
+      else first.textContent = label;
+    }
     const was = this.before.get(id);
     const focus = this.focus && this.focus.line === line ? this.focus.pos : -1;
-    for (const pos of this.display) {
+    const box = this.box && !group && line >= this.box.l0 && line <= this.box.l1 ? this.box : null;
+    row.setAttribute("aria-rowindex", line + 2);
+    if (group) row.setAttribute("aria-expanded", String(data.o));
+    else row.removeAttribute("aria-expanded");
+    this.display.forEach((pos, across) => {
       const cell = cells[pos];
+      const picked = box !== null && across >= box.a0 && across <= box.a1;
       cell.classList.toggle("wg-focus", pos === focus);
-      if (pos === 0 || cell === this.editing?.cell) continue;
+      cell.classList.toggle("wg-range", picked);
+      cell.setAttribute("aria-selected", String(picked || (pos === 0 && !group && this.selected.has(data.k))));
+      if (pos === 0 || cell === this.editing?.cell) return;
       this.setCell(cell, pos - 1, data.c[pos - 1], was?.[pos - 1]);
-    }
+    });
     seen.set(id, data.c);
   }
 
@@ -768,7 +882,7 @@ export class WatershedGrid {
     if (typeof value === "number" && typeof was === "number" && value !== was) {
       cell.animate(
         [{ backgroundColor: `var(${value > was ? "--wg-up" : "--wg-down"})` }, { backgroundColor: "transparent" }],
-        { duration: 700, easing: "ease-out" },
+        { duration: 900, easing: "cubic-bezier(0.2, 0.6, 0.2, 1)" },
       );
     }
   }
@@ -805,6 +919,20 @@ export class WatershedGrid {
       this.draw();
       return;
     }
+    if (this.ranged) return; // the click that ends a drag over cells
+    if (hit.pos > 0) {
+      // A cell: Shift-click picks out the block from the focused cell to it.
+      if (e.shiftKey && this.focus?.kind === "cell" && this.focus.pos > 0) {
+        this.setRange(this.focus.line, this.display.indexOf(this.focus.pos), hit.line, this.display.indexOf(hit.pos));
+      } else {
+        this.range = null;
+        this.focusLine(hit.line, hit.pos, hit.data);
+        this.rangeChanged();
+      }
+      this.draw();
+      return;
+    }
+    // The key column selects rows.
     const key = hit.data.k;
     if (e.shiftKey && this.anchor !== null) {
       const [low, high] = [Math.min(this.anchor, hit.line), Math.max(this.anchor, hit.line)];
@@ -814,14 +942,132 @@ export class WatershedGrid {
     } else if (e.metaKey || e.ctrlKey) {
       if (!this.selected.delete(key)) this.selected.add(key);
       this.anchor = hit.line;
+    } else if (this.selected.size === 1 && this.selected.has(key)) {
+      this.selected.clear(); // clicking the one selected row lets it go
     } else {
       this.selected.clear();
       this.selected.add(key);
       this.anchor = hit.line;
     }
+    this.range = null;
     this.focusLine(hit.line, hit.pos, hit.data);
+    this.rangeChanged();
     this.draw();
     this.onStatus({ selected: this.selected.size });
+  }
+
+  // ------------------------------------------------------- a block of cells
+
+  /** The block picked out, as first and last line and first and last place across; or null. */
+  rangeBox() {
+    const r = this.range;
+    if (!r) return null;
+    return {
+      l0: Math.min(r.line, r.toLine),
+      l1: Math.max(r.line, r.toLine),
+      a0: Math.min(r.across, r.toAcross),
+      a1: Math.max(r.across, r.toAcross),
+    };
+  }
+
+  /** The block's columns, as the engine numbers them, left to right. */
+  rangeCols(box) {
+    return Uint32Array.from(this.display.slice(box.a0, box.a1 + 1).filter((pos) => pos > 0).map((pos) => pos - 1));
+  }
+
+  /** Picks out the block from one cell (which gets the focus) to another. */
+  setRange(line, across, toLine, toAcross) {
+    const last = this.display.length - 1;
+    const clamp = (a) => Math.min(Math.max(a, 1), last);
+    toLine = Math.min(Math.max(toLine, 0), this.viewLen - 1);
+    [across, toAcross] = [clamp(across), clamp(toAcross)];
+    this.range = line === toLine && across === toAcross ? null : { line, across, toLine, toAcross };
+    if (this.focus?.line !== line || this.focus?.pos !== this.display[across]) {
+      const [data] = JSON.parse(this.grid.rows(line, 1));
+      if (data) this.focusLine(line, this.display[across], data);
+    }
+    this.rangeChanged();
+  }
+
+  /** Tells the page what the block comes to (or that there is none). */
+  rangeChanged() {
+    const box = this.rangeBox();
+    if (!box) return this.onStatus({ range: null });
+    const cols = this.rangeCols(box);
+    this.rangeCells = (box.l1 - box.l0 + 1) * cols.length;
+    this.onStatus({ range: JSON.parse(this.grid.range_stats(box.l0, box.l1 - box.l0 + 1, cols)) });
+  }
+
+  /** The line and the place across of the cell under a point on the screen. */
+  cellAt(x, y) {
+    const box = this.body.getBoundingClientRect();
+    const line = Math.floor((y - box.top + this.body.scrollTop) / this.rowH);
+    // Pinned columns stay put; the rest are where the scrolling has left them.
+    let at = x - box.left;
+    if (at >= this.pinnedWidth) at += this.body.scrollLeft;
+    let across = 0;
+    for (let edge = 0; across < this.display.length - 1; across++) {
+      edge += this.widths[this.display[across]];
+      if (at < edge) break;
+    }
+    return { line: Math.min(Math.max(line, 0), this.viewLen - 1), across: Math.max(across, 1) };
+  }
+
+  /** Dragging over cells picks out a block, scrolling when the pointer nears an edge. */
+  dragRange(e) {
+    const hit = this.hit(e);
+    if (!hit || hit.pos === 0 || hit.data.k === undefined || e.button !== 0 || e.shiftKey || e.target.closest("input")) return;
+    const from = { line: hit.line, across: this.display.indexOf(hit.pos) };
+    let [x, y] = [e.clientX, e.clientY];
+    let dragging = false;
+    let frame = 0;
+    const settle = () => {
+      const to = this.cellAt(x, y);
+      if (!dragging && to.line === from.line && to.across === from.across) return;
+      if (!dragging) {
+        dragging = true;
+        this.stopEdit(true, 0, true);
+        this.root.classList.add("wg-ranging");
+      }
+      const r = this.range;
+      if (r && r.toLine === to.line && r.toAcross === to.across) return;
+      this.setRange(from.line, from.across, to.line, to.across);
+      this.draw();
+    };
+    let over = false;
+    const scroll = () => {
+      if (over) return;
+      const box = this.body.getBoundingClientRect();
+      const before = [this.body.scrollTop, this.body.scrollLeft];
+      if (dragging) {
+        if (y > box.top + this.body.clientHeight - 24) this.body.scrollTop += this.rowH;
+        else if (y < box.top + 24) this.body.scrollTop -= this.rowH;
+        if (x > box.left + this.body.clientWidth - 24) this.body.scrollLeft += 24;
+        else if (x < box.left + this.pinnedWidth + 24 && x >= box.left + this.pinnedWidth) this.body.scrollLeft -= 24;
+      }
+      if (before[0] !== this.body.scrollTop || before[1] !== this.body.scrollLeft) settle();
+      frame = requestAnimationFrame(scroll);
+    };
+    const move = (m) => {
+      [x, y] = [m.clientX, m.clientY];
+      settle();
+    };
+    const done = () => {
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", done);
+      removeEventListener("pointercancel", done);
+      over = true;
+      cancelAnimationFrame(frame);
+      if (!dragging) return;
+      this.root.classList.remove("wg-ranging");
+      this.ranged = true;
+      setTimeout(() => (this.ranged = false));
+      this.body.focus({ preventScroll: true });
+    };
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", done);
+    addEventListener("pointercancel", done);
+    frame = requestAnimationFrame(scroll);
   }
 
   focusLine(line, pos, data) {
@@ -834,7 +1080,26 @@ export class WatershedGrid {
     for (const pos of this.display) {
       this.footRow._cells[pos].classList.toggle("wg-focus", focus.kind === "total" && pos === focus.pos);
     }
+    this.say(focus);
     this.onFocus(focus);
+  }
+
+  /** Says where the focus is and what is there, for a screen reader. */
+  say(focus) {
+    const column = focus.pos === 0 ? this.keyTitle : this.cols[focus.col].name;
+    if (focus.kind === "total") {
+      this.said.textContent = `Total of ${column}: ${this.footRow._cells[focus.pos]._text || "none"}`;
+      return;
+    }
+    const row = this.live.get(focus.line);
+    const text = row?._cells[focus.pos]?._text;
+    if (focus.kind === "group") {
+      const data = row?._data;
+      const state = data ? `, ${data.n} rows, ${data.o ? "open" : "closed"}` : "";
+      this.said.textContent = focus.pos === 0 ? `Group ${focus.key || "blank"}${state}` : `${column} for group ${focus.key || "blank"}: ${text || "none"}`;
+    } else {
+      this.said.textContent = focus.pos === 0 ? `Row ${focus.key}` : `${column}, ${focus.key}: ${text ?? ""}`;
+    }
   }
 
   /** Why the focused cell has its value, from the engine. */
@@ -854,8 +1119,21 @@ export class WatershedGrid {
   /** Moves the focus to a line and to the column `across` places along the screen. */
   moveFocus(line, across) {
     if (this.viewLen <= 0) return;
+    if (this.range) {
+      this.range = null;
+      this.rangeChanged();
+    }
     line = Math.min(Math.max(line, 0), this.viewLen - 1);
     const pos = this.display[Math.min(Math.max(across, 0), this.display.length - 1)];
+    this.reveal(line, pos);
+    const [data] = JSON.parse(this.grid.rows(line, 1));
+    if (!data) return;
+    this.focusLine(line, pos, data);
+    this.draw();
+  }
+
+  /** Scrolls so that a cell is in view, clear of the pinned columns. */
+  reveal(line, pos) {
     const top = line * this.rowH;
     if (top < this.body.scrollTop) this.body.scrollTop = top;
     else if (top + this.rowH > this.body.scrollTop + this.body.clientHeight) this.body.scrollTop = top + this.rowH - this.body.clientHeight;
@@ -869,10 +1147,6 @@ export class WatershedGrid {
       if (left - this.pinnedWidth < this.body.scrollLeft) this.body.scrollLeft = left - this.pinnedWidth;
       else if (left + this.widths[pos] > this.body.scrollLeft + this.body.clientWidth) this.body.scrollLeft = left + this.widths[pos] - this.body.clientWidth;
     }
-    const [data] = JSON.parse(this.grid.rows(line, 1));
-    if (!data) return;
-    this.focusLine(line, pos, data);
-    this.draw();
   }
 
   key(e) {
@@ -890,7 +1164,29 @@ export class WatershedGrid {
       Home: e.metaKey || e.ctrlKey ? [0, across] : [f.line, 0],
       End: e.metaKey || e.ctrlKey ? [this.viewLen - 1, across] : [f.line, this.display.length - 1],
     };
-    if (moves[e.key]) {
+    const command = e.metaKey || e.ctrlKey;
+    if (command && (e.key === "z" || e.key === "Z" || e.key === "y")) {
+      e.preventDefault();
+      this.undo(e.key === "y" || e.shiftKey);
+    } else if (command && e.key === "a") {
+      // Every cell.
+      e.preventDefault();
+      this.setRange(0, 1, this.viewLen - 1, this.display.length - 1);
+      this.draw();
+    } else if (e.key === "Escape" && this.range) {
+      this.range = null;
+      this.rangeChanged();
+      this.draw();
+    } else if (moves[e.key] && e.shiftKey && this.focus?.kind === "cell") {
+      // Shift moves the far corner of the block, leaving the focus where it is.
+      e.preventDefault();
+      const far = this.range ?? { toLine: f.line, toAcross: across };
+      const [dLine, dAcross] = [moves[e.key][0] - f.line, moves[e.key][1] - across];
+      const to = [Math.min(Math.max(far.toLine + dLine, 0), this.viewLen - 1), Math.min(Math.max(far.toAcross + dAcross, 1), this.display.length - 1)];
+      this.setRange(f.line, Math.max(across, 1), to[0], to[1]);
+      this.reveal(to[0], this.display[to[1]]);
+      this.draw();
+    } else if (moves[e.key]) {
       e.preventDefault();
       this.moveFocus(...moves[e.key]);
     } else if (this.focus?.kind === "group" && (e.key === "Enter" || e.key === " ")) {
@@ -931,7 +1227,12 @@ export class WatershedGrid {
     if (initial === undefined) input.select();
     input.addEventListener("keydown", (e) => {
       e.stopPropagation();
-      if (e.key === "Enter") this.stopEdit(true, 1);
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && this.range) {
+        // Fill the whole block with what was typed.
+        const text = input.value;
+        this.stopEdit(false, 0, true);
+        this.fillRange(text);
+      } else if (e.key === "Enter") this.stopEdit(true, 1);
       else if (e.key === "Escape") this.stopEdit(false);
       else if (e.key === "Tab") {
         e.preventDefault();
@@ -966,6 +1267,89 @@ export class WatershedGrid {
     if (commit && moveDown && this.focus?.kind === "cell") {
       this.moveFocus(this.focus.line + moveDown, this.display.indexOf(this.focus.pos));
     }
+  }
+
+  // ------------------------------------------------- undo, copy and paste
+
+  /** Puts back the last edit (or pasted block), or with `again` does it again. */
+  undo(again = false) {
+    try {
+      const what = again ? this.grid.redo() : this.grid.undo();
+      this.refresh();
+      this.onNote(what ? `${again ? "Did again" : "Undid"}: ${what}.` : `Nothing to ${again ? "do again" : "undo"}.`);
+    } catch (error) {
+      this.onError(error.message);
+    }
+  }
+
+  /** Copies the selected rows, or with one or none selected the focused cell, as tab-separated text. */
+  copy(e) {
+    if (this.editing) return;
+    let text = null;
+    const box = this.rangeBox();
+    if (box) {
+      text = this.grid.range_tsv(box.l0, box.l1 - box.l0 + 1, this.rangeCols(box));
+      this.onNote(`Copied ${this.rangeCells.toLocaleString("en-US")} cells.`);
+    } else if (this.selected.size > 1) {
+      text = this.grid.tsv([...this.selected], Uint32Array.from(this.display.filter((pos) => pos > 0).map((pos) => pos - 1)));
+      this.onNote(`Copied ${this.selected.size.toLocaleString("en-US")} rows.`);
+    } else if (this.focus?.kind === "cell") {
+      const data = this.live.get(this.focus.line)?._data;
+      const value = this.focus.pos === 0 ? data?.k : data?.c[this.focus.col];
+      if (value !== undefined && value !== null && typeof value !== "object") text = String(value);
+    }
+    if (text === null) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", text);
+  }
+
+  /**
+   * Pastes tab-separated text into cells, from the focused cell rightwards
+   * and downwards, as a spreadsheet does. Calculated columns and what does
+   * not read as the column's kind are skipped. The whole paste is one step to undo.
+   */
+  paste(e) {
+    if (this.editing) return;
+    e.preventDefault();
+    if (this.focus?.kind !== "cell") return this.onError("Click a cell to paste from there.");
+    const block = e.clipboardData.getData("text/plain").replace(/\r/g, "").replace(/\n$/, "").split("\n").map((line) => line.split("\t"));
+    const box = this.rangeBox();
+    // One thing pasted onto a block fills the block.
+    if (box && block.length === 1 && block[0].length === 1) return this.fillRange(block[0][0]);
+    // Otherwise the paste goes from the block's first cell, or the focused one, rightwards and downwards.
+    const across = box ? box.a0 : Math.max(1, this.display.indexOf(this.focus.pos));
+    const top = box ? box.l0 : this.focus.line;
+    // The rows from there down, passing over group lines.
+    const rows = JSON.parse(this.grid.rows(top, block.length * 2 + 64)).filter((line) => line.k !== undefined);
+    let [set, skipped] = [0, 0];
+    this.grid.begin_edits();
+    block.slice(0, rows.length).forEach((cells, r) => {
+      cells.forEach((text, c) => {
+        const pos = this.display[across + c];
+        try {
+          if (pos === undefined || !this.cols[pos - 1].editable) throw new Error("not a cell that can be set");
+          this.grid.set_cell(rows[r].k, pos - 1, text);
+          set += 1;
+        } catch {
+          skipped += 1;
+        }
+      });
+    });
+    this.grid.end_edits();
+    this.refresh();
+    const count = (n) => `${n.toLocaleString("en-US")} cell${n === 1 ? "" : "s"}`;
+    this.onNote(`Pasted ${count(set)}${skipped ? `; skipped ${count(skipped)}` : ""}.`);
+  }
+
+  /** Sets every cell of the block to one text, as one step to undo. */
+  fillRange(text) {
+    const box = this.rangeBox();
+    if (!box) return;
+    const { set, skipped } = JSON.parse(this.grid.fill(box.l0, box.l1 - box.l0 + 1, this.rangeCols(box), text));
+    this.body.focus({ preventScroll: true });
+    this.refresh();
+    const count = (n) => `${n.toLocaleString("en-US")} cell${n === 1 ? "" : "s"}`;
+    this.onNote(`Filled ${count(set)}${skipped ? `; skipped ${count(skipped)}` : ""}.`);
   }
 
   // -------------------------------------------------------------- selection

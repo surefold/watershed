@@ -167,8 +167,11 @@ Editing a cell recalculates that row's formulas and the totals they feed: on
 sorting by several columns and grouping happen in Rust too; the page asks
 only for the lines in view and draws those, so 100,000 rows scroll like 50.
 A stream of 100 price changes per frame takes about 1 ms to apply and
-redraw, and the view is filtered and sorted again only when a change
-touches a column it reads.
+redraw. The view is left alone unless a change touches a column it reads,
+and then only the rows that were set are moved to where they now sort:
+sorted by a calculated column, the same stream takes about 2 ms. It is
+filtered and sorted from scratch only when that would be quicker (many rows
+set at once) or everything may have moved (a named value changed).
 
 ```js
 import init, { Grid } from "./pkg/watershed_grid.js";
@@ -195,8 +198,9 @@ keeps the values an update overwrites, so the grid stores nothing extra.
 `web/grid/chart.js` draws each group's total as a bar, straight from the
 group nodes, so it follows a stream of prices without adding anything up.
 
-Columns can be dragged into a new order, pinned to the left, hidden and
-resized, from each header and its menu. Rows can arrive as the person
+Columns can be dragged into a new order (the column moves as it is
+dragged, and dragging it onto the pinned columns pins it), pinned to the
+left, hidden and resized, from each header and its menu. Rows can arrive as the person
 scrolls: give the view a `loadMore` function that adds the next block and
 says whether there may be more. Rows loaded that way are ordinary rows, so
 sorting, filters and totals cover everything loaded so far.
@@ -208,8 +212,25 @@ their order. Nothing can be changed until it is back at now.
 A text column's filter can name several values (`=Rates|FX`); the column's
 menu lists its values to tick.
 
+Edits can be undone and done again (a paste is one step), a column's total
+can be changed from its menu, and cells copy and paste as tab-separated
+text, to and from a spreadsheet. Dragging over cells, or Shift with the
+arrow keys, picks out a block: it copies, takes a paste, fills with one
+value, and the page shows its count, sum, average, least and greatest,
+kept current as prices move. The grid names its rows, cells and headers for
+a screen reader and says what is in the cell the focus moves to.
+
 While a filter is on, totals are of the rows that pass it, added up the
 plain way; the graph's totals are of every row.
+
+Group totals are aggregates in the graph only for small tables. A grouping
+in the graph costs a node for each row in each totalled column, for every
+column ever grouped by, and nodes cannot be removed: 50,000 rows with six
+totals took about 175 MB per grouping column. Past 100,000 row-and-column
+pairs (`set_group_budget`), the grid adds each group's totals up over its
+rows instead, which adds nothing to the graph. Sharing one membership node
+per row between a column's groupings, in the engine, would bring the cost
+down enough to lift this.
 
 ## Seeing what it does
 

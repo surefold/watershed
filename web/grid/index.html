@@ -13,7 +13,9 @@
   --paper: #f2f5f4; --surface: #ffffff; --band: #f7f9f9; --head: #e8eeee;
   --ink: #13242c; --muted: #56676e; --rule: #d3dcdc;
   --water: #1d6c88; --rain: #23794a; --sediment: #b9541f; --select: #d6eaf1;
-  --up: rgba(44, 140, 88, 0.40); --down: rgba(196, 95, 39, 0.40);
+  --up: rgba(44, 140, 88, 0.28); --down: rgba(196, 95, 39, 0.28);
+  --wash: color-mix(in srgb, var(--ink) 5%, var(--surface));
+  --lift: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent), 0 12px 32px -18px color-mix(in srgb, var(--ink) 30%, transparent);
   --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
   --body: "Figtree", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -23,7 +25,7 @@
     --paper: #0e161a; --surface: #142026; --band: #17252c; --head: #1b2b33;
     --ink: #e2eaeb; --muted: #94a4a9; --rule: #2a3c43;
     --water: #63b4d0; --rain: #5bc68b; --sediment: #f0894a; --select: #1f4250;
-    --up: rgba(91, 198, 139, 0.38); --down: rgba(240, 137, 74, 0.38);
+    --up: rgba(91, 198, 139, 0.3); --down: rgba(240, 137, 74, 0.3);
     color-scheme: dark;
   }
 }
@@ -31,63 +33,112 @@
 html, body { height: 100%; }
 body {
   margin: 0; background: var(--paper); color: var(--ink); font: 14px/1.5 var(--body);
-  display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 12px;
+  display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: 12px;
   padding: 18px max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
 }
-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 20px; }
-h1 { font: 700 1.7rem/1.1 var(--display); letter-spacing: -0.02em; margin: 0; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+h1 { font: 700 1.5rem/1.1 var(--display); letter-spacing: -0.02em; margin: 0; }
 h1 span { color: var(--water); }
-header p { margin: 0; color: var(--muted); max-width: 86ch; }
+header p { margin: 0 0 0 10px; flex: 1 1 44ch; color: var(--muted); max-width: 104ch; font-size: 13px; line-height: 1.4; }
+.tag { font: 600 0.68rem/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+/* Whether prices are moving, said once at the top of the page, with the
+   switch that changes it right beside the words. */
+.pill { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 4px 0 12px; border: 0; border-radius: 999px; background: var(--wash); color: var(--muted); font: 600 12px/1 var(--mono); font-variant-numeric: tabular-nums; cursor: pointer; }
+.pill .act { display: inline-flex; align-items: center; gap: 7px; height: 24px; margin-left: 2px; padding: 0 12px 0 10px; border-radius: 999px; background: var(--water); color: var(--surface); font: 600 12.5px/1 var(--body); transition: background-color 0.12s; }
+.pill:hover .act { background: color-mix(in srgb, var(--water) 88%, var(--ink)); }
+/* A play triangle while paused, two bars while streaming. */
+.pill .act::before { content: ""; width: 8px; height: 10px; background: currentColor; clip-path: polygon(0 0, 100% 50%, 0 100%); }
+.pill.on .act::before { clip-path: polygon(0 0, 36% 0, 36% 100%, 0 100%, 0 0, 64% 0, 100% 0, 100% 100%, 64% 100%, 64% 0); }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.pill.on, .pill.on:hover:not(:disabled) { background: color-mix(in srgb, var(--water) 12%, var(--surface)); color: var(--water); }
+.pill.on::before { opacity: 1; animation: blink 1.6s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: 0.3; } }
+
+/* What the last update cost: the page's point, so it comes first. */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1px; margin: 0; background: var(--rule); border: 1px solid var(--rule); border-radius: 12px; overflow: hidden; box-shadow: var(--lift); }
+.stat { display: grid; gap: 3px; align-content: start; min-width: 0; padding: 10px 16px 11px; background: var(--surface); }
+.stat dt { font: 600 0.66rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat dd { margin: 0; font: 600 1.4rem/1.2 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; white-space: nowrap; }
+.stat dd small { font: 400 12px/1 var(--body); color: var(--muted); letter-spacing: 0; }
+.stat dd.live { color: var(--water); }
+.stat dd.neg { color: var(--sediment); }
+.stat p { margin: 0; font-size: 12px; line-height: 1.3; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat .with-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.stat .with-line dd { font-size: 1.15rem; line-height: 1.46; overflow: hidden; text-overflow: ellipsis; }
+#t-line { flex: none; width: 96px; height: 26px; overflow: visible; }
+#t-line path { fill: none; stroke: var(--water); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 h2 { font: 600 0.7rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
 
-.tools { display: grid; gap: 8px; }
-.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
-.bar label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; white-space: nowrap; }
-.sep { width: 1px; align-self: stretch; background: var(--rule); margin: 2px 2px; }
+/* The controls: one quiet panel in three bands: find and shape the rows,
+   move the inputs, add a column. Fields sit in a wash, buttons are plain
+   words until pointed at, and only the two that start something are filled. */
+.tools { display: grid; gap: 0; background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; box-shadow: var(--lift); }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 10px; }
+.bar + .bar { border-top: 1px solid color-mix(in srgb, var(--rule) 60%, transparent); }
+.bar label { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.sep { width: 1px; height: 18px; background: var(--rule); margin: 0 4px; }
+.grow { flex: 1 1 0; min-width: 0; }
+.bar.formula { background: var(--band); border-radius: 0 0 12px 12px; }
+.bar.formula :is(input, select) { background: var(--surface); border-color: var(--rule); }
+.fx { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: color-mix(in srgb, var(--water) 12%, var(--surface)); color: var(--water); font: italic 600 14px/1 var(--body); }
+#check { border-color: var(--rule); }
 input[type="text"], input[type="number"], input[type="search"], select, button {
-  height: 32px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 6px;
-  background: var(--surface); color: var(--ink); font: 13px/1 var(--body);
+  height: 30px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px;
+  background: var(--wash); color: var(--ink); font: 13px/1 var(--body);
+  transition: border-color 0.12s, background-color 0.12s, color 0.12s;
 }
+:is(input[type="text"], input[type="number"], input[type="search"], select):hover { border-color: var(--rule); }
+input::placeholder { color: var(--muted); opacity: 0.6; }
 input[type="text"].code, input[type="number"] { font-family: var(--mono); font-size: 12.5px; }
-input[type="number"] { width: 78px; }
-button { cursor: pointer; font-weight: 600; }
-button:hover { border-color: var(--water); }
-button.primary { background: var(--water); border-color: var(--water); color: var(--paper); }
-button[aria-pressed="true"] { background: var(--rain); border-color: var(--rain); color: var(--paper); }
+input[type="number"] { width: 72px; }
+select { padding-right: 6px; cursor: pointer; }
+button { cursor: pointer; font-weight: 600; background: transparent; color: color-mix(in srgb, var(--ink) 85%, var(--water)); }
+button:hover:not(:disabled) { background: var(--wash); }
+button:disabled { opacity: 0.4; cursor: default; }
+button.primary { background: var(--water); color: var(--surface); }
+button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--water) 88%, var(--ink)); }
 :is(input, select, button):focus-visible { outline: 2px solid var(--water); outline-offset: 1px; }
-input[type="range"] { accent-color: var(--water); width: 120px; }
-output { font: 12.5px/1 var(--mono); color: var(--ink); min-width: 5ch; }
-#search { width: 200px; }
-#formula { width: min(340px, 60vw); }
-#formula-name { width: 110px; }
-.note { font-size: 13px; min-height: 1.2em; }
+input[type="range"] { accent-color: var(--water); width: 112px; height: 4px; }
+output { font: 12.5px/1 var(--mono); color: var(--ink); min-width: 5ch; font-variant-numeric: tabular-nums; }
+/* The stream switch: a light that is on, and beats, while prices move. */
+#stream { display: inline-flex; align-items: center; gap: 8px; background: var(--wash); border-radius: 999px; padding: 0 14px 0 12px; }
+#stream::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: color-mix(in srgb, var(--muted) 55%, transparent); }
+#stream[aria-pressed="true"] { background: color-mix(in srgb, var(--rain) 14%, var(--surface)); color: var(--ink); }
+#stream[aria-pressed="true"]::before { background: var(--rain); animation: beat 1.4s ease-in-out infinite; }
+@keyframes beat { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--rain) 22%, transparent); } }
+@media (prefers-reduced-motion: reduce) { #stream::before, .pill::before { animation: none !important; } }
+#search { width: 240px; }
+#formula { width: min(360px, 60vw); }
+#formula-name { width: 104px; }
+.note { font-size: 12.5px; min-height: 1.2em; margin-left: auto; text-align: right; }
 .note.bad { color: var(--sediment); }
 .note.good { color: var(--rain); }
 
-main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; min-height: 0; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; min-height: 0; }
 #grid { min-height: 320px; }
-aside { display: grid; grid-template-rows: auto minmax(0, 1.8fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
+aside { display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
 .card.chart { grid-template-rows: auto minmax(0, 1fr); }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.card-head select { height: 26px; padding: 0 6px; font-size: 12.5px; }
-#more { height: 24px; padding: 0 8px; font-size: 12px; }
-.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px; display: grid; gap: 8px; align-content: start; min-height: 0; }
-.figures { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin: 0; }
-.figures div { display: grid; gap: 2px; }
-.figures dt { font-size: 12px; color: var(--muted); }
-.figures dd { margin: 0; font: 600 1.05rem/1.2 var(--mono); font-variant-numeric: tabular-nums; }
-.figures dd small { font: 400 12px/1 var(--body); color: var(--muted); }
+.card-head select { height: 26px; padding: 0 6px; font-size: 12.5px; border-radius: 7px; }
+#more { height: 24px; padding: 0 8px; font-size: 12px; background: var(--wash); }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 14px 16px; display: grid; gap: 10px; align-content: start; min-height: 0; box-shadow: var(--lift); }
+/* The total and its line are in the figures at the top; here, only the bars. */
+#chart :is(.gc-figure, .gc-line) { display: none; }
+#chart.gc { grid-template-rows: auto minmax(0, 1fr); }
+#chart .gc-note { order: -1; }
 #why { margin: 0; overflow: auto; font: 12px/1.55 var(--mono); white-space: pre; color: var(--ink); }
 #why.hint { white-space: pre-wrap; font: 13px/1.5 var(--body); color: var(--muted); }
 .hint { color: var(--muted); font-size: 13px; margin: 0; }
-kbd { font: 11px/1 var(--mono); border: 1px solid var(--rule); border-radius: 4px; padding: 2px 5px; background: var(--paper); }
+kbd { font: 10.5px/1 var(--mono); border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px; background: var(--surface); color: var(--ink); }
 
-footer { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--muted); font-size: 13px; }
+footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; color: var(--muted); font-size: 12.5px; padding: 0 4px; }
+footer .keys { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin: 0 0 0 auto; padding: 0; list-style: none; font-size: 12px; }
+footer .keys kbd { margin-right: 3px; }
 footer b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
-#progress { height: 3px; background: var(--water); width: 0; transition: width 0.15s; border-radius: 2px; }
+#progress { height: 2px; background: var(--water); width: 0; transition: width 0.15s; border-radius: 2px; margin: 0 12px; }
 
 /* Inside the playground's tab (?embed), the page around it already says what this is. */
-body.embed { grid-template-rows: auto minmax(0, 1fr) auto; padding: 4px 2px 6px; background: transparent; }
+body.embed { grid-template-rows: auto auto minmax(0, 1fr) auto; padding: 4px 2px 6px; background: transparent; }
 body.embed header { display: none; }
 
 @media (max-width: 980px) {
@@ -104,9 +155,20 @@ body.embed header { display: none; }
 
 <header>
   <h1>Watershed <span>Grid</span></h1>
+  <span class="tag">Rust → WebAssembly</span>
   <p>A data grid whose rows, formulas, totals, sorting, filtering and grouping all run in WebAssembly on the watershed engine.
      Every cell is a node, so a change recalculates only the cells and totals that depend on it.</p>
+  <button type="button" class="pill" id="pill" aria-pressed="false" title="Start or pause the stream of price changes"><span id="pill-state">Paused</span><span class="act" id="pill-act">Stream</span></button>
 </header>
+
+<dl class="stats" aria-label="Last update">
+  <div class="stat"><dt>Inputs changed</dt><dd id="s-inputs">–</dd><p>in the last update</p></div>
+  <div class="stat"><dt>Nodes recalculated</dt><dd id="s-recalc" class="live">–</dd><p id="s-nodes">&nbsp;</p></div>
+  <div class="stat"><dt>Update and redraw</dt><dd id="s-ms">–</dd><p id="s-view">&nbsp;</p></div>
+  <div class="stat"><dt id="t-title">Total</dt>
+    <div class="with-line"><dd id="t-total">–</dd><svg id="t-line" viewBox="0 0 96 26" preserveAspectRatio="none" aria-hidden="true"><path/></svg></div>
+    <p id="t-over">&nbsp;</p></div>
+</dl>
 
 <section class="tools" aria-label="Grid controls">
   <div class="bar">
@@ -115,33 +177,35 @@ body.embed header { display: none; }
     <button id="expand" disabled>Open all</button>
     <button id="collapse" disabled>Close all</button>
     <span class="sep"></span>
-    <button id="stream" aria-pressed="false">Stream prices</button>
-    <label>marks per frame <input type="range" id="rate" min="0" max="3.5" step="0.01" value="2"> <output id="rate-out">100</output></label>
-    <span class="sep"></span>
-    <label title="A named value used by the net column. Changing it recalculates net in every row.">fee_bps <input type="number" id="fee" value="2" min="0" max="100" step="0.5"></label>
-    <span class="sep"></span>
     <label>Rows <select id="size">
       <option value="10000">10,000</option>
       <option value="50000" selected>50,000</option>
       <option value="100000">100,000</option>
       <option value="scroll">load as you scroll</option>
     </select></label>
+    <span class="grow"></span>
+    <button id="delete">Delete selected</button>
+    <button id="csv">Export CSV</button>
+    <button id="check" title="Recalculates every node from scratch and compares with the incremental values.">Check against full recalculation</button>
   </div>
   <div class="bar">
+    <button id="stream" aria-pressed="false">Stream prices</button>
+    <label title="How many trades' marks move each second. Slow enough to follow by default; drag right for thousands.">price changes a second <input type="range" id="rate" min="0" max="5.3" step="0.01" value="1.3"> <output id="rate-out">20</output></label>
+    <span class="sep"></span>
+    <label title="A named value used by the net column. Changing it recalculates net in every row.">fee_bps <input type="number" id="fee" value="2" min="0" max="100" step="0.5"></label>
+    <span class="grow"></span>
+    <label title="Drag back to see the grid as it was after an earlier update: values, totals, order and filters.">Time
+      <input type="range" id="time" min="0" max="0" value="0" step="1"> <output id="time-out">now</output></label>
+    <button id="now" disabled>Back to now</button>
+  </div>
+  <div class="bar formula">
+    <span class="fx" aria-hidden="true">ƒ</span>
     <label>New column <input type="text" class="code" id="formula-name" placeholder="name" spellcheck="false" aria-label="New column name"></label>
     <label>= <input type="text" class="code" id="formula" placeholder="pnl / notional * 10000" spellcheck="false" aria-label="New column formula"></label>
     <label>total <select id="formula-agg" aria-label="New column total">
       <option value="sum">sum</option><option value="avg">avg</option><option value="min">min</option><option value="max">max</option><option value="count">count</option><option value="none">none</option>
     </select></label>
     <button id="add" class="primary">Add column</button>
-    <span class="sep"></span>
-    <button id="delete">Delete selected</button>
-    <button id="csv">Export CSV</button>
-    <button id="check" title="Recalculates every node from scratch and compares with the incremental values.">Check against full recalculation</button>
-    <span class="sep"></span>
-    <label title="Drag back to see the grid as it was after an earlier update: values, totals, order and filters.">Time
-      <input type="range" id="time" min="0" max="0" value="0" step="1"> <output id="time-out">now</output></label>
-    <button id="now" disabled>Back to now</button>
     <span class="note" id="note" role="status"></span>
   </div>
   <div id="progress"></div>
@@ -150,16 +214,6 @@ body.embed header { display: none; }
 <main>
   <div id="grid"></div>
   <aside>
-    <div class="card">
-      <h2>Last update</h2>
-      <dl class="figures">
-        <div><dt>Inputs changed</dt><dd id="s-inputs">–</dd></div>
-        <div><dt>Nodes recalculated</dt><dd id="s-recalc">–</dd></div>
-        <div><dt>Of nodes in the graph</dt><dd id="s-nodes">–</dd></div>
-        <div><dt>Update and redraw</dt><dd id="s-ms">–</dd></div>
-      </dl>
-      <p class="hint" id="s-view">&nbsp;</p>
-    </div>
     <div class="card chart">
       <div class="card-head">
         <h2>Totals by group</h2>
@@ -179,8 +233,16 @@ body.embed header { display: none; }
   <span><b id="f-shown">0</b> shown</span>
   <span id="f-groups-wrap" hidden><b id="f-groups">0</b> groups</span>
   <span><b id="f-selected">0</b> selected</span>
+  <span id="f-range" hidden></span>
   <span id="f-more-wrap" hidden><span id="f-more"></span> <button id="more">Load more</button></span>
-  <span class="hint">Click a header to sort (<kbd>Shift</kbd> adds), drag it to move, <kbd>⋮</kbd> to pin, hide or group. Filters: <kbd>&gt;100</kbd> <kbd>5..10</kbd> <kbd>=Rates</kbd>. <kbd>Enter</kbd> edits.</span>
+  <ul class="keys" title="Click a header to sort (Shift adds a sort); drag it to move. Drag over cells, or Shift+arrows, for a block: copy, paste, ⌘Enter fills. Click a trade to select its row.">
+    <li><kbd>Click</kbd> a header sorts, <kbd>Shift</kbd> adds</li>
+    <li><kbd>⋮</kbd> pin, hide, group</li>
+    <li><kbd>&gt;100</kbd> <kbd>5..10</kbd> <kbd>=Rates</kbd> filter</li>
+    <li><kbd>Shift</kbd>+arrows pick a block</li>
+    <li><kbd>⌘Enter</kbd> fills</li>
+    <li><kbd>⌘Z</kbd> undoes</li>
+  </ul>
 </footer>
 
 <script>
@@ -194,14 +256,17 @@ import { GroupChart } from "./chart.js";
 const $ = (id) => document.getElementById(id);
 const whole = new Intl.NumberFormat("en-US");
 const formats = {
-  qty: { decimals: 0, width: 116 },
-  price: { width: 96 },
-  mark: { width: 150, trend: true },
-  notional: { width: 164 },
-  pnl: { signed: true, width: 136 },
-  net: { signed: true, width: 136 },
-  side: { width: 86 },
-  symbol: { width: 96 },
+  // As narrow as each column's total allows, so more of them show at once.
+  qty: { decimals: 0, width: 108 },
+  price: { width: 76 },
+  mark: { width: 124, trend: true },
+  notional: { width: 154 },
+  pnl: { signed: true, width: 124 },
+  net: { signed: true, width: 130 },
+  side: { width: 60 },
+  symbol: { width: 76 },
+  desk: { width: 100 },
+  trader: { width: 108 },
 };
 
 const WHY_HINT = $("why").textContent;
@@ -209,6 +274,12 @@ let grid = null;
 let view = null;
 let layout = null; // how the columns were arranged, kept when the rows are rebuilt
 let columns = [];
+// In the playground's tab the grid is live from the start: prices stream
+// without being asked, unless the person has asked for less motion. A frame
+// that is not showing gets no animation frames, so it rests while the
+// playground's own tab is open.
+const LIVE =
+  new URLSearchParams(location.search).has("embed") && !matchMedia("(prefers-reduced-motion: reduce)").matches;
 let lookingBack = false;
 let streaming = false;
 const chart = new GroupChart($("chart"), { onPick: (key) => view.revealGroup(key) });
@@ -229,18 +300,62 @@ function drawChart() {
   const decimals = info.agg === "count" ? 0 : (formats[info.name]?.decimals ?? 2);
   const number = new Intl.NumberFormat("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
   const by = columns[Number($("group").value)]?.name;
+  const total = JSON.parse(grid.totals())[col];
+  const trend = JSON.parse(grid.total_trend(col, 120));
+  drawTotal(`${info.agg} of ${info.name}`, total, trend, (v) => number.format(v));
   chart.update({
     title: `${info.agg} of ${info.name}${by ? ` by ${by}` : ""}`,
     groups: JSON.parse(grid.groups()).map((g) => ({ key: g.g, rows: g.n, value: g.c[col] })),
-    total: JSON.parse(grid.totals())[col],
-    trend: JSON.parse(grid.total_trend(col, 120)),
+    total,
+    trend,
     format: (v) => number.format(v),
     hint: "Group the rows (the toolbar, or a column's ⋮ menu) to see each group's total as a bar.",
   });
 }
 
+/** The charted column's grand total, and how it moved, among the figures at the top. */
+function drawTotal(title, total, trend, format) {
+  $("t-title").textContent = title;
+  $("t-total").textContent = total === null || total === undefined ? "–" : format(total);
+  $("t-total").classList.toggle("neg", total < 0);
+  const drawn = trend && trend.length > 1;
+  $("t-line").style.visibility = drawn ? "visible" : "hidden";
+  if (!drawn) return;
+  const [low, high] = [Math.min(...trend), Math.max(...trend)];
+  const step = 96 / (trend.length - 1);
+  const y = (v) => (high === low ? 13 : 25 - ((v - low) / (high - low)) * 24).toFixed(1);
+  $("t-line").firstElementChild.setAttribute("d", trend.map((v, k) => `${k ? "L" : "M"}${(k * step).toFixed(1)} ${y(v)}`).join(""));
+}
+
+/** A share of the graph, with enough places to show a small one. */
+function share(part, all) {
+  if (!all) return "";
+  const percent = (100 * part) / all;
+  return `${percent === 0 ? "0" : percent < 0.01 ? percent.toFixed(4) : percent < 1 ? percent.toFixed(2) : percent.toFixed(0)}% of `;
+}
+
+function pill() {
+  $("pill-state").textContent = streaming ? `Streaming · ${whole.format(rate())}/s` : lookingBack ? "Looking back" : "Paused";
+  $("pill-act").textContent = streaming ? "Pause" : "Stream";
+  $("pill").classList.toggle("on", streaming);
+  $("pill").setAttribute("aria-pressed", String(streaming));
+}
+
 function status(s) {
   if (s.selected !== undefined) $("f-selected").textContent = whole.format(s.selected);
+  if (s.range !== undefined) {
+    // What the block of cells picked out comes to.
+    const r = s.range;
+    $("f-range").hidden = !r;
+    if (r) {
+      const two = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+      $("f-range").replaceChildren(
+        ...[["cells", whole.format(r.cells)], ...(r.numbers ? [["sum", two.format(r.sum)], ["avg", two.format(r.avg)], ["min", two.format(r.min)], ["max", two.format(r.max)]] : [])].flatMap(
+          ([name, value]) => [Object.assign(document.createElement("b"), { textContent: value }), ` ${name}  `],
+        ),
+      );
+    }
+  }
   if (s.loading !== undefined) {
     $("f-more").textContent = s.loading ? "Loading more rows…" : s.done ? "Every row is loaded." : "More rows load as you scroll.";
     $("more").hidden = s.loading || s.done;
@@ -254,6 +369,7 @@ function status(s) {
     $("time").max = $("time").value = latest;
   }
   $("f-rows").textContent = whole.format(s.rows);
+  $("t-over").textContent = `across ${whole.format(s.filtered)} ${s.filtered === s.rows ? "" : "shown "}rows`;
   $("f-shown").textContent = whole.format(s.filtered);
   $("f-groups-wrap").hidden = s.groups === 0;
   $("f-groups").textContent = whole.format(s.groups);
@@ -262,11 +378,13 @@ function status(s) {
   const ms = streaming ? recent.reduce((a, b) => a + b, 0) / recent.length : s.ms;
   $("s-inputs").textContent = whole.format(s.inputsChanged);
   $("s-recalc").textContent = whole.format(s.recalculated);
-  $("s-nodes").textContent = whole.format(s.nodes);
+  $("s-nodes").textContent = `${share(s.recalculated, s.nodes)}${whole.format(s.nodes)} nodes in the graph`;
   $("s-ms").innerHTML = `${ms < 10 ? ms.toFixed(2) : ms.toFixed(1)} <small>ms</small>`;
   $("s-view").textContent = s.rebuilt
     ? "The view was filtered and sorted again."
-    : "The view stood: only cells and totals changed.";
+    : s.patched
+      ? "Only the rows that changed were moved in the view."
+      : "The view stood: only cells and totals changed.";
 }
 
 function showWhy() {
@@ -295,13 +413,23 @@ async function build(size) {
   const mine = (grid = Grid.demo());
   grid.set_value("fee_bps", Number($("fee").value) || 0);
   const lazy = size === "scroll";
+  // Rows will keep arriving, so the graph is not asked to keep a total for
+  // every group: that costs a node per row per column, for good.
+  if (lazy) grid.set_group_budget(0);
   let loaded = 0;
   view = new WatershedGrid($("grid"), grid, {
     keyTitle: "trade",
+    keyWidth: 164,
+    label: "Trades",
     formats,
     onStatus: status,
     onFocus: showWhy,
     onError: (message) => note(message, "bad"),
+    onNote: (message) => note(message, "good"),
+    onColumns: () => {
+      columns = JSON.parse(grid.columns());
+      listChartColumns();
+    },
     onGroup: (col) => {
       $("group").value = String(col);
       $("expand").disabled = $("collapse").disabled = col < 0;
@@ -345,6 +473,7 @@ async function build(size) {
     note("");
   }
   building = false;
+  if (LIVE) setStreaming(true);
 }
 
 /** Fills the chart's column list with the columns that have totals, keeping the choice if it can. */
@@ -366,27 +495,56 @@ function lookBack(epoch) {
   $("now").disabled = !back;
   $("time-out").textContent = back ? `update ${whole.format(epoch)}` : "now";
   note(back ? "Showing the grid as it was. Go back to now to edit or stream." : "");
+  pill();
 }
 
 function setStreaming(on) {
   if (on && lookingBack) lookBack(null);
   streaming = on;
   $("stream").setAttribute("aria-pressed", String(on));
-  $("stream").textContent = on ? "Stop prices" : "Stream prices";
+  $("stream").textContent = on ? "Pause prices" : "Stream prices";
+  lastTick = 0;
+  pill();
   if (on) requestAnimationFrame(tick);
 }
 
 const rate = () => Math.round(10 ** Number($("rate").value));
 
-function tick() {
+/** Whether the frame this page is in (if it is in one) is on screen. */
+function showing() {
+  try {
+    return !frameElement || frameElement.getClientRects().length > 0;
+  } catch {
+    return true; // a frame on another site: no way to tell
+  }
+}
+
+let lastTick = 0; // when the last frame was, while streaming
+let due = 0; // changes owed, as a fraction builds up between frames
+
+function tick(now) {
   if (!streaming || building) return;
-  grid.demo_tick(rate());
-  view.refresh();
+  // Not showing (its tab is not the one open): rest, and look again shortly.
+  if (!showing()) return void setTimeout(() => requestAnimationFrame(tick), 400);
+  // Changes come due at the chosen rate; a slow rate skips frames, so each
+  // change can be seen, and a fast one sends many at once.
+  const elapsed = lastTick ? Math.min(now - lastTick, 250) : 16;
+  lastTick = now;
+  due += (rate() * elapsed) / 1000;
+  const changes = Math.floor(due);
+  if (changes > 0) {
+    due -= changes;
+    grid.demo_tick(changes);
+    view.refresh();
+  }
   requestAnimationFrame(tick);
 }
 
-$("stream").addEventListener("click", () => setStreaming(!streaming));
-$("rate").addEventListener("input", () => ($("rate-out").textContent = whole.format(rate())));
+for (const id of ["stream", "pill"]) $(id).addEventListener("click", () => setStreaming(!streaming));
+$("rate").addEventListener("input", () => {
+  $("rate-out").textContent = whole.format(rate());
+  pill();
+});
 $("size").addEventListener("change", () => build($("size").value));
 $("more").addEventListener("click", () => view.fetchMore());
 $("time").addEventListener("input", () => {
@@ -442,7 +600,7 @@ for (const id of ["formula", "formula-name"]) {
 
 $("delete").addEventListener("click", () => {
   const count = view.selectedKeys().length;
-  if (!count) return note("Click a row to select it first. Shift-click selects a range.", "bad");
+  if (!count) return note("Click a trade in the first column to select its row first. Shift-click selects a run of rows.", "bad");
   view.removeSelected();
   note(`Deleted ${whole.format(count)} row${count === 1 ? "" : "s"}.`, "good");
 });

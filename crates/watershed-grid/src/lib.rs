@@ -19,6 +19,10 @@ pub mod table;
 
 pub use table::{Agg, Kind, Table, Update};
 
+fn positions(cols: Vec<u32>) -> Vec<usize> {
+    cols.into_iter().map(|col| col as usize).collect()
+}
+
 fn js_error(message: String) -> JsError {
     JsError::new(&message)
 }
@@ -105,6 +109,63 @@ impl Grid {
             .map_err(js_error)
     }
 
+    /// From here to `end_edits`, every cell set is one step to undo.
+    pub fn begin_edits(&mut self) {
+        self.table.begin_edits();
+    }
+
+    pub fn end_edits(&mut self) {
+        self.table.end_edits();
+    }
+
+    /// Puts back what the last `set_cell` (or step of several) changed.
+    /// Returns what was put back, in words, if anything was.
+    pub fn undo(&mut self) -> Result<Option<String>, JsError> {
+        self.table.undo().map_err(js_error)
+    }
+
+    /// Does again what the last `undo` put back.
+    pub fn redo(&mut self) -> Result<Option<String>, JsError> {
+        self.table.redo().map_err(js_error)
+    }
+
+    /// Changes a column's total: "sum", "avg", "min", "max", "count" or "none".
+    pub fn set_agg(&mut self, col: u32, agg: &str) -> Result<(), JsError> {
+        let agg = Agg::parse(agg).map_err(js_error)?;
+        self.table.set_agg(col as usize, agg).map_err(js_error)
+    }
+
+    /// The rows with these keys, in the view's order, as tab-separated text:
+    /// the key, then each of the columns at `cols`.
+    pub fn tsv(&self, keys: Vec<String>, cols: Vec<u32>) -> String {
+        let keys = keys.iter().map(String::as_str).collect();
+        let cols: Vec<usize> = cols.into_iter().map(|col| col as usize).collect();
+        self.table.tsv(&keys, &cols)
+    }
+
+    /// A block of cells as tab-separated text: the columns at `cols`, over
+    /// `count` lines of the view from line `start`.
+    pub fn range_tsv(&self, start: u32, count: u32, cols: Vec<u32>) -> String {
+        self.table
+            .range_tsv(start as usize, count as usize, &positions(cols))
+    }
+
+    /// What a block of cells comes to, as JSON:
+    /// `{cells, numbers, sum, avg, min, max}`.
+    pub fn range_stats(&self, start: u32, count: u32, cols: Vec<u32>) -> String {
+        self.table
+            .range_stats_json(start as usize, count as usize, &positions(cols))
+    }
+
+    /// Sets every cell of a block to one text, as one step to undo. Returns
+    /// `{set, skipped}` as JSON.
+    pub fn fill(&mut self, start: u32, count: u32, cols: Vec<u32>, text: &str) -> String {
+        let (set, skipped) =
+            self.table
+                .fill(start as usize, count as usize, &positions(cols), text);
+        format!(r#"{{"set":{set},"skipped":{skipped}}}"#)
+    }
+
     /// Removes a row. Returns whether there was one.
     pub fn remove(&mut self, key: &str) -> Result<bool, JsError> {
         self.table.remove(key).map_err(js_error)
@@ -140,6 +201,14 @@ impl Grid {
             .map_err(js_error)
     }
 
+    /// Sets how many row-and-column pairs the graph may be asked to keep
+    /// group totals for; past it the grid adds group totals up itself. The
+    /// graph's cost a node per row per totalled column and are never given
+    /// back, so a grid that will grow much should set this to 0 first.
+    pub fn set_group_budget(&mut self, pairs: u32) {
+        self.table.set_group_budget(pairs as usize);
+    }
+
     pub fn toggle_group(&mut self, key: &str) {
         self.table.toggle_group(key);
     }
@@ -149,11 +218,15 @@ impl Grid {
     }
 
     /// Applies every change since the last update. Returns
-    /// `{epoch, inputsChanged, recalculated, changed, nodes, rebuilt}`.
+    /// `{epoch, inputsChanged, recalculated, changed, nodes, rebuilt, patched}`.
     pub fn update(&mut self) -> String {
-        let Update { report, rebuilt } = self.table.update();
+        let Update {
+            report,
+            rebuilt,
+            patched,
+        } = self.table.update();
         format!(
-            r#"{{"epoch":{},"inputsChanged":{},"recalculated":{},"changed":{},"nodes":{},"rebuilt":{rebuilt}}}"#,
+            r#"{{"epoch":{},"inputsChanged":{},"recalculated":{},"changed":{},"nodes":{},"rebuilt":{rebuilt},"patched":{patched}}}"#,
             report.epoch,
             report.inputs_changed,
             report.recalculated,

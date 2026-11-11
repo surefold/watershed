@@ -121,7 +121,9 @@ fn a_sorted_view_follows_an_edit_to_the_sorted_column() {
     t.set_sort(&[(LINE, true)]).unwrap();
     t.update();
     t.set_cell("o-2", PRICE, "100").unwrap();
-    assert!(t.update().rebuilt);
+    // One row was set, so only that row is moved.
+    let update = t.update();
+    assert!(update.patched && !update.rebuilt);
     assert_eq!(t.view_keys()[0], "o-2");
     // An edit to a column the sort does not read leaves the view alone.
     t.set_sort(&[(QTY, false)]).unwrap();
@@ -646,4 +648,305 @@ fn looking_back_needs_history() {
         t.set_as_of(Some(1)).unwrap_err(),
         "the grid is not keeping earlier values"
     );
+}
+
+/// Everything the view shows, as one text to compare.
+fn shown(t: &Table) -> String {
+    format!(
+        "{:?}\n{}\n{}\n{}",
+        t.view_keys(),
+        t.rows_json(0, 10_000),
+        t.groups_json(),
+        t.totals_json()
+    )
+}
+
+#[test]
+fn a_view_kept_up_to_date_row_by_row_is_the_one_a_fresh_start_gives() {
+    let regions = ["EU", "US", "APAC", "LATAM"];
+    let sides = ["Buy", "Sell"];
+    let mut seed = 0x1234_5678_9ABC_DEF1_u64;
+    let mut pick = |n: u64| (next(&mut seed) % n) as usize;
+    let (mut patched, mut rebuilt) = (0, 0);
+    // Every mix of grouping, sorting and filtering, each through its own edits.
+    for mix in 0..48 {
+        let mut t = Table::new();
+        t.add_field("region", Kind::Text, Agg::Count).unwrap();
+        t.add_field("side", Kind::Text, Agg::None).unwrap();
+        t.add_field("qty", Kind::Number, Agg::Sum).unwrap();
+        t.add_field("price", Kind::Number, Agg::Avg).unwrap();
+        t.add_formula("line", "qty * price", Agg::Sum).unwrap();
+        t.add_formula("signed", "if(side == \"Buy\", 1, -1) * line", Agg::Max)
+            .unwrap();
+        let rows = 600;
+        for r in 0..rows {
+            t.upsert(
+                &format!("k{r:03}"),
+                vec![
+                    text(regions[pick(4)]),
+                    text(sides[pick(2)]),
+                    // Few distinct values, so many rows tie.
+                    Value::F64(pick(6) as f64),
+                    Value::F64(pick(40) as f64),
+                ],
+            )
+            .unwrap();
+        }
+        t.set_group([None, Some(0), Some(1)][mix % 3]).unwrap();
+        let sorts: [&[(usize, bool)]; 4] = [
+            &[],
+            &[(4, true)],
+            &[(2, false), (5, true)],
+            &[(0, true), (3, false)],
+        ];
+        t.set_sort(sorts[(mix / 3) % 4]).unwrap();
+        let filters = [(2, ""), (2, ">=2"), (5, "<0"), (1, "=buy")];
+        let (col, filter) = filters[(mix / 12) % 4];
+        t.set_filter(col, filter).unwrap();
+        t.expand_all(true);
+        t.update();
+        t.expand_all(true);
+
+        for step in 0..40 {
+            // A few rows change at once: numbers, and now and then text.
+            for _ in 0..1 + pick(5) {
+                let key = format!("k{:03}", pick(rows));
+                match pick(10) {
+                    0 => t.set_cell(&key, 0, regions[pick(4)]).unwrap(),
+                    1 => t.set_cell(&key, 1, sides[pick(2)]).unwrap(),
+                    2..=5 => t.set_cell(&key, 2, &pick(6).to_string()).unwrap(),
+                    _ => t.set_cell(&key, 3, &pick(40).to_string()).unwrap(),
+                }
+            }
+            let update = t.update();
+            patched += usize::from(update.patched);
+            rebuilt += usize::from(update.rebuilt);
+            let kept = shown(&t);
+            t.rebuild_view();
+            assert_eq!(kept, shown(&t), "mix {mix}, step {step}");
+        }
+        assert_eq!(t.check(), Ok(()));
+    }
+    // Both ways of keeping the view were exercised.
+    assert!(patched > 500, "only {patched} updates moved rows");
+    assert!(rebuilt > 20, "only {rebuilt} updates started again");
+}
+
+#[test]
+fn when_many_rows_change_at_once_the_view_is_worked_out_from_scratch() {
+    let mut t = Table::new();
+    t.add_field("n", Kind::Number, Agg::Sum).unwrap();
+    for r in 0..1000 {
+        t.upsert(&format!("k{r}"), vec![Value::F64(r as f64)])
+            .unwrap();
+    }
+    t.set_sort(&[(0, true)]).unwrap();
+    t.update();
+    for r in 0..500 {
+        t.set_cell(&format!("k{r}"), 0, &(5000 - r).to_string())
+            .unwrap();
+    }
+    let update = t.update();
+    assert!(update.rebuilt && !update.patched);
+    assert_eq!(t.view_keys()[0], "k0");
+    // A named value reaches every row, so that starts again too.
+    let mut t = orders();
+    t.set_sort(&[(LINE, true)]).unwrap();
+    t.update();
+    t.set_value("tax", 1.0).unwrap();
+    assert!(t.update().rebuilt);
+}
+
+#[test]
+fn a_columns_total_can_be_changed() {
+    let mut t = orders();
+    t.set_group(Some(REGION)).unwrap();
+    t.update();
+    assert_eq!(t.totals_json(), "[null,16,10,62]");
+    t.set_agg(QTY, Agg::Avg).unwrap();
+    t.set_agg(PRICE, Agg::Min).unwrap();
+    t.set_agg(LINE, Agg::None).unwrap();
+    t.set_agg(REGION, Agg::Count).unwrap();
+    t.update();
+    assert_eq!(t.totals_json(), "[5,3.2,1,null]");
+    assert_eq!(
+        t.groups_json(),
+        concat!(
+            r#"[{"g":"APAC","n":1,"c":[1,3,7,null]},"#,
+            r#"{"g":"EU","n":2,"c":[2,3,2.5,null]},"#,
+            r#"{"g":"US","n":2,"c":[2,3.5,1,null]}]"#
+        )
+    );
+    // And back: the sum is still kept, and still right after an edit.
+    t.set_agg(LINE, Agg::Sum).unwrap();
+    t.set_cell("o-1", QTY, "3").unwrap();
+    t.update();
+    assert_eq!(t.totals_json(), "[5,3.4,1,72]");
+    assert_eq!(
+        t.set_agg(REGION, Agg::Sum).unwrap_err(),
+        "region: only number columns have totals (any column can have a count)"
+    );
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn an_edit_can_be_undone_and_done_again() {
+    let mut t = orders();
+    assert_eq!(t.undo(), Ok(None));
+    t.set_cell("o-1", QTY, "9").unwrap();
+    t.update();
+    t.set_cell("o-2", REGION, "EU").unwrap();
+    t.update();
+    assert_eq!(t.undo(), Ok(Some("region of o-2".into())));
+    t.update();
+    assert_eq!(t.value("o-2", REGION).unwrap().to_string(), "\"US\"");
+    assert_eq!(t.undo(), Ok(Some("qty of o-1".into())));
+    t.update();
+    assert_eq!(t.totals_json(), "[null,16,10,62]");
+    assert_eq!(t.redo(), Ok(Some("qty of o-1".into())));
+    t.update();
+    assert_eq!(t.value("o-1", QTY).unwrap().to_string(), "9");
+    // A new edit means there is nothing to do again.
+    t.set_cell("o-3", QTY, "1").unwrap();
+    assert_eq!(t.redo(), Ok(None));
+    // Setting a cell to what it already holds is not a step.
+    t.update();
+    t.set_cell("o-3", QTY, "1").unwrap();
+    assert_eq!(t.undo(), Ok(Some("qty of o-3".into())));
+    assert_eq!(t.undo(), Ok(Some("qty of o-1".into())));
+    assert_eq!(t.undo(), Ok(None));
+}
+
+#[test]
+fn several_cells_set_together_undo_together_and_removed_rows_are_left_out() {
+    let mut t = orders();
+    t.begin_edits();
+    t.set_cell("o-1", QTY, "100").unwrap();
+    t.set_cell("o-2", QTY, "200").unwrap();
+    t.set_cell("o-3", PRICE, "300").unwrap();
+    t.end_edits();
+    t.update();
+    t.remove("o-2").unwrap();
+    t.update();
+    assert_eq!(t.undo(), Ok(Some("2 of 3 cells".into())));
+    t.update();
+    assert_eq!(t.value("o-1", QTY).unwrap().to_string(), "2");
+    assert_eq!(t.value("o-3", PRICE).unwrap().to_string(), "2.5");
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn rows_copy_as_tab_separated_text_in_the_views_order() {
+    let mut t = orders();
+    t.set_sort(&[(QTY, true)]).unwrap();
+    t.update();
+    let keys = ["o-2", "o-5", "nobody"].into_iter().collect();
+    assert_eq!(t.tsv(&keys, &[REGION, LINE]), "o-5\tUS\t6\no-2\tUS\t5\n");
+}
+
+#[test]
+fn a_big_tables_group_totals_are_added_up_by_the_grid_and_cost_the_graph_nothing() {
+    let regions = ["EU", "US", "APAC"];
+    let mut seed = 0x0BAD_5EED_1234_5678_u64;
+    let mut pick = |n: u64| (next(&mut seed) % n) as usize;
+    // Two tables with the same rows and edits; in one the graph may not keep group totals.
+    let mut tables = [Table::new(), Table::new()];
+    tables[1].set_group_budget(0);
+    for t in &mut tables {
+        t.add_field("region", Kind::Text, Agg::Count).unwrap();
+        t.add_field("qty", Kind::Number, Agg::Sum).unwrap();
+        t.add_field("price", Kind::Number, Agg::Avg).unwrap();
+        t.add_formula("line", "qty * price", Agg::Max).unwrap();
+    }
+    for r in 0..300 {
+        let row = vec![
+            text(regions[pick(3)]),
+            Value::F64(pick(9) as f64),
+            Value::F64(pick(30) as f64),
+        ];
+        for t in &mut tables {
+            t.upsert(&format!("k{r:03}"), row.clone()).unwrap();
+        }
+    }
+    let mut nodes = [0, 0];
+    for (t, nodes) in tables.iter_mut().zip(&mut nodes) {
+        t.update();
+        *nodes = t.nodes();
+        t.set_group(Some(0)).unwrap();
+        t.set_sort(&[(3, true)]).unwrap();
+        t.update();
+    }
+    assert!(
+        tables[0].nodes() > nodes[0] + 300,
+        "the graph keeps group totals"
+    );
+    assert_eq!(
+        tables[1].nodes(),
+        nodes[1],
+        "grouping added nothing to the graph"
+    );
+
+    for step in 0..120 {
+        let key = format!("k{:03}", pick(300));
+        let (col, value) = match pick(8) {
+            0 => (0, regions[pick(3)].to_string()),
+            1..=4 => (1, pick(9).to_string()),
+            _ => (2, pick(30).to_string()),
+        };
+        for t in &mut tables {
+            t.set_cell(&key, col, &value).unwrap();
+            t.update();
+        }
+        assert_eq!(
+            tables[0].groups_json(),
+            tables[1].groups_json(),
+            "step {step}"
+        );
+        assert_eq!(
+            tables[0].totals_json(),
+            tables[1].totals_json(),
+            "step {step}"
+        );
+        assert_eq!(tables[0].view_keys(), tables[1].view_keys(), "step {step}");
+    }
+    assert_eq!(tables[1].nodes(), nodes[1]);
+    assert!(
+        tables[1]
+            .explain_group("EU", 1)
+            .unwrap()
+            .contains("added up by the grid")
+    );
+    // No history of a total the graph does not keep.
+    assert!(tables[1].trends_json(0, 1, 1, 8).starts_with("[null"));
+}
+
+#[test]
+fn a_block_of_cells_can_be_copied_added_up_and_filled() {
+    let mut t = orders();
+    t.set_sort(&[(QTY, false)]).unwrap();
+    t.update();
+    // By qty: o-2 (1), o-1 (2), o-4 (3), o-3 (4), o-5 (6). Lines 1 to 3, qty and price.
+    assert_eq!(t.range_tsv(1, 3, &[QTY, PRICE]), "2\t10\n3\t7\n4\t2.5\n");
+    assert_eq!(
+        t.range_stats_json(1, 3, &[QTY, PRICE]),
+        r#"{"cells":6,"numbers":6,"sum":28.5,"avg":4.75,"min":2,"max":10}"#
+    );
+    assert_eq!(
+        t.range_stats_json(0, 2, &[REGION]),
+        r#"{"cells":2,"numbers":0,"sum":null,"avg":null,"min":null,"max":null}"#
+    );
+    // Filling passes over the calculated column, and is one step to undo.
+    assert_eq!(t.fill(1, 2, &[PRICE, LINE], "1"), (2, 2));
+    t.update();
+    assert_eq!(t.value("o-1", PRICE).unwrap().to_string(), "1");
+    assert_eq!(t.value("o-4", PRICE).unwrap().to_string(), "1");
+    assert_eq!(t.undo(), Ok(Some("2 of 2 cells".into())));
+    t.update();
+    assert_eq!(t.totals_json(), "[null,16,10,62]");
+    // Group lines are passed over.
+    t.set_group(Some(REGION)).unwrap();
+    t.update();
+    t.expand_all(true);
+    // Lines: APAC, o-4, EU, o-1, o-3, ...
+    assert_eq!(t.range_tsv(0, 4, &[QTY]), "3\n2\n");
 }
