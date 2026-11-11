@@ -80,6 +80,8 @@ class Graph:
     def define(self, name: str, expr: ExprLike) -> Expr: ...
     def formula(self, source: str) -> Expr:
         """A formula written as text, such as "qty * price", as an expression."""
+    def remove(self, node: Expr) -> None:
+        """Removes a node that nothing uses; its name is then free."""
     def set(self, node: Expr, value: Scalar) -> None:
         """Records a new value for an input; it takes effect at the next stabilize()."""
     def stabilize(self) -> Report:

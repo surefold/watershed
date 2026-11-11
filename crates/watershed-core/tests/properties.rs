@@ -801,6 +801,162 @@ proptest! {
     }
 }
 
+/// A random graph whose nodes are removed at random between updates (when
+/// nothing uses them), alongside new nodes, new members and redefinitions.
+/// After every update the graph must match a full recalculation, its links
+/// must agree both ways, and nothing may touch a removed node.
+fn run_removals(seed: u64, updates: usize, parallel: bool) -> Result<(), String> {
+    let mut rng = Rng(seed);
+    let mut g = Graph::new();
+    if parallel {
+        g.set_parallel_threshold(1);
+    }
+    for i in 0..2 + rng.below(6) {
+        let ty = rng.pick(&TYPES);
+        g.input_value(&format!("in{i}"), random_value(&mut rng, ty))
+            .unwrap();
+    }
+    let mut n = 0;
+    for _ in 0..rng.below(40) {
+        add_random_node(&mut rng, &mut g, n, false);
+        n += 1;
+    }
+    let mut aggregates: Vec<(NodeId, AggregateOp, Type)> = (0..rng.below(4))
+        .map(|k| add_random_aggregate(&mut rng, &mut g, k))
+        .collect();
+    let mut removed: Vec<NodeId> = Vec::new();
+
+    for step in 0..updates {
+        let live: Vec<NodeId> = g.node_ids().collect();
+        for _ in 0..rng.below(4) {
+            if live.is_empty() {
+                break;
+            }
+            let id = rng.pick(&live);
+            let used_by: Vec<NodeId> = g
+                .node_ids()
+                .filter(|&user| g.dependencies(user).contains(&id))
+                .collect();
+            match g.remove_node(id) {
+                Ok(()) => {
+                    if !used_by.is_empty() {
+                        return Err(format!(
+                            "step {step}: {} was removed while {} used it",
+                            g.name(id),
+                            g.name(used_by[0])
+                        ));
+                    }
+                    removed.push(id);
+                    aggregates.retain(|a| a.0 != id);
+                }
+                Err(_) if used_by.is_empty() && !removed.contains(&id) => {
+                    // Only a member waiting to join a total can hold it.
+                    let waiting = aggregates.iter().any(|a| {
+                        g.aggregate_members(a.0)
+                            .is_some_and(|(_, m)| m.iter().any(|&(v, p)| v == id || p == id))
+                    });
+                    if !waiting {
+                        return Err(format!(
+                            "step {step}: {} is unused but could not be removed",
+                            g.name(id)
+                        ));
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let inputs: Vec<NodeId> = g.node_ids().filter(|&id| g.is_input(id)).collect();
+        for _ in 0..rng.below(4) {
+            if inputs.is_empty() {
+                break;
+            }
+            let id = rng.pick(&inputs);
+            g.set_value(id, random_value(&mut rng, g.node_type(id)))
+                .unwrap();
+        }
+        if rng.percent(40) {
+            add_random_node(&mut rng, &mut g, n, false);
+            n += 1;
+        }
+        if !aggregates.is_empty() && rng.percent(30) {
+            let (aggregate, op, value_type) = rng.pick(&aggregates);
+            if let Some((value, present)) = random_member(&mut rng, &g, op, value_type) {
+                let _ = g.extend_aggregate(aggregate, value, present);
+            }
+        }
+        if rng.percent(20) {
+            let calculated: Vec<NodeId> = g
+                .node_ids()
+                .filter(|&id| !g.is_input(id) && g.aggregate_members(id).is_none())
+                .collect();
+            if !calculated.is_empty() {
+                let id = rng.pick(&calculated);
+                let ir = random_expr(&mut rng, &g, g.node_type(id), 3);
+                let _ = g.redefine_ir(id, ir);
+            }
+        }
+
+        g.stabilize();
+        g.check_consistency()
+            .map_err(|e| format!("step {step}: {e}"))?;
+        for &gone in &removed {
+            if g.last_recalculated().contains(&gone) {
+                return Err(format!(
+                    "step {step}: removed {} was recalculated",
+                    g.name(gone)
+                ));
+            }
+            if g.set_value(gone, Value::Bool(true)).is_ok() || g.node_ids().any(|id| id == gone) {
+                return Err(format!(
+                    "step {step}: removed {} is still there",
+                    g.name(gone)
+                ));
+            }
+            if !g.dependents(gone).is_empty() || !g.dependencies(gone).is_empty() {
+                return Err(format!(
+                    "step {step}: removed {} still has links",
+                    g.name(gone)
+                ));
+            }
+        }
+        // The links agree in both directions, and none reaches a removed node.
+        for id in g.node_ids() {
+            for dep in g.dependencies(id) {
+                if removed.contains(&dep) || !g.dependents(dep).contains(&id) {
+                    return Err(format!(
+                        "step {step}: {} uses {}, which does not know it",
+                        g.name(id),
+                        g.name(dep)
+                    ));
+                }
+            }
+            for user in g.dependents(id) {
+                if removed.contains(&user) || !g.dependencies(user).contains(&id) {
+                    return Err(format!(
+                        "step {step}: {} lists {} as a user, which does not use it",
+                        g.name(id),
+                        g.name(user)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn nodes_removed_at_random_leave_a_graph_that_still_matches_a_full_recalculation(
+        seed in any::<u64>(),
+        updates in 1usize..25,
+        parallel in any::<bool>(),
+    ) {
+        run_removals(seed, updates, parallel).map_err(TestCaseError::fail)?;
+    }
+}
+
 /// Random inserts, updates and removals on a collection, checked after every
 /// update against a plain map added up from scratch.
 fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Result<(), String> {
