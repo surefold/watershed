@@ -266,7 +266,9 @@ function status(s) {
   $("s-ms").innerHTML = `${ms < 10 ? ms.toFixed(2) : ms.toFixed(1)} <small>ms</small>`;
   $("s-view").textContent = s.rebuilt
     ? "The view was filtered and sorted again."
-    : "The view stood: only cells and totals changed.";
+    : s.patched
+      ? "Only the rows that changed were moved in the view."
+      : "The view stood: only cells and totals changed.";
 }
 
 function showWhy() {

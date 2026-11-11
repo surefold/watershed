@@ -144,8 +144,11 @@ Editing a cell recalculates that row's formulas and the totals they feed: on
 sorting by several columns and grouping happen in Rust too; the page asks
 only for the lines in view and draws those, so 100,000 rows scroll like 50.
 A stream of 100 price changes per frame takes about 1 ms to apply and
-redraw, and the view is filtered and sorted again only when a change
-touches a column it reads.
+redraw. The view is left alone unless a change touches a column it reads,
+and then only the rows that were set are moved to where they now sort:
+sorted by a calculated column, the same stream takes about 2 ms. It is
+filtered and sorted from scratch only when that would be quicker (many rows
+set at once) or everything may have moved (a named value changed).
 
 ```js
 import init, { Grid } from "./pkg/watershed_grid.js";

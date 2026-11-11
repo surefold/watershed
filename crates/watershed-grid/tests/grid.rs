@@ -121,7 +121,9 @@ fn a_sorted_view_follows_an_edit_to_the_sorted_column() {
     t.set_sort(&[(LINE, true)]).unwrap();
     t.update();
     t.set_cell("o-2", PRICE, "100").unwrap();
-    assert!(t.update().rebuilt);
+    // One row was set, so only that row is moved.
+    let update = t.update();
+    assert!(update.patched && !update.rebuilt);
     assert_eq!(t.view_keys()[0], "o-2");
     // An edit to a column the sort does not read leaves the view alone.
     t.set_sort(&[(QTY, false)]).unwrap();
@@ -646,4 +648,111 @@ fn looking_back_needs_history() {
         t.set_as_of(Some(1)).unwrap_err(),
         "the grid is not keeping earlier values"
     );
+}
+
+/// Everything the view shows, as one text to compare.
+fn shown(t: &Table) -> String {
+    format!(
+        "{:?}\n{}\n{}\n{}",
+        t.view_keys(),
+        t.rows_json(0, 10_000),
+        t.groups_json(),
+        t.totals_json()
+    )
+}
+
+#[test]
+fn a_view_kept_up_to_date_row_by_row_is_the_one_a_fresh_start_gives() {
+    let regions = ["EU", "US", "APAC", "LATAM"];
+    let sides = ["Buy", "Sell"];
+    let mut seed = 0x1234_5678_9ABC_DEF1_u64;
+    let mut pick = |n: u64| (next(&mut seed) % n) as usize;
+    let (mut patched, mut rebuilt) = (0, 0);
+    // Every mix of grouping, sorting and filtering, each through its own edits.
+    for mix in 0..48 {
+        let mut t = Table::new();
+        t.add_field("region", Kind::Text, Agg::Count).unwrap();
+        t.add_field("side", Kind::Text, Agg::None).unwrap();
+        t.add_field("qty", Kind::Number, Agg::Sum).unwrap();
+        t.add_field("price", Kind::Number, Agg::Avg).unwrap();
+        t.add_formula("line", "qty * price", Agg::Sum).unwrap();
+        t.add_formula("signed", "if(side == \"Buy\", 1, -1) * line", Agg::Max)
+            .unwrap();
+        let rows = 600;
+        for r in 0..rows {
+            t.upsert(
+                &format!("k{r:03}"),
+                vec![
+                    text(regions[pick(4)]),
+                    text(sides[pick(2)]),
+                    // Few distinct values, so many rows tie.
+                    Value::F64(pick(6) as f64),
+                    Value::F64(pick(40) as f64),
+                ],
+            )
+            .unwrap();
+        }
+        t.set_group([None, Some(0), Some(1)][mix % 3]).unwrap();
+        let sorts: [&[(usize, bool)]; 4] = [
+            &[],
+            &[(4, true)],
+            &[(2, false), (5, true)],
+            &[(0, true), (3, false)],
+        ];
+        t.set_sort(sorts[(mix / 3) % 4]).unwrap();
+        let filters = [(2, ""), (2, ">=2"), (5, "<0"), (1, "=buy")];
+        let (col, filter) = filters[(mix / 12) % 4];
+        t.set_filter(col, filter).unwrap();
+        t.expand_all(true);
+        t.update();
+        t.expand_all(true);
+
+        for step in 0..40 {
+            // A few rows change at once: numbers, and now and then text.
+            for _ in 0..1 + pick(5) {
+                let key = format!("k{:03}", pick(rows));
+                match pick(10) {
+                    0 => t.set_cell(&key, 0, regions[pick(4)]).unwrap(),
+                    1 => t.set_cell(&key, 1, sides[pick(2)]).unwrap(),
+                    2..=5 => t.set_cell(&key, 2, &pick(6).to_string()).unwrap(),
+                    _ => t.set_cell(&key, 3, &pick(40).to_string()).unwrap(),
+                }
+            }
+            let update = t.update();
+            patched += usize::from(update.patched);
+            rebuilt += usize::from(update.rebuilt);
+            let kept = shown(&t);
+            t.rebuild_view();
+            assert_eq!(kept, shown(&t), "mix {mix}, step {step}");
+        }
+        assert_eq!(t.check(), Ok(()));
+    }
+    // Both ways of keeping the view were exercised.
+    assert!(patched > 500, "only {patched} updates moved rows");
+    assert!(rebuilt > 20, "only {rebuilt} updates started again");
+}
+
+#[test]
+fn when_many_rows_change_at_once_the_view_is_worked_out_from_scratch() {
+    let mut t = Table::new();
+    t.add_field("n", Kind::Number, Agg::Sum).unwrap();
+    for r in 0..1000 {
+        t.upsert(&format!("k{r}"), vec![Value::F64(r as f64)])
+            .unwrap();
+    }
+    t.set_sort(&[(0, true)]).unwrap();
+    t.update();
+    for r in 0..500 {
+        t.set_cell(&format!("k{r}"), 0, &(5000 - r).to_string())
+            .unwrap();
+    }
+    let update = t.update();
+    assert!(update.rebuilt && !update.patched);
+    assert_eq!(t.view_keys()[0], "k0");
+    // A named value reaches every row, so that starts again too.
+    let mut t = orders();
+    t.set_sort(&[(LINE, true)]).unwrap();
+    t.update();
+    t.set_value("tax", 1.0).unwrap();
+    assert!(t.update().rebuilt);
 }

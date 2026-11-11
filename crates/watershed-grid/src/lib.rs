@@ -149,11 +149,15 @@ impl Grid {
     }
 
     /// Applies every change since the last update. Returns
-    /// `{epoch, inputsChanged, recalculated, changed, nodes, rebuilt}`.
+    /// `{epoch, inputsChanged, recalculated, changed, nodes, rebuilt, patched}`.
     pub fn update(&mut self) -> String {
-        let Update { report, rebuilt } = self.table.update();
+        let Update {
+            report,
+            rebuilt,
+            patched,
+        } = self.table.update();
         format!(
-            r#"{{"epoch":{},"inputsChanged":{},"recalculated":{},"changed":{},"nodes":{},"rebuilt":{rebuilt}}}"#,
+            r#"{{"epoch":{},"inputsChanged":{},"recalculated":{},"changed":{},"nodes":{},"rebuilt":{rebuilt},"patched":{patched}}}"#,
             report.epoch,
             report.inputs_changed,
             report.recalculated,
