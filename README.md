@@ -106,32 +106,10 @@ and updating takes about 29 µs from Python.
 
 ## Build files
 
-`crates/watershed-build` is a typed build file language for JVM projects
-(Kotlin first), with `wsb`, a tool to check, show, explain and watch build
-files. Every value in the file is a node, so saving an edit works out only
-what it changes, and any value can say where it came from:
-
-```kotlin
-val ci = env("CI") == "true"
-
-module core {
-    jvmTarget = if (ci) 21 else 17
-}
-
-module app {
-    dependsOn(core)
-    jvmTarget = core.jvmTarget
-    dependency("com.fasterxml.jackson.core:jackson-databind:2.17.1")
-}
-```
-
-```bash
-cargo run -p watershed-build --bin wsb -- -f crates/watershed-build/examples/build.ws explain app.jvmTarget
-```
-
-A misspelt setting is an error with a suggestion, not a key that is silently
-ignored. See [its README](crates/watershed-build/README.md) for the language,
-and `editors/watershed-build` for highlighting in IntelliJ and VS Code.
+[wsb](https://github.com/surefold/wsb) is a typed build file language for
+JVM projects (Kotlin first), built on this engine, in a repository of its
+own. Every value in a build file is a node, so saving an edit works out only
+what it changes, and any value can say where it came from.
 
 A node's formula can be changed after it is made: `g.redefine(node, expr)`.
 Like `set`, it takes effect at the next update, which recalculates the node
@@ -305,11 +283,9 @@ crates/watershed-core/
   src/error.rs    errors
   tests/          behaviour and property tests
   examples/       tour and benchmark
-crates/watershed-build/ a typed build file language on the engine, and the `wsb` tool
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
 crates/watershed-web/   the engine as WebAssembly, with three example models
 web/                    the interactive page and its build script
-editors/watershed-build/  syntax highlighting for build files (IntelliJ, VS Code)
 ```
 
 ## Not done yet
