@@ -323,26 +323,68 @@ impl Ir {
     /// Evaluates this expression, reading each referenced node's value from
     /// `values` (indexed by node id). Only call this on type-checked expressions.
     pub(crate) fn eval(&self, values: &[Value]) -> Value {
+        self.eval_given(&|node| values[node.index()].clone())
+    }
+
+    /// Evaluates this expression, asking `value_of` for each referenced
+    /// node's value: the values now, or those of an earlier update.
+    pub(crate) fn eval_given(&self, value_of: &dyn Fn(NodeId) -> Value) -> Value {
         match self {
             Ir::Const(v) => v.clone(),
-            Ir::Ref(r) => values[r.node.index()].clone(),
-            Ir::Unary(op, a) => unary(*op, a.eval(values)),
-            Ir::Binary(op, a, b) => binary(*op, a.eval(values), b.eval(values)),
-            Ir::If(c, t, e) => match c.eval(values) {
-                Value::Bool(true) => t.eval(values),
-                Value::Bool(false) => e.eval(values),
+            Ir::Ref(r) => value_of(r.node),
+            Ir::Unary(op, a) => unary(*op, a.eval_given(value_of)),
+            Ir::Binary(op, a, b) => binary(*op, a.eval_given(value_of), b.eval_given(value_of)),
+            Ir::If(c, t, e) => match c.eval_given(value_of) {
+                Value::Bool(true) => t.eval_given(value_of),
+                Value::Bool(false) => e.eval_given(value_of),
                 Value::Error(err) => Value::Error(err),
                 other => internal(format!("condition evaluated to {other}")),
             },
-            Ir::Choose(index, options) => match index.eval(values) {
+            Ir::Choose(index, options) => match index.eval_given(value_of) {
                 Value::I64(i) => match usize::try_from(i).ok().and_then(|i| options.get(i)) {
-                    Some(option) => option.eval(values),
+                    Some(option) => option.eval_given(value_of),
                     None => out_of_range(i, options.len()),
                 },
                 Value::Error(err) => Value::Error(err),
                 other => internal(format!("choice index evaluated to {other}")),
             },
-            Ir::List(items) => make_list(items.iter().map(|i| i.eval(values)).collect()),
+            Ir::List(items) => make_list(items.iter().map(|i| i.eval_given(value_of)).collect()),
+        }
+    }
+
+    /// The nodes that evaluating this expression reads, given each node's
+    /// value: every node it refers to, except those in the branches of an
+    /// `if` or a `choose` that those values do not take.
+    pub(crate) fn reads_given(&self, value_of: &dyn Fn(NodeId) -> Value, out: &mut Vec<NodeId>) {
+        match self {
+            Ir::Const(_) => {}
+            Ir::Ref(r) => out.push(r.node),
+            Ir::Unary(_, a) => a.reads_given(value_of, out),
+            Ir::Binary(_, a, b) => {
+                a.reads_given(value_of, out);
+                b.reads_given(value_of, out);
+            }
+            Ir::If(c, t, e) => {
+                c.reads_given(value_of, out);
+                match c.eval_given(value_of) {
+                    Value::Bool(true) => t.reads_given(value_of, out),
+                    Value::Bool(false) => e.reads_given(value_of, out),
+                    _ => {}
+                }
+            }
+            Ir::Choose(index, options) => {
+                index.reads_given(value_of, out);
+                if let Value::I64(i) = index.eval_given(value_of) {
+                    if let Some(option) = usize::try_from(i).ok().and_then(|i| options.get(i)) {
+                        option.reads_given(value_of, out);
+                    }
+                }
+            }
+            Ir::List(items) => {
+                for item in items {
+                    item.reads_given(value_of, out);
+                }
+            }
         }
     }
 

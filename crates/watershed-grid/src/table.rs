@@ -1785,7 +1785,16 @@ impl Table {
             .index
             .get(key)
             .ok_or_else(|| format!("there is no row {key:?}"))? as usize;
-        Ok(self.g.explain_node(self.nodes[row * self.cols.len() + col]))
+        self.why(self.nodes[row * self.cols.len() + col])
+    }
+
+    /// Why a node has its value: now, or as of the update the grid is
+    /// showing, when it is looking back.
+    fn why(&self, id: NodeId) -> Result<String, String> {
+        match self.as_of {
+            None => Ok(self.g.explain_node(id)),
+            Some(epoch) => self.g.explain_node_at(id, epoch).map_err(|e| e.to_string()),
+        }
     }
 
     /// Why a group's total has its value.
@@ -1815,7 +1824,7 @@ impl Table {
         let id = self
             .group_node(by, key, col)
             .ok_or_else(|| format!("{} has no total", c.name))?;
-        Ok(self.with_filter_note(self.with_average_note(c, self.g.explain_node(id))))
+        Ok(self.with_filter_note(self.with_average_note(c, self.why(id)?)))
     }
 
     /// Why a column's total has its value.
@@ -1830,7 +1839,7 @@ impl Table {
         let id = c
             .total()
             .ok_or_else(|| format!("{} has no total", c.name))?;
-        Ok(self.with_filter_note(self.with_average_note(c, self.g.explain_node(id))))
+        Ok(self.with_filter_note(self.with_average_note(c, self.why(id)?)))
     }
 
     fn with_average_note(&self, col: &Col, explanation: String) -> String {
