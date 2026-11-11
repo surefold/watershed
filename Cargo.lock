@@ -941,6 +941,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "watershed-jvm"
+version = "0.1.0"
+dependencies = [
+ "watershed-core",
+]
+
+[[package]]
 name = "watershed-parquet"
 version = "0.1.0"
 dependencies = [

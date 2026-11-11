@@ -8,9 +8,7 @@ sbt run      # builds the Rust library and its JVM bindings, runs src/main/scala
 sbt test     # the same, then runs src/test/scala/WatershedTest.scala
 ```
 
-It needs Rust 1.88 or later (`cargo`), a JDK from 22 up, Gradle and sbt.
-Gradle is there because the bindings are generated as Kotlin and compiled
-in `../kotlin`; sbt runs that and takes the classes.
+It needs Rust (`cargo`), a JDK from 22 up, and sbt.
 
 ## What it looks like
 
@@ -69,22 +67,21 @@ A node that could not be calculated (a division by zero, say) makes
 
 ## How it fits together
 
-- `crates/watershed-jvm` is the Rust library, with its JVM side generated
-  as Kotlin by [UniFFI](https://mozilla.github.io/uniffi-rs/).
+- `crates/watershed-jvm` is the engine as a C library of plain functions.
+- `crates/watershed-jvm/java/` is one small Java class, `Native`, that
+  calls them through the JDK's foreign function API. A call costs tens to
+  hundreds of nanoseconds (see `../kotlin/README.md` for the numbers; Scala
+  goes through the same class).
 - `crates/watershed-jvm/scala/watershed/Watershed.scala` is the typed layer
-  for Scala, written by hand over those generated classes: `Expr[T]`,
-  `Node[T]`, `Input[T]`, `Field[T]`, the operators, and the type classes
-  (`Holds`, `Number`, `Ordered`) that decide what compiles.
-- `build.sbt` runs `gradle jar` in `../kotlin` for the bindings, adds JNA
-  and the Kotlin standard library they need, and points the JVM at the
-  native library with `-Djna.library.path`.
+  for Scala: `Graph`, `Collection`, `Expr[T]`, `Node[T]`, `Input[T]`,
+  `Field[T]`, the operators, and the type classes (`Holds`, `Number`,
+  `Ordered`) that decide what compiles.
+- `build.sbt` runs `cargo build --release`, compiles the Java and Scala
+  sources from there, and tells the JVM where the library is with
+  `-Dwatershed.library.path`. There are no dependencies beyond the JDK and
+  the Scala library.
 
 ## What is not here yet
 
-- The same as for Kotlin (`../kotlin/README.md`): setting and reading a
-  `Double`, `stabilize()` and `setAll` are direct calls and as fast as from
-  Rust; everything else costs about 10 µs a call, so build with
-  `defineAll`; rows go one `upsert` at a time; no groupings or history;
-  nothing packaged as a jar.
-- The build needs Gradle as well as sbt. Bindings generated as Java, or a
-  published jar of the Kotlin ones, would remove that.
+- Groupings and history (`explain` as of an earlier update).
+- A jar with the library inside for each platform.

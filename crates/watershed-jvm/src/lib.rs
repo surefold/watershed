@@ -1,354 +1,41 @@
-//! watershed for Kotlin and the JVM.
+//! watershed as a C library for the JVM.
 //!
-//! [UniFFI](https://mozilla.github.io/uniffi-rs/) turns the types and
-//! methods here into Kotlin classes that call this library through JNA. The
-//! surface is small and made of plain things (names, numbers, formulas as
-//! text), so that crossing into the JVM stays simple:
+//! The JVM calls the functions in `ffi.rs` directly, through its foreign
+//! function API (`java.lang.foreign`, JDK 22 on): plain numbers go in
+//! registers, and anything bigger (a name, an expression, a batch of rows)
+//! as the address and length of bytes the JVM wrote (see `wire.rs`). There
+//! is no generated glue, and a call costs tens of nanoseconds.
+//!
+//! This file is the safe part: what each call does, given values already
+//! read. `ffi.rs` is the unsafe part, and only turns addresses into
+//! references and slices before calling in here.
+//!
+//! On the JVM side, `java/` holds one small class that calls these
+//! functions, and `kotlin/` and `scala/` hold the typed layers that
+//! programs use:
 //!
 //! ```kotlin
 //! val g = Graph()
-//! val qty = g.input("qty", 10.0)                // Input<Double>
+//! val qty = g.input("qty", 10.0)                     // Input<Double>
 //! val price = g.input("price", 2.5)
 //! val total = g.define("total", qty * price * 1.2)   // Node<Double>
 //! g[price] = 3.0
 //! g.stabilize()
 //! val now: Double = g[total]
 //! ```
-//!
-//! That is the typed layer in `kotlin/` (and `scala/`), written by hand
-//! over the calls here, which is why the objects here are `RawGraph` and
-//! `RawCollection`: the typed layers have `Graph` and `Collection`. In it an expression has a type, so adding a number to a string
-//! does not compile, as in Rust. The calls here deal in [`Value`]s, node
-//! numbers and expressions as lists of [`Op`]s, and have plainer names
-//! (`input_value`, `define_expression`...) so that the typed layer can have
-//! the good ones.
-//!
-//! Numbers that cross are signed (`i32`, `i64`) even where they are never
-//! negative: Kotlin's unsigned types have names on the JVM that Scala and
-//! Java cannot call comfortably.
-//!
-//! `examples/kotlin` is a project that builds this library, generates the
-//! Kotlin and runs it.
 
 use std::collections::HashMap;
-use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
-use watershed_core::{
-    AggregateOp, BinOp, CalcError, CalcType, Collection as CoreCollection, Decimal, Ir, NodeId,
-    Rounding, Type, UnOp,
-};
+use watershed_core::{AggregateOp, Collection as CoreCollection, Ir, NodeId, Type, Value};
 
-mod fast;
+mod ffi;
+mod wire;
 
-uniffi::setup_scaffolding!();
+use wire::{Reader, Result};
 
-/// Anything the engine refuses, with its message.
-#[derive(Debug, uniffi::Error)]
-#[uniffi(flat_error)]
-pub enum WatershedError {
-    Refused(String),
-}
-
-impl fmt::Display for WatershedError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let WatershedError::Refused(message) = self;
-        f.write_str(message)
-    }
-}
-
-impl std::error::Error for WatershedError {}
-
-impl From<CalcError> for WatershedError {
-    fn from(e: CalcError) -> Self {
-        WatershedError::Refused(e.to_string())
-    }
-}
-
-type Result<T> = std::result::Result<T, WatershedError>;
-
-fn refused<T>(message: impl Into<String>) -> Result<T> {
-    Err(WatershedError::Refused(message.into()))
-}
-
-/// A value of a node.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
-pub enum Value {
-    Number {
-        value: f64,
-    },
-    Whole {
-        value: i64,
-    },
-    /// An exact decimal, as its digits: `"19.99"`. A `BigDecimal` in Kotlin.
-    Decimal {
-        value: String,
-    },
-    Flag {
-        value: bool,
-    },
-    Text {
-        value: String,
-    },
-    /// Strings in order.
-    Texts {
-        items: Vec<String>,
-    },
-    /// The node could not be calculated, and why (a division by zero, say).
-    Failed {
-        message: String,
-    },
-}
-
-impl Value {
-    fn to_core(&self) -> Result<watershed_core::Value> {
-        Ok(match self {
-            Value::Number { value } => watershed_core::Value::F64(*value),
-            Value::Whole { value } => watershed_core::Value::I64(*value),
-            Value::Decimal { value } => match value.parse::<Decimal>() {
-                Ok(decimal) => decimal.into_value(),
-                Err(_) => {
-                    return refused(format!(
-                        "{value} is not a decimal the engine can hold: it keeps 28 significant digits"
-                    ));
-                }
-            },
-            Value::Flag { value } => watershed_core::Value::Bool(*value),
-            Value::Text { value } => watershed_core::Value::Str(value.as_str().into()),
-            Value::Texts { .. } => return refused("an input cannot be a list"),
-            Value::Failed { message } => watershed_core::Value::error(message.clone()),
-        })
-    }
-
-    fn from_core(value: &watershed_core::Value) -> Value {
-        match value {
-            watershed_core::Value::F64(x) => Value::Number { value: *x },
-            watershed_core::Value::I64(x) => Value::Whole { value: *x },
-            watershed_core::Value::Decimal(x) => Value::Decimal {
-                value: x.to_string(),
-            },
-            watershed_core::Value::Bool(x) => Value::Flag { value: *x },
-            watershed_core::Value::Str(s) => Value::Text {
-                value: s.to_string(),
-            },
-            watershed_core::Value::List(items) => Value::Texts {
-                items: items.iter().map(|s| s.to_string()).collect(),
-            },
-            watershed_core::Value::Error(message) => Value::Failed {
-                message: message.to_string(),
-            },
-        }
-    }
-}
-
-/// What a node or a field of a collection holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum Kind {
-    Number,
-    Whole,
-    /// An exact decimal of up to 28 digits.
-    Decimal,
-    Flag,
-    Text,
-    /// A list of strings. Calculated nodes only: not an input or a field.
-    Texts,
-}
-
-impl Kind {
-    fn of(ty: Type) -> Kind {
-        match ty {
-            Type::F64 => Kind::Number,
-            Type::I64 => Kind::Whole,
-            Type::Decimal => Kind::Decimal,
-            Type::Bool => Kind::Flag,
-            Type::Str => Kind::Text,
-            Type::StrList => Kind::Texts,
-        }
-    }
-}
-
-/// A whole number given where a number is held becomes that number, so
-/// that `12` can be set where `12.0` is meant.
-fn fitted(value: watershed_core::Value, ty: Type) -> watershed_core::Value {
-    match (value, ty) {
-        (watershed_core::Value::I64(whole), Type::F64) => watershed_core::Value::F64(whole as f64),
-        (watershed_core::Value::I64(whole), Type::Decimal) => Decimal::from(whole).into_value(),
-        (value, _) => value,
-    }
-}
-
-/// One step of an expression. An expression crosses into the engine as a
-/// list of these in the order a calculator with a stack would take them:
-/// `qty * price + 1` is `qty`, `price`, multiply, `1`, add.
-#[derive(Debug, Clone, uniffi::Enum)]
-pub enum Op {
-    /// A node of the graph.
-    Node {
-        node: i32,
-    },
-    /// A field or column of the collection the expression is for.
-    Part {
-        name: String,
-    },
-    Constant {
-        value: Value,
-    },
-    /// Takes one value.
-    Unary {
-        op: UnaryOp,
-    },
-    /// Takes two values.
-    Binary {
-        op: BinaryOp,
-    },
-    /// Takes a condition and two values; only the chosen one is worked out.
-    If,
-    /// Takes an index and this many options.
-    Choose {
-        options: i32,
-    },
-    /// Takes this many strings and makes a list of them.
-    Texts {
-        items: i32,
-    },
-}
-
-#[derive(Debug, Clone, Copy, uniffi::Enum)]
-pub enum UnaryOp {
-    Negate,
-    Not,
-    Absolute,
-    ToText,
-    /// A whole number as the same decimal.
-    ToDecimal,
-    /// A decimal as the nearest number.
-    ToNumber,
-}
-
-#[derive(Debug, Clone, Copy, uniffi::Enum)]
-pub enum BinaryOp {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Least,
-    Greatest,
-    Less,
-    LessOrEqual,
-    Greater,
-    GreaterOrEqual,
-    Equal,
-    NotEqual,
-    And,
-    Or,
-    Concat,
-    Join,
-    /// A decimal to a number of places; a tie goes to the even neighbour.
-    RoundHalfEven,
-    /// A tie goes away from zero.
-    RoundHalfUp,
-    /// Toward zero.
-    RoundDown,
-    /// Away from zero.
-    RoundUp,
-}
-
-/// Builds the engine's expression from a list of steps. `node` and `part`
-/// say what a node number and a part's name stand for. The engine checks
-/// the types when a node or column is made from the result.
-fn expression(
-    ops: &[Op],
-    node: &dyn Fn(i32) -> Result<Ir>,
-    part: &dyn Fn(&str) -> Result<Ir>,
-) -> Result<Ir> {
-    fn take(stack: &mut Vec<Ir>) -> Result<Arc<Ir>> {
-        match stack.pop() {
-            Some(ir) => Ok(Arc::new(ir)),
-            None => refused("the expression is missing a value"),
-        }
-    }
-    fn take_many(stack: &mut Vec<Ir>, count: i32) -> Result<Vec<Arc<Ir>>> {
-        let mut items = (0..count)
-            .map(|_| take(stack))
-            .collect::<Result<Vec<_>>>()?;
-        items.reverse();
-        Ok(items)
-    }
-    let mut stack: Vec<Ir> = Vec::new();
-    for op in ops {
-        let next = match op {
-            Op::Node { node: number } => node(*number)?,
-            Op::Part { name } => part(name)?,
-            Op::Constant { value } => Ir::Const(value.to_core()?),
-            Op::Unary { op } => {
-                let op = match op {
-                    UnaryOp::Negate => UnOp::Neg,
-                    UnaryOp::Not => UnOp::Not,
-                    UnaryOp::Absolute => UnOp::Abs,
-                    UnaryOp::ToText => UnOp::ToText,
-                    UnaryOp::ToDecimal => UnOp::ToDecimal,
-                    UnaryOp::ToNumber => UnOp::ToFloat,
-                };
-                Ir::Unary(op, take(&mut stack)?)
-            }
-            Op::Binary { op } => {
-                let op = match op {
-                    BinaryOp::Add => BinOp::Add,
-                    BinaryOp::Subtract => BinOp::Sub,
-                    BinaryOp::Multiply => BinOp::Mul,
-                    BinaryOp::Divide => BinOp::Div,
-                    BinaryOp::Least => BinOp::Min,
-                    BinaryOp::Greatest => BinOp::Max,
-                    BinaryOp::Less => BinOp::Lt,
-                    BinaryOp::LessOrEqual => BinOp::Le,
-                    BinaryOp::Greater => BinOp::Gt,
-                    BinaryOp::GreaterOrEqual => BinOp::Ge,
-                    BinaryOp::Equal => BinOp::Eq,
-                    BinaryOp::NotEqual => BinOp::Ne,
-                    BinaryOp::And => BinOp::And,
-                    BinaryOp::Or => BinOp::Or,
-                    BinaryOp::Concat => BinOp::Concat,
-                    BinaryOp::Join => BinOp::Join,
-                    BinaryOp::RoundHalfEven => BinOp::Round(Rounding::HalfEven),
-                    BinaryOp::RoundHalfUp => BinOp::Round(Rounding::HalfUp),
-                    BinaryOp::RoundDown => BinOp::Round(Rounding::Down),
-                    BinaryOp::RoundUp => BinOp::Round(Rounding::Up),
-                };
-                let right = take(&mut stack)?;
-                let left = take(&mut stack)?;
-                Ir::Binary(op, left, right)
-            }
-            Op::If => {
-                let otherwise = take(&mut stack)?;
-                let then = take(&mut stack)?;
-                let condition = take(&mut stack)?;
-                Ir::If(condition, then, otherwise)
-            }
-            Op::Choose { options } => {
-                let options = take_many(&mut stack, *options)?;
-                Ir::Choose(take(&mut stack)?, options)
-            }
-            Op::Texts { items } => Ir::List(take_many(&mut stack, *items)?),
-        };
-        stack.push(next);
-    }
-    match (stack.pop(), stack.is_empty()) {
-        (Some(ir), true) => Ok(ir),
-        _ => refused("the expression does not come to one value"),
-    }
-}
-
-/// What one update did.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct Report {
-    /// This update's number; the first is 1.
-    pub update: i64,
-    /// Inputs whose value actually changed.
-    pub inputs_changed: i64,
-    /// Calculated nodes that were recalculated.
-    pub recalculated: i64,
-    /// Of those, how many came out with a different value.
-    pub changed: i64,
+fn refused<T>(e: impl ToString) -> Result<T> {
+    Err(e.to_string())
 }
 
 /// The engine's graph, and the nodes that have been handed to the JVM.
@@ -375,422 +62,290 @@ impl State {
     }
 
     /// The node the JVM means by this number.
-    pub(crate) fn node(&self, number: i32) -> Result<NodeId> {
-        let found = usize::try_from(number)
+    fn node(&self, number: i32) -> Result<NodeId> {
+        usize::try_from(number)
             .ok()
-            .and_then(|at| self.handed_out.get(at));
-        match found {
-            Some(&id) => Ok(id),
-            None => refused(format!("there is no node {number}")),
+            .and_then(|at| self.handed_out.get(at))
+            .copied()
+            .ok_or_else(|| format!("there is no node {number}"))
+    }
+
+    /// A node that can be read: not removed, and being calculated.
+    fn readable(&self, number: i32) -> Result<NodeId> {
+        let id = self.node(number)?;
+        if self.graph.is_removed(id) {
+            return refused(format!("{:?} has been removed", self.graph.name(id)));
         }
+        if !self.graph.is_calculated(id) && !self.graph.is_input(id) {
+            return refused(format!(
+                "{:?} is not being calculated: nothing that is watched uses it",
+                self.graph.name(id)
+            ));
+        }
+        Ok(id)
+    }
+
+    fn expression(&self, bytes: &[u8]) -> Result<Ir> {
+        wire::expression(
+            bytes,
+            &|number| Ok(self.graph.reference(self.node(number)?)),
+            &|part| {
+                refused(format!(
+                    "{part:?} is part of a collection's rows, and can only be used in its columns"
+                ))
+            },
+        )
     }
 }
 
-impl std::ops::Deref for State {
-    type Target = watershed_core::Graph;
-    fn deref(&self) -> &watershed_core::Graph {
-        &self.graph
-    }
-}
-
-impl std::ops::DerefMut for State {
-    fn deref_mut(&mut self) -> &mut watershed_core::Graph {
-        &mut self.graph
-    }
-}
-
-/// A graph of inputs and calculated nodes.
-#[derive(uniffi::Object)]
-pub struct RawGraph {
+/// A graph, as the JVM holds it.
+pub(crate) struct Graph {
     inner: Mutex<State>,
 }
 
-impl RawGraph {
-    pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
-        // A panic while the graph was held would be a bug in the engine;
-        // the graph is still the best there is to carry on with.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-#[uniffi::export]
-impl RawGraph {
-    #[uniffi::constructor]
-    pub fn new() -> Arc<Self> {
-        Arc::new(RawGraph {
+impl Graph {
+    fn new() -> Graph {
+        Graph {
             inner: Mutex::new(State {
                 graph: watershed_core::Graph::new(),
                 handed_out: Vec::new(),
                 numbers: HashMap::new(),
             }),
-        })
+        }
     }
 
-    /// Where this graph is, for the fast calls in `fast.rs`. It is good for
-    /// as long as the object it was asked of is alive.
-    pub fn address(&self) -> i64 {
-        self as *const RawGraph as i64
+    fn lock(&self) -> MutexGuard<'_, State> {
+        // A panic while the graph was held would be a bug in the engine;
+        // the graph is still the best there is to carry on with.
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Adds an input with a starting value. Returns the node's number.
-    pub fn input_value(&self, name: String, value: Value) -> Result<i32> {
+    fn input(&self, name: &str, value: Value) -> Result<i32> {
         let mut g = self.lock();
-        let id = g.input_value(&name, value.to_core()?)?;
+        let id = g.graph.input_value(name, value).or_else(refused)?;
         Ok(g.number(id))
     }
 
-    /// Adds a calculated node from a formula such as `qty * price * 1.2`.
-    /// A name in it is the node of that name; a name with spaces or
-    /// punctuation goes between backticks.
-    pub fn define_formula(&self, name: String, formula: String) -> Result<i32> {
+    fn define(&self, name: &str, expression: &[u8]) -> Result<i32> {
         let mut g = self.lock();
-        let id = g.define_formula(&name, &formula)?;
+        let ir = g.expression(expression)?;
+        let id = g.graph.define_ir(name, ir).or_else(refused)?;
         Ok(g.number(id))
     }
 
-    /// Adds a calculated node from an expression. Returns the node's number.
-    pub fn define_expression(&self, name: String, ops: Vec<Op>) -> Result<i32> {
+    /// Many nodes in one call, in order: each is a name and an expression.
+    /// Those before one that is refused stay.
+    fn define_many(&self, data: &[u8], out: &mut [i32]) -> Result<()> {
         let mut g = self.lock();
-        let ir = expression(&ops, &|number| Ok(g.reference(g.node(number)?)), &|name| {
-            refused(format!(
-                "{name:?} is part of a collection's rows, and can only be used in its columns"
-            ))
-        })?;
-        let id = g.define_ir(&name, ir)?;
-        Ok(g.number(id))
-    }
-
-    /// Records a new value for an input; it counts from the next `stabilize`.
-    pub fn set_value(&self, node: i32, value: Value) -> Result<()> {
-        let mut g = self.lock();
-        let id = g.node(node)?;
-        let value = fitted(value.to_core()?, g.node_type(id));
-        Ok(g.set_value(id, value)?)
-    }
-
-    /// Applies every recorded change and recalculates what depends on them,
-    /// and nothing else.
-    pub fn stabilize(&self) -> Report {
-        let report = self.lock().stabilize();
-        Report {
-            update: report.epoch as i64,
-            inputs_changed: report.inputs_changed as i64,
-            recalculated: report.recalculated as i64,
-            changed: report.changed as i64,
-        }
-    }
-
-    /// The node's value as of the last update.
-    pub fn value(&self, node: i32) -> Result<Value> {
-        let g = self.lock();
-        let id = g.node(node)?;
-        if g.is_removed(id) {
-            return refused(format!("{:?} has been removed", g.name(id)));
-        }
-        if !g.is_calculated(id) && !g.is_input(id) {
-            return refused(format!(
-                "{:?} is not being calculated: nothing that is watched uses it",
-                g.name(id)
-            ));
-        }
-        Ok(Value::from_core(g.value(id)))
-    }
-
-    /// Records a new value for a number input. The same as `set_value`,
-    /// but a plain number crosses into the engine far faster than a
-    /// [`Value`] does, and this is the call a feed of prices makes.
-    pub fn set_number(&self, node: i32, value: f64) -> Result<()> {
-        let mut g = self.lock();
-        let id = g.node(node)?;
-        Ok(g.set_value(id, watershed_core::Value::F64(value))?)
-    }
-
-    /// Records new values for many number inputs in one call.
-    pub fn set_numbers(&self, nodes: Vec<i32>, values: Vec<f64>) -> Result<()> {
-        if nodes.len() != values.len() {
-            return refused(format!(
-                "{} nodes were given {} values",
-                nodes.len(),
-                values.len()
-            ));
-        }
-        let mut g = self.lock();
-        for (node, value) in nodes.into_iter().zip(values) {
-            let id = g.node(node)?;
-            g.set_value(id, watershed_core::Value::F64(value))?;
+        let mut reader = Reader::new(data);
+        for slot in out.iter_mut() {
+            let name = reader.text()?;
+            let length = reader.count()?;
+            let ir = g.expression(reader.bytes(length)?)?;
+            let id = g.graph.define_ir(name, ir).or_else(refused)?;
+            *slot = g.number(id);
         }
         Ok(())
     }
 
-    /// A number node's value as of the last update. The fast way to read a
-    /// number; a node that could not be calculated is refused with why.
-    pub fn number(&self, node: i32) -> Result<f64> {
-        let g = self.lock();
+    fn set(&self, node: i32, value: Value) -> Result<()> {
+        let mut g = self.lock();
         let id = g.node(node)?;
-        if g.is_removed(id) {
-            return refused(format!("{:?} has been removed", g.name(id)));
-        }
-        if !g.is_calculated(id) && !g.is_input(id) {
-            return refused(format!(
-                "{:?} is not being calculated: nothing that is watched uses it",
-                g.name(id)
-            ));
-        }
-        match g.value(id) {
-            watershed_core::Value::F64(x) => Ok(*x),
-            watershed_core::Value::Error(why) => {
-                refused(format!("{} could not be calculated: {why}", g.name(id)))
-            }
-            other => refused(format!("{:?} holds {other}, not a number", g.name(id))),
-        }
+        g.graph.set_value(id, value).or_else(refused)
     }
 
-    /// Adds many calculated nodes in one call, in order (a later one can
-    /// use an earlier one). Returns their numbers. If one is refused, those
-    /// before it stay.
-    pub fn define_expressions(
-        &self,
-        names: Vec<String>,
-        expressions: Vec<Vec<Op>>,
-    ) -> Result<Vec<i32>> {
-        if names.len() != expressions.len() {
-            return refused(format!(
-                "{} names were given {} expressions",
-                names.len(),
-                expressions.len()
-            ));
-        }
+    fn set_numbers(&self, nodes: &[i32], values: &[f64]) -> Result<()> {
         let mut g = self.lock();
-        let mut numbers = Vec::with_capacity(names.len());
-        for (name, ops) in names.iter().zip(&expressions) {
-            let ir = expression(ops, &|number| Ok(g.reference(g.node(number)?)), &|part| {
-                refused(format!(
-                    "{part:?} is part of a collection's rows, and can only be used in its columns"
-                ))
-            })?;
-            let id = g.define_ir(name, ir)?;
-            numbers.push(g.number(id));
+        for (&node, &value) in nodes.iter().zip(values) {
+            let id = g.node(node)?;
+            g.graph.set_value(id, Value::F64(value)).or_else(refused)?;
         }
-        Ok(numbers)
+        Ok(())
     }
 
-    /// Why the node has its value, as a tree of what it was worked out from.
-    pub fn explain(&self, node: i32) -> Result<String> {
+    /// A node's value, cloned out from under the lock.
+    fn value(&self, node: i32) -> Result<Value> {
         let g = self.lock();
-        Ok(g.explain_node(g.node(node)?))
+        let id = g.readable(node)?;
+        Ok(g.graph.value(id).clone())
     }
 
-    /// What the node holds.
-    pub fn kind(&self, node: i32) -> Result<Kind> {
+    /// A number node's value, or `None` if it is anything but a number.
+    fn number(&self, node: i32) -> Option<f64> {
         let g = self.lock();
-        Ok(Kind::of(g.node_type(g.node(node)?)))
+        match g.graph.value(g.readable(node).ok()?) {
+            Value::F64(x) => Some(*x),
+            _ => None,
+        }
     }
 
-    /// The node with this name, if there is one.
-    pub fn find(&self, name: String) -> Option<i32> {
-        let mut g = self.lock();
-        g.find(&name).map(|id| g.number(id))
+    fn stabilize(&self) -> [i64; 4] {
+        let report = self.lock().graph.stabilize();
+        [
+            report.epoch as i64,
+            report.inputs_changed as i64,
+            report.recalculated as i64,
+            report.changed as i64,
+        ]
     }
 
-    /// The node's name.
-    pub fn name(&self, node: i32) -> Result<String> {
+    fn explain(&self, node: i32) -> Result<String> {
         let g = self.lock();
-        Ok(g.name(g.node(node)?).to_string())
+        Ok(g.graph.explain_node(g.node(node)?))
     }
 
-    /// The names of the nodes the last update recalculated, in order.
-    pub fn last_recalculated(&self) -> Vec<String> {
+    fn name(&self, node: i32) -> Result<String> {
         let g = self.lock();
-        g.last_recalculated()
+        Ok(g.graph.name(g.node(node)?).to_string())
+    }
+
+    fn last_recalculated(&self) -> Vec<String> {
+        let g = self.lock();
+        g.graph
+            .last_recalculated()
             .iter()
-            .map(|&id| g.name(id).to_string())
+            .map(|&id| g.graph.name(id).to_string())
             .collect()
     }
 
-    /// How many nodes the graph has had.
-    pub fn size(&self) -> i64 {
-        self.lock().len() as i64
+    fn size(&self) -> i64 {
+        self.lock().graph.len() as i64
     }
 
-    /// Removes a node that nothing uses; its name is then free.
-    pub fn remove(&self, node: i32) -> Result<()> {
+    fn remove(&self, node: i32) -> Result<()> {
         let mut g = self.lock();
         let id = g.node(node)?;
-        Ok(g.remove_node(id)?)
+        g.graph.remove_node(id).or_else(refused)
     }
 
-    /// Watches a node: in pull mode, it and what it uses are kept up to date.
-    pub fn watch(&self, node: i32) -> Result<()> {
+    fn watch(&self, node: i32, on: bool) -> Result<()> {
         let mut g = self.lock();
         let id = g.node(node)?;
-        Ok(g.watch_node(id)?)
+        if on {
+            g.graph.watch_node(id).or_else(refused)
+        } else {
+            g.graph.unwatch_node(id);
+            Ok(())
+        }
     }
 
-    /// Stops watching a node.
-    pub fn unwatch(&self, node: i32) -> Result<()> {
-        let mut g = self.lock();
-        let id = g.node(node)?;
-        g.unwatch_node(id);
-        Ok(())
+    fn calculate_only_watched(&self, on: bool) {
+        self.lock().graph.calculate_only_watched(on);
     }
 
-    /// Pull mode: while on, an update calculates only the watched nodes and
-    /// what they use.
-    pub fn calculate_only_watched(&self, on: bool) {
-        self.lock().calculate_only_watched(on);
+    fn check_consistency(&self) -> Result<()> {
+        self.lock().graph.check_consistency()
     }
 
-    /// Checks every node against a calculation from scratch.
-    pub fn check_consistency(&self) -> Result<()> {
-        self.lock()
-            .check_consistency()
-            .map_err(WatershedError::Refused)
-    }
-
-    /// A new, empty keyed table of rows in this graph.
-    pub fn collection(self: Arc<Self>, name: String) -> Arc<RawCollection> {
-        let inner = CoreCollection::new(&self.lock(), &name);
-        Arc::new(RawCollection {
+    fn collection(&self, name: &str) -> Collection<'_> {
+        let inner = CoreCollection::new(&self.lock().graph, name);
+        Collection {
             graph: self,
             inner: Mutex::new(inner),
-            fields: Mutex::new(HashMap::new()),
-        })
+        }
     }
 }
 
-/// A keyed table of rows, with fields, calculated columns and totals that
-/// update by only the rows that change.
-#[derive(uniffi::Object)]
-pub struct RawCollection {
-    graph: Arc<RawGraph>,
+/// A keyed table of rows, as the JVM holds it. It borrows its graph, which
+/// the JVM side keeps alive for as long as the collection is.
+pub(crate) struct Collection<'g> {
+    graph: &'g Graph,
     inner: Mutex<CoreCollection>,
-    /// What each field holds, to fit whole numbers to number fields.
-    fields: Mutex<HashMap<String, Type>>,
 }
 
-impl RawCollection {
+impl Collection<'_> {
     fn lock(&self) -> MutexGuard<'_, CoreCollection> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn total(&self, name: &str, op: AggregateOp, of: Option<&str>) -> Result<i32> {
+    /// A field or column, by name.
+    fn part(c: &CoreCollection, g: &State, name: &str) -> Result<Ir> {
+        // Between backticks, so that any name is a name.
+        c.parse_formula(&g.graph, &format!("`{name}`"))
+            .map(|(part, _)| part)
+            .or_else(refused)
+    }
+
+    fn field(&self, name: &str, kind: u8) -> Result<()> {
+        let ty = match kind {
+            wire::NUMBER => Type::F64,
+            wire::WHOLE => Type::I64,
+            wire::DECIMAL => Type::Decimal,
+            wire::FLAG => Type::Bool,
+            wire::TEXT => Type::Str,
+            other => return refused(format!("there is no kind of field numbered {other}")),
+        };
+        self.lock().add_field(name, ty).map(|_| ()).or_else(refused)
+    }
+
+    fn column(&self, name: &str, expression: &[u8]) -> Result<()> {
         // The graph first, then the collection, everywhere: one order, so
         // two threads can never each hold what the other is waiting for.
         let mut g = self.graph.lock();
         let mut c = self.lock();
-        let of = match of {
-            Some(part) => Some(c.parse_formula(&g, &format!("`{part}`"))?.0),
-            None => None,
+        let ir = wire::expression(
+            expression,
+            &|number| Ok(g.graph.reference(g.node(number)?)),
+            &|part| Self::part(&c, &g, part),
+        )?;
+        c.add_column(&mut g.graph, name, ir)
+            .map(|_| ())
+            .or_else(refused)
+    }
+
+    /// A total over the rows; `of` is the field or column, or `None` to
+    /// count rows. Returns its node.
+    fn total(&self, name: &str, op: i32, of: Option<&str>) -> Result<i32> {
+        let op = match op {
+            0 => AggregateOp::Sum,
+            1 => AggregateOp::Min,
+            2 => AggregateOp::Max,
+            3 => AggregateOp::Count,
+            other => return refused(format!("there is no kind of total numbered {other}")),
         };
-        let id = c.add_total(&mut g, name, op, of.as_ref())?;
-        Ok(g.number(id))
-    }
-}
-
-#[uniffi::export]
-impl RawCollection {
-    /// The graph this collection is in.
-    pub fn graph(&self) -> Arc<RawGraph> {
-        self.graph.clone()
-    }
-
-    /// Adds a field. Fields come before the first row.
-    pub fn add_field(&self, name: String, kind: Kind) -> Result<()> {
-        let ty = match kind {
-            Kind::Number => Type::F64,
-            Kind::Whole => Type::I64,
-            Kind::Decimal => Type::Decimal,
-            Kind::Flag => Type::Bool,
-            Kind::Text => Type::Str,
-            Kind::Texts => return refused("a field cannot be a list"),
-        };
-        self.lock().add_field(&name, ty)?;
-        self.fields
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(name, ty);
-        Ok(())
-    }
-
-    /// Adds a column from a formula written as text, over this collection's
-    /// fields and columns and the graph's nodes.
-    pub fn add_formula_column(&self, name: String, formula: String) -> Result<()> {
-        let mut g = self.graph.lock();
-        self.lock().add_formula_column(&mut g, &name, &formula)?;
-        Ok(())
-    }
-
-    /// Adds a column, worked out in every row by an expression over this
-    /// collection's fields and columns ([`Op::Part`]) and the graph's nodes.
-    pub fn add_column(&self, name: String, ops: Vec<Op>) -> Result<()> {
         let mut g = self.graph.lock();
         let mut c = self.lock();
-        let ir = expression(&ops, &|number| Ok(g.reference(g.node(number)?)), &|part| {
-            Ok(c.parse_formula(&g, &format!("`{part}`"))?.0)
-        })?;
-        c.add_column(&mut g, &name, ir)?;
+        let of = of.map(|part| Self::part(&c, &g, part)).transpose()?;
+        let id = c
+            .add_total(&mut g.graph, name, op, of.as_ref())
+            .or_else(refused)?;
+        Ok(g.number(id))
+    }
+
+    /// Adds or changes many rows in one call. Each is a key, how many
+    /// fields are given, and each field's name and value. Rows before one
+    /// that is refused stay.
+    fn upsert(&self, data: &[u8], rows: usize) -> Result<()> {
+        let mut g = self.graph.lock();
+        let mut c = self.lock();
+        let mut reader = Reader::new(data);
+        let mut fields: Vec<(&str, Value)> = Vec::new();
+        for _ in 0..rows {
+            let key = reader.text()?;
+            fields.clear();
+            for _ in 0..reader.count()? {
+                let name = reader.text()?;
+                fields.push((name, reader.value()?));
+            }
+            c.upsert_named(&mut g.graph, key, &fields)
+                .or_else(refused)?;
+        }
         Ok(())
     }
 
-    /// A total: the sum of a field or column over the rows. Returns its node.
-    pub fn add_sum(&self, name: String, of: String) -> Result<i32> {
-        self.total(&name, AggregateOp::Sum, Some(&of))
-    }
-
-    /// The smallest value of a field or column. Returns its node.
-    pub fn add_min(&self, name: String, of: String) -> Result<i32> {
-        self.total(&name, AggregateOp::Min, Some(&of))
-    }
-
-    /// The largest value of a field or column. Returns its node.
-    pub fn add_max(&self, name: String, of: String) -> Result<i32> {
-        self.total(&name, AggregateOp::Max, Some(&of))
-    }
-
-    /// How many rows there are. Returns its node.
-    pub fn add_count(&self, name: String) -> Result<i32> {
-        self.total(&name, AggregateOp::Count, None)
-    }
-
-    /// Adds a row, or changes the fields given of one that is there. A new
-    /// row needs every field. It counts from the next `stabilize`.
-    pub fn upsert_values(&self, key: String, fields: HashMap<String, Value>) -> Result<()> {
-        let values: Vec<(&str, watershed_core::Value)> = {
-            let kinds = self.fields.lock().unwrap_or_else(|e| e.into_inner());
-            fields
-                .iter()
-                .map(|(name, value)| {
-                    let value = value.to_core()?;
-                    Ok((
-                        name.as_str(),
-                        match kinds.get(name) {
-                            Some(&ty) => fitted(value, ty),
-                            None => value,
-                        },
-                    ))
-                })
-                .collect::<Result<_>>()?
-        };
+    fn remove(&self, key: &str) -> Result<bool> {
         let mut g = self.graph.lock();
-        Ok(self.lock().upsert_named(&mut g, &key, &values)?)
+        self.lock().remove(&mut g.graph, key).or_else(refused)
     }
 
-    /// Removes a row. Returns whether there was one.
-    pub fn remove(&self, key: String) -> Result<bool> {
-        let mut g = self.graph.lock();
-        Ok(self.lock().remove(&mut g, &key)?)
-    }
-
-    /// A field or column of a row, as of the last update.
-    pub fn value(&self, key: String, of: String) -> Result<Value> {
+    fn value(&self, key: &str, part: &str) -> Result<Value> {
         let g = self.graph.lock();
         let c = self.lock();
-        let (part, _) = c.parse_formula(&g, &format!("`{of}`"))?;
-        Ok(Value::from_core(&c.get_value(&g, &key, &part)?))
+        let part = Self::part(&c, &g, part)?;
+        c.get_value(&g.graph, key, &part).or_else(refused)
     }
 
-    /// How many rows there are, counting changes since the last update.
-    pub fn size(&self) -> i64 {
+    fn size(&self) -> i64 {
         self.lock().len() as i64
     }
 }

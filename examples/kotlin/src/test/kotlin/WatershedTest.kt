@@ -158,7 +158,7 @@ class WatershedTest {
     }
 
     @Test
-    fun `the direct calls and the generated ones give the same answers`() {
+    fun `a failure or a node of another graph is told apart from a value`() {
         val g = Graph()
         val a = g.input("a", 1.0)
         val b = g.input("b", 0L)
@@ -173,8 +173,8 @@ class WatershedTest {
         assertEquals(2L, report.recalculated)
         assertEquals(2.5, g[half])
 
-        // What the direct call cannot answer, the generated one does: a
-        // node that really holds NaN, and one that failed, with its reason.
+        // A node that really holds NaN is read as NaN, and one that
+        // failed says why.
         assertTrue(g[nan].isNaN())
         assertTrue(assertFailsWith<WatershedException> { g[broken] }.message!!.contains("division by zero"))
 
@@ -183,6 +183,76 @@ class WatershedTest {
         val theirs = other.input("theirs", 9.0)
         assertFailsWith<WatershedException> { g[theirs] }
         assertFailsWith<WatershedException> { g[theirs] = 1.0 }
+        g.checkConsistency()
+    }
+
+    @Test
+    fun `every type of value is set and read back`() {
+        val g = Graph()
+        val number = g.input("number", 1.5)
+        val whole = g.input("whole", 7L)
+        val decimal = g.input("decimal", BigDecimal("19.99"))
+        val flag = g.input("flag", true)
+        val text = g.input("text", "héllo, wörld")
+        val list = g.define("list", texts(text, text))
+        assertEquals(1.5, g[number])
+        assertEquals(7L, g[whole])
+        assertEquals(BigDecimal("19.99"), g[decimal])
+        assertEquals(true, g[flag])
+        assertEquals("héllo, wörld", g[text])
+        assertEquals(listOf("héllo, wörld", "héllo, wörld"), g[list])
+
+        g[number] = -0.25
+        g[whole] = Long.MIN_VALUE
+        g[decimal] = BigDecimal("-79228162514264337593543950335")
+        g[flag] = false
+        g[text] = ""
+        assertEquals(5L, g.stabilize().inputsChanged)
+        assertEquals(-0.25, g[number])
+        assertEquals(Long.MIN_VALUE, g[whole])
+        assertEquals(BigDecimal("-79228162514264337593543950335"), g[decimal])
+        assertEquals(false, g[flag])
+        assertEquals("", g[text])
+        assertEquals(listOf("", ""), g[list])
+
+        // The smallest step a decimal has, and a long text.
+        g[decimal] = BigDecimal("0.0000000000000000000000000001")
+        g[text] = "x".repeat(10_000)
+        g.stabilize()
+        assertEquals("0.0000000000000000000000000001", g[decimal].toPlainString())
+        assertEquals(10_000, g[text].length)
+        assertEquals(listOf("list"), g.lastRecalculated())
+        g.checkConsistency()
+    }
+
+    @Test
+    fun `many rows go in one call`() {
+        val g = Graph()
+        val orders = g.collection("orders")
+        val qty = orders.whole("qty")
+        val price = orders.decimal("price")
+        val note = orders.text("note")
+        val line = orders.column("line", qty.toDecimal() * price)
+        val total = orders.sum("total", line)
+        val count = orders.count("count")
+        orders.upsertAll(List(1000) { row("o$it", qty(it), price(BigDecimal("0.10")), note("row $it")) })
+        g.stabilize()
+        assertEquals(1000L, g[count])
+        assertEquals("49950.00", g[total].toPlainString())
+        assertEquals("row 7", orders["o7", note])
+
+        // Changing some rows changes only those.
+        orders.upsertAll(listOf(row("o1", qty(1001)), row("o2", qty(1002))))
+        assertEquals(3L, g.stabilize().recalculated)
+        assertEquals("50150.00", g[total].toPlainString())
+
+        // A row that is refused says why, and the rows before it stay.
+        val refused = assertFailsWith<WatershedException> {
+            orders.upsertAll(listOf(row("new", qty(1), price(BigDecimal("1")), note("ok")), row("bad", qty(1))))
+        }
+        assertTrue(refused.message!!.contains("needs every field"), refused.message)
+        g.stabilize()
+        assertEquals(1001L, g[count])
         g.checkConsistency()
     }
 

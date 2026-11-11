@@ -153,7 +153,7 @@ class WatershedTest extends munit.FunSuite:
     assertEquals(g(total), 9940.0)
     g.checkConsistency()
 
-  test("the direct calls and the generated ones give the same answers"):
+  test("a failure or a node of another graph is told apart from a value"):
     val g = Graph()
     val a = g.input("a", 1.0)
     val b = g.input("b", 0L)
@@ -167,7 +167,7 @@ class WatershedTest extends munit.FunSuite:
     assertEquals(report.recalculated, 2L)
     assertEquals(g(half), 2.5)
 
-    // What the direct call cannot answer, the generated one does.
+    // A node that really holds NaN is read as NaN, and one that failed says why.
     assert(g(nan).isNaN)
     assert(intercept[WatershedException](g(broken)).getMessage.contains("division by zero"))
 
@@ -176,6 +176,67 @@ class WatershedTest extends munit.FunSuite:
     val theirs = other.input("theirs", 9.0)
     intercept[WatershedException](g(theirs))
     intercept[WatershedException](g(theirs) = 1.0)
+    g.checkConsistency()
+
+  test("every type of value is set and read back"):
+    val g = Graph()
+    val number = g.input("number", 1.5)
+    val whole = g.input("whole", 7L)
+    val decimal = g.input("decimal", BigDecimal("19.99"))
+    val flag = g.input("flag", true)
+    val words = g.input("text", "héllo, wörld")
+    val list = g.define("list", texts(words, words))
+    assertEquals(g(number), 1.5)
+    assertEquals(g(whole), 7L)
+    assertEquals(g(decimal), BigDecimal("19.99"))
+    assertEquals(g(flag), true)
+    assertEquals(g(words), "héllo, wörld")
+    assertEquals(g(list), List("héllo, wörld", "héllo, wörld"))
+
+    g(number) = -0.25
+    g(whole) = Long.MinValue
+    g(decimal) = BigDecimal("-79228162514264337593543950335")
+    g(flag) = false
+    g(words) = ""
+    assertEquals(g.stabilize().inputsChanged, 5L)
+    assertEquals(g(number), -0.25)
+    assertEquals(g(whole), Long.MinValue)
+    assertEquals(g(decimal), BigDecimal("-79228162514264337593543950335"))
+    assertEquals(g(flag), false)
+    assertEquals(g(words), "")
+
+    g(decimal) = BigDecimal("0.0000000000000000000000000001")
+    g(words) = "x" * 10_000
+    g.stabilize()
+    assertEquals(g(decimal).bigDecimal.toPlainString, "0.0000000000000000000000000001")
+    assertEquals(g(words).length, 10_000)
+    g.checkConsistency()
+
+  test("many rows go in one call"):
+    val g = Graph()
+    val orders = g.collection("orders")
+    val qty = orders.whole("qty")
+    val price = orders.decimal("price")
+    val note = orders.text("note")
+    val line = orders.column("line", qty.toDecimal * price)
+    val total = orders.sum("total", line)
+    val count = orders.count("count")
+    orders.upsertAll((0 until 1000).map(i => row(s"o$i", qty := i, price := BigDecimal("0.10"), note := s"row $i")))
+    g.stabilize()
+    assertEquals(g(count), 1000L)
+    assertEquals(g(total).toString, "49950.00")
+    assertEquals(orders("o7", note), "row 7")
+
+    orders.upsertAll(Seq(row("o1", qty := 1001), row("o2", qty := 1002)))
+    assertEquals(g.stabilize().recalculated, 3L)
+    assertEquals(g(total).toString, "50150.00")
+
+    // A row that is refused says why, and the rows before it stay.
+    val refused = intercept[WatershedException]:
+      orders.upsertAll(Seq(row("new", qty := 1, price := BigDecimal("1"), note := "ok"), row("bad", qty := 1)))
+    assert(refused.getMessage.contains("needs every field"), refused.getMessage)
+    g.stabilize()
+    assertEquals(g(count), 1001L)
     g.checkConsistency()
 
   test("in pull mode only what is watched is calculated"):
