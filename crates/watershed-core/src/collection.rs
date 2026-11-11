@@ -1052,6 +1052,16 @@ impl Collection {
         )))
     }
 
+    /// The node for a row's field or column (given by its placeholder);
+    /// `None` if there is no such row, or it is not one of this collection's.
+    /// The node stays that row's until the row is removed.
+    pub fn node_id(&self, key: &str, of: &Ir) -> Option<NodeId> {
+        self.part_type(of)?;
+        let Ir::Ref(r) = of else { return None };
+        let slot = *self.keys.get(key)?;
+        Some(self.member(slot, Target::Placeholder(*r)))
+    }
+
     /// The type of a field or column given by its placeholder; `None` if it
     /// is not one of this collection's.
     pub fn part_type(&self, of: &Ir) -> Option<Type> {

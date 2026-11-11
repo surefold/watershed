@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the interactive demo into web/dist.
+# Builds the interactive demo into web/dist, and the grid into web/dist/grid.
 #
 #   cargo install wasm-bindgen-cli --version 0.2.130   # once
 #   rustup target add wasm32-unknown-unknown            # once
@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --locked --release --target wasm32-unknown-unknown -p watershed-web
+cargo build --locked --release --target wasm32-unknown-unknown -p watershed-web -p watershed-grid
 rm -rf web/dist
 mkdir -p web/dist/pkg
 wasm-bindgen --target web --no-typescript --out-dir web/dist/pkg \
@@ -24,4 +24,10 @@ wasm-bindgen --target web --no-typescript --out-dir web/dist/pkg \
   printf '\n</body>\n</html>\n'
 } > web/dist/index.html
 
-ls -la web/dist web/dist/pkg
+# The grid: its page, the script that draws it, and the engine.
+mkdir -p web/dist/grid/pkg
+wasm-bindgen --target web --no-typescript --out-dir web/dist/grid/pkg \
+  target/wasm32-unknown-unknown/release/watershed_grid.wasm
+cp web/grid/index.html web/grid/grid.js web/grid/chart.js web/grid/grid.css web/dist/grid/
+
+ls -la web/dist web/dist/pkg web/dist/grid web/dist/grid/pkg
