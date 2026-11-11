@@ -987,6 +987,9 @@ fn run_pull(seed: u64, updates: usize, parallel: bool) -> Result<(), String> {
     for step in 0..updates {
         let live: Vec<NodeId> = g.node_ids().collect();
         for _ in 0..rng.below(3) {
+            if live.is_empty() {
+                break;
+            }
             let id = rng.pick(&live);
             if rng.percent(60) {
                 g.watch_node(id).map_err(|e| e.to_string())?;
@@ -1002,6 +1005,9 @@ fn run_pull(seed: u64, updates: usize, parallel: bool) -> Result<(), String> {
         }
         let inputs: Vec<NodeId> = g.node_ids().filter(|&id| g.is_input(id)).collect();
         for _ in 0..1 + rng.below(3) {
+            if inputs.is_empty() {
+                break;
+            }
             let id = rng.pick(&inputs);
             g.set_value(id, random_value(&mut rng, g.node_type(id)))
                 .unwrap();
@@ -1027,7 +1033,7 @@ fn run_pull(seed: u64, updates: usize, parallel: bool) -> Result<(), String> {
                 let _ = g.redefine_ir(id, ir);
             }
         }
-        if rng.percent(10) {
+        if !live.is_empty() && rng.percent(10) {
             let id = rng.pick(&live);
             if g.remove_node(id).is_ok() {
                 watched.retain(|&w| w != id);
