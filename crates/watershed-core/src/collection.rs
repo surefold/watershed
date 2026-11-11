@@ -922,6 +922,7 @@ impl Collection {
         epoch: u64,
     ) -> Result<T, CalcError> {
         self.check_graph(g)?;
+        g.history_covering(epoch)?;
         let slot = self.slot_at(g, key, epoch)?;
         let id = self.member(slot, Target::Placeholder(of.placeholder()));
         g.get_at(Node::<T>::new(g.node_ref(id)), epoch)
@@ -936,6 +937,7 @@ impl Collection {
         epoch: u64,
     ) -> Result<Value, CalcError> {
         self.check_graph(g)?;
+        g.history_covering(epoch)?;
         let (Ir::Ref(r), Some(_)) = (of, self.part_type(of)) else {
             return Err(CalcError::Invalid(format!(
                 "not a field or column of {}",
@@ -953,6 +955,7 @@ impl Collection {
     /// `epoch`.
     pub fn contains_at(&self, g: &Graph, key: &str, epoch: u64) -> Result<bool, CalcError> {
         self.check_graph(g)?;
+        g.history_covering(epoch)?;
         match self.slot_at(g, key, epoch) {
             Ok(_) => Ok(true),
             Err(CalcError::Invalid(_)) => Ok(false),
@@ -963,6 +966,7 @@ impl Collection {
     /// The keys of the rows at the end of update `epoch`, in order.
     pub fn keys_at(&self, g: &Graph, epoch: u64) -> Result<Vec<String>, CalcError> {
         self.check_graph(g)?;
+        g.history_covering(epoch)?;
         let mut now: Vec<Option<&str>> = vec![None; self.slots.len()];
         for (key, &slot) in &self.keys {
             now[slot] = Some(key);

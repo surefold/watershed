@@ -343,3 +343,27 @@ fn rows_changed_just_before_history_starts_read_as_they_were() -> Result {
     assert_eq!(orders.keys_at(&g, 2)?, ["new"].map(String::from).to_vec());
     Ok(())
 }
+
+#[test]
+fn an_empty_collection_still_says_when_an_update_cannot_be_read() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    assert_eq!(orders.keys_at(&g, 0), Err(CalcError::HistoryOff));
+    assert_eq!(orders.contains_at(&g, "a", 0), Err(CalcError::HistoryOff));
+
+    g.keep_history(0);
+    g.stabilize();
+    let forgotten = |r: std::result::Result<_, CalcError>| {
+        matches!(r, Err(CalcError::EpochUnavailable { epoch: 0, .. }))
+    };
+    assert!(forgotten(orders.keys_at(&g, 0).map(|_| ())));
+    assert!(forgotten(orders.contains_at(&g, "a", 0).map(|_| ())));
+    assert!(forgotten(orders.get_at(&g, "a", qty, 0).map(|_| ())));
+    assert!(matches!(
+        orders.keys_at(&g, 2),
+        Err(CalcError::EpochUnavailable { .. })
+    ));
+    assert_eq!(orders.keys_at(&g, 1)?, Vec::<String>::new());
+    Ok(())
+}
