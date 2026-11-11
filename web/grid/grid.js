@@ -27,7 +27,7 @@ export class WatershedGrid {
    * @param {HTMLElement} root an element with a height
    * @param grid the WebAssembly `Grid`
    * @param options
-   *   rowHeight, keyTitle, label (what a screen reader calls the grid),
+   *   rowHeight, keyTitle, keyWidth, label (what a screen reader calls the grid),
    *   formats: { column: { decimals, signed, width, trend } }
    *     (`trend` draws how the cell moved over recent updates; needs `grid.keep_history`),
    *   loadMore: async () => boolean, called as the person nears the end: add
@@ -40,6 +40,7 @@ export class WatershedGrid {
     this.grid = grid;
     this.rowH = options.rowHeight ?? 32;
     this.keyTitle = options.keyTitle ?? "key";
+    this.keyWidth = options.keyWidth ?? 176;
     this.label = options.label ?? "Data grid";
     this.formats = options.formats ?? {};
     this.loadMore = options.loadMore ?? null;
@@ -156,7 +157,7 @@ export class WatershedGrid {
     });
     for (let pos = this.widths.length; pos <= this.cols.length; pos++) {
       const col = this.cols[pos - 1];
-      this.widths[pos] = pos === 0 ? 176 : (this.formats[col.name]?.width ?? (col.kind === "number" ? 112 : 124));
+      this.widths[pos] = pos === 0 ? this.keyWidth : (this.formats[col.name]?.width ?? (col.kind === "number" ? 112 : 124));
     }
     this.rebuildColumns();
     this.refresh();
