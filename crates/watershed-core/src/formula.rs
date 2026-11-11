@@ -35,7 +35,7 @@
 //! sum     := product ( ( "+" | "-" ) product )*
 //! product := unary ( ( "*" | "/" ) unary )*
 //! unary   := ( "-" | "!" ) unary | primary
-//! primary := number | decimal | "text" | 'text' | true | false | name | `any name`
+//! primary := number | decimal | whole | "text" | 'text' | true | false | name | `any name`
 //!          | "(" formula ")" | "[" formula, ... "]"
 //!          | if(c, a, b) | min(a, b) | max(a, b) | abs(a)
 //!          | text(a) | concat(a, b) | join(list, separator)
@@ -44,9 +44,9 @@
 //!          | decimal(whole) | float(d)
 //! ```
 //!
-//! A number is an `f64`, unless it ends in `d`: `19.99d` is a
-//! [decimal](crate::decimal), exact, and keeps its two places. Decimals and
-//! floats do not mix; `round` puts a decimal on a number of places, a tie
+//! A number is an `f64`, unless it ends in `d` or `i`: `19.99d` is a
+//! [decimal](crate::decimal), exact, and keeps its two places, and `3i` is a
+//! whole number, an `i64`. Decimals, whole numbers and floats do not mix; `round` puts a decimal on a number of places, a tie
 //! going to the even neighbour unless another way is named. A name is letters, digits and `_`; any other
 //! name, such as `orders[3].qty` or `tax rate`, goes between backticks. A
 //! list holds strings. `choose` takes the option at position `index`, an
@@ -62,6 +62,7 @@ use crate::value::{CalcType, Value};
 enum Token {
     Number(f64),
     Decimal(Decimal),
+    Whole(i64),
     Text(String),
     Name(String),
     /// A name between backticks: always a node, never a function or `true`.
@@ -106,16 +107,30 @@ fn tokens(src: &str) -> Result<Vec<Token>, String> {
             }
             let text: String = chars[start..i].iter().filter(|&&c| c != '_').collect();
             // A `d` straight after the digits makes it a decimal: 19.99d.
-            let decimal = chars.get(i) == Some(&'d')
-                && !chars
-                    .get(i + 1)
-                    .is_some_and(|c| c.is_alphanumeric() || *c == '_');
-            if decimal {
+            let continues = |at: usize| {
+                chars
+                    .get(at)
+                    .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+            };
+            if chars.get(i) == Some(&'d') && !continues(i + 1) {
                 i += 1;
                 let number = text
                     .parse::<Decimal>()
                     .map_err(|_| format!("{text:?} is not a decimal of up to 28 digits"))?;
                 out.push(Token::Decimal(number));
+                continue;
+            }
+            // An `i` straight after the digits makes it a whole number: 3i.
+            if chars.get(i) == Some(&'i') && !continues(i + 1) {
+                i += 1;
+                let number = text.parse::<i64>().map_err(|_| {
+                    if text.bytes().all(|b| b.is_ascii_digit()) {
+                        format!("{text:?} is too big for a whole number")
+                    } else {
+                        format!("{text:?} is not a whole number")
+                    }
+                })?;
+                out.push(Token::Whole(number));
                 continue;
             }
             let number = text
@@ -277,6 +292,7 @@ impl Parser<'_> {
         Ok(match (symbol, inner) {
             // `-3` is the number, not a calculation.
             ("-", Ir::Const(Value::F64(x))) => Ir::Const(Value::F64(-x)),
+            ("-", Ir::Const(Value::I64(x))) => Ir::Const(Value::I64(-x)),
             ("-", inner) => Ir::Unary(UnOp::Neg, Arc::new(inner)),
             (_, inner) => Ir::Unary(UnOp::Not, Arc::new(inner)),
         })
@@ -328,6 +344,7 @@ impl Parser<'_> {
         match token {
             Token::Number(x) => Ok(Ir::Const(Value::F64(x))),
             Token::Decimal(x) => Ok(Ir::Const(x.into_value())),
+            Token::Whole(x) => Ok(Ir::Const(Value::I64(x))),
             Token::Text(s) => Ok(Ir::Const(Value::Str(s.into()))),
             Token::Symbol("(") => {
                 let inner = self.nested()?;
@@ -432,6 +449,7 @@ fn describe(token: &Token) -> String {
     match token {
         Token::Number(x) => x.to_string(),
         Token::Decimal(x) => format!("{x}d"),
+        Token::Whole(x) => format!("{x}i"),
         Token::Text(s) => format!("{s:?}"),
         Token::Name(s) => s.clone(),
         Token::Quoted(s) => format!("`{s}`"),
@@ -638,6 +656,32 @@ mod tests {
         );
         // A name that starts with d is still a name.
         assert_eq!(value("2 delta"), "parse: unexpected delta");
+    }
+
+    #[test]
+    fn whole_numbers_are_written_with_an_i() {
+        assert_eq!(value("2i + 3i * 4i"), "14");
+        assert_eq!(value("7i / 2i"), "3");
+        assert_eq!(value("-3i"), "-3");
+        assert_eq!(value("abs(-3i) + 1_000i"), "1003");
+        assert_eq!(value("choose(1i, 'x', 'y')"), "\"y\"");
+        assert_eq!(value("choose(if(a > b, 0i, 1i), 'x', 'y')"), "\"x\"");
+        assert_eq!(value("round(2.345d, 2i)"), "2.34");
+        assert_eq!(value("decimal(3i) * 1.50d"), "4.50");
+        assert_eq!(value("9223372036854775807i"), "9223372036854775807");
+        assert_eq!(
+            value("2i + a"),
+            "define: type error: Add needs both sides to have the same type, got i64 and f64"
+        );
+        assert_eq!(
+            value("9223372036854775808i"),
+            "parse: \"9223372036854775808\" is too big for a whole number"
+        );
+        assert_eq!(value("2.5i"), "parse: \"2.5\" is not a whole number");
+        assert_eq!(value("1e3i"), "parse: \"1e3\" is not a whole number");
+        // A name that starts with i is still a name.
+        assert_eq!(value("2 index"), "parse: unexpected index");
+        assert_eq!(value("a 2i"), "parse: unexpected 2i");
     }
 
     #[test]
