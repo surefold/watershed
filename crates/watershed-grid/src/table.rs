@@ -837,6 +837,97 @@ impl Table {
         Ok(())
     }
 
+    /// The rows on `count` lines of the view from line `start` (group lines
+    /// are passed over).
+    fn rows_on(&self, start: usize, count: usize) -> impl Iterator<Item = u32> + '_ {
+        let end = start.saturating_add(count).min(self.view.len());
+        self.view[start.min(end)..end]
+            .iter()
+            .copied()
+            .filter(|&entry| entry & GROUP == 0)
+    }
+
+    /// A block of cells, as tab-separated text for the clipboard: these
+    /// columns, over `count` lines of the view from line `start`.
+    pub fn range_tsv(&self, start: usize, count: usize, cols: &[usize]) -> String {
+        let mut out = String::new();
+        for r in self.rows_on(start, count) {
+            for (k, &col) in cols.iter().filter(|&&c| c < self.cols.len()).enumerate() {
+                if k > 0 {
+                    out.push('\t');
+                }
+                match self.cell(r, col) {
+                    Value::Str(s) => out.push_str(&s.replace(['\t', '\n', '\r'], " ")),
+                    Value::Error(_) => out.push_str("#ERROR"),
+                    other => out.push_str(&other.to_string()),
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// What a block of cells comes to: how many cells, how many of them hold
+    /// numbers, and those numbers' sum, average, least and greatest:
+    /// `{"cells": 12, "numbers": 8, "sum": 40, "avg": 5, "min": 1, "max": 9}`
+    /// (the last four null when there are no numbers).
+    pub fn range_stats_json(&self, start: usize, count: usize, cols: &[usize]) -> String {
+        let (mut cells, mut numbers) = (0usize, 0usize);
+        let (mut sum, mut least, mut greatest) = (0.0, f64::INFINITY, f64::NEG_INFINITY);
+        for r in self.rows_on(start, count) {
+            for &col in cols.iter().filter(|&&c| c < self.cols.len()) {
+                cells += 1;
+                if let Value::F64(x) = self.cell(r, col) {
+                    numbers += 1;
+                    sum += x;
+                    least = least.min(*x);
+                    greatest = greatest.max(*x);
+                }
+            }
+        }
+        let mut out = format!(r#"{{"cells":{cells},"numbers":{numbers}"#);
+        let none = numbers == 0;
+        for (name, x) in [
+            ("sum", sum),
+            ("avg", sum / numbers as f64),
+            ("min", least),
+            ("max", greatest),
+        ] {
+            let _ = write!(out, r#","{name}":"#);
+            write_number(&mut out, if none { f64::NAN } else { x });
+        }
+        out.push('}');
+        out
+    }
+
+    /// Sets every cell of a block to what was typed, as one step to undo.
+    /// Returns how many were set and how many were passed over (calculated
+    /// columns, and columns the text does not read as).
+    pub fn fill(
+        &mut self,
+        start: usize,
+        count: usize,
+        cols: &[usize],
+        text: &str,
+    ) -> (usize, usize) {
+        let keys: Vec<String> = self
+            .rows_on(start, count)
+            .map(|r| self.keys[r as usize].clone())
+            .collect();
+        let (mut set, mut skipped) = (0, 0);
+        self.begin_edits();
+        for key in &keys {
+            for &col in cols {
+                match self.set_cell(key, col, text) {
+                    Ok(()) => set += 1,
+                    Err(_) => skipped += 1,
+                }
+            }
+        }
+        self.end_edits();
+        (set, skipped)
+    }
+
     /// The rows with these keys, in the view's order, as tab-separated text
     /// for the clipboard: the key, then each of `cols`.
     pub fn tsv(&self, keys: &HashSet<&str>, cols: &[usize]) -> String {

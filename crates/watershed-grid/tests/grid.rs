@@ -919,3 +919,34 @@ fn a_big_tables_group_totals_are_added_up_by_the_grid_and_cost_the_graph_nothing
     // No history of a total the graph does not keep.
     assert!(tables[1].trends_json(0, 1, 1, 8).starts_with("[null"));
 }
+
+#[test]
+fn a_block_of_cells_can_be_copied_added_up_and_filled() {
+    let mut t = orders();
+    t.set_sort(&[(QTY, false)]).unwrap();
+    t.update();
+    // By qty: o-2 (1), o-1 (2), o-4 (3), o-3 (4), o-5 (6). Lines 1 to 3, qty and price.
+    assert_eq!(t.range_tsv(1, 3, &[QTY, PRICE]), "2\t10\n3\t7\n4\t2.5\n");
+    assert_eq!(
+        t.range_stats_json(1, 3, &[QTY, PRICE]),
+        r#"{"cells":6,"numbers":6,"sum":28.5,"avg":4.75,"min":2,"max":10}"#
+    );
+    assert_eq!(
+        t.range_stats_json(0, 2, &[REGION]),
+        r#"{"cells":2,"numbers":0,"sum":null,"avg":null,"min":null,"max":null}"#
+    );
+    // Filling passes over the calculated column, and is one step to undo.
+    assert_eq!(t.fill(1, 2, &[PRICE, LINE], "1"), (2, 2));
+    t.update();
+    assert_eq!(t.value("o-1", PRICE).unwrap().to_string(), "1");
+    assert_eq!(t.value("o-4", PRICE).unwrap().to_string(), "1");
+    assert_eq!(t.undo(), Ok(Some("2 of 2 cells".into())));
+    t.update();
+    assert_eq!(t.totals_json(), "[null,16,10,62]");
+    // Group lines are passed over.
+    t.set_group(Some(REGION)).unwrap();
+    t.update();
+    t.expand_all(true);
+    // Lines: APAC, o-4, EU, o-1, o-3, ...
+    assert_eq!(t.range_tsv(0, 4, &[QTY]), "3\n2\n");
+}

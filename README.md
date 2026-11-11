@@ -191,7 +191,11 @@ menu lists its values to tick.
 
 Edits can be undone and done again (a paste is one step), a column's total
 can be changed from its menu, and cells copy and paste as tab-separated
-text, to and from a spreadsheet.
+text, to and from a spreadsheet. Dragging over cells, or Shift with the
+arrow keys, picks out a block: it copies, takes a paste, fills with one
+value, and the page shows its count, sum, average, least and greatest,
+kept current as prices move. The grid names its rows, cells and headers for
+a screen reader and says what is in the cell the focus moves to.
 
 While a filter is on, totals are of the rows that pass it, added up the
 plain way; the graph's totals are of every row.
