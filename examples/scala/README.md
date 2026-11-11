@@ -8,7 +8,7 @@ sbt run      # builds the Rust library and its JVM bindings, runs src/main/scala
 sbt test     # the same, then runs src/test/scala/WatershedTest.scala
 ```
 
-It needs Rust 1.88 or later (`cargo`), a JDK from 21 up, Gradle and sbt.
+It needs Rust 1.88 or later (`cargo`), a JDK from 22 up, Gradle and sbt.
 Gradle is there because the bindings are generated as Kotlin and compiled
 in `../kotlin`; sbt runs that and takes the classes.
 
@@ -81,9 +81,10 @@ A node that could not be calculated (a division by zero, say) makes
 
 ## What is not here yet
 
-- The same as for Kotlin (`../kotlin/README.md`): each call into the engine
-  costs about 10 µs through JNA, so use `defineAll` and `setAll` for
-  thousands of nodes or prices; rows still go one `upsert` at a time; no
-  groupings or history; nothing packaged as a jar.
+- The same as for Kotlin (`../kotlin/README.md`): setting and reading a
+  `Double`, `stabilize()` and `setAll` are direct calls and as fast as from
+  Rust; everything else costs about 10 µs a call, so build with
+  `defineAll`; rows go one `upsert` at a time; no groupings or history;
+  nothing packaged as a jar.
 - The build needs Gradle as well as sbt. Bindings generated as Java, or a
   published jar of the Kotlin ones, would remove that.

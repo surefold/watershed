@@ -9,7 +9,7 @@ gradle test     # the same, then runs src/test/kotlin/WatershedTest.kt
 gradle benchmark  # times the engine's benchmark graph from Kotlin
 ```
 
-It needs Rust 1.88 or later (`cargo`), a JDK from 21 up, and Gradle. The first
+It needs Rust 1.88 or later (`cargo`), a JDK from 22 up, and Gradle. The first
 run downloads UniFFI and compiles it, which takes a minute; after that only
 what changed is rebuilt.
 
@@ -63,38 +63,45 @@ throw a `WatershedException` with the reason; `g.getOrNull(node)` gives
 
 `gradle benchmark` builds the engine's benchmark graph (about a million
 nodes) from Kotlin and times the same updates as
-`cargo run --release --example benchmark`. Side by side on one machine, run
-one after the other while it was busy with other work, so read them as a
-comparison and not as absolute numbers:
+`cargo run --release --example benchmark`. Side by side on one machine, one
+after the other:
 
 | | from Rust | from Kotlin |
 |---|---|---|
-| build the graph | 1.2 s | 3.6 s (in calls of 10,000 nodes) |
-| one price changes | 240 µs | 300 µs |
-| 1% of prices change together | 9.7 ms | 13.7 ms (one `setAll`) |
-| read one `Double` | | 7 µs |
-| one set and one update that changes nothing | | 26 µs |
+| one price changes | 91 µs | 93 µs |
+| 1% of prices change together | 4.2 ms | 4.2 ms (one `setAll`) |
+| 10% of prices change together | 8.8 ms | 7.0 ms |
+| read one `Double` | | 0.5 µs |
+| one set and one update that changes nothing | | 0.2 µs |
+| build the graph | 0.8 s | 1.2 s (in calls of 10,000 nodes) |
 
-The engine does the same work either way; what Kotlin adds is the cost of
-each call into it, about 10 µs through JNA. So:
+(The machine was doing other work, so the rows move by a tenth or two from
+run to run; Rust and Kotlin are level.)
 
-- An update is a set and a `stabilize()`: two calls, which is small beside
-  anything but the smallest update.
-- Thousands of calls add up. Building the million nodes one `define` at a
-  time took 63 s; `defineAll` in batches of 10,000 took 3.6 s. `setAll`
-  does the same for a batch of prices.
-- A `Double` is set and read as a plain number, which is the fast path;
-  other types go as a `Value`, which costs a few times more per call.
+It was not always so. The generated bindings go through JNA, which costs
+about 10 µs a call: one set and one update that changed nothing took 26 µs.
+So the calls a running program makes over and over (set a `Double`, read a
+`Double`, `stabilize()`, `setAll`) do not go through them. They call plain
+C functions in the Rust library through the JDK's foreign function API,
+which takes tens of nanoseconds. Everything else (building the graph,
+collections, other types of value) still goes through the generated
+bindings, so:
 
-If calls of 10 µs are too slow for what you are doing, the bindings want
-JNI or the JDK's foreign function API underneath instead of JNA; the typed
-layer on top would not change.
+- Build with `defineAll` when there are thousands of nodes. One `define`
+  at a time took 63 s for the million; in batches of 10,000, about a
+  second.
+- Values that are not a `Double` are set and read at about 10 µs each.
+- Rows of a collection go one `upsert` at a time, at that cost.
 
 ## How it fits together
 
 - `crates/watershed-jvm` is a Rust library that wraps the engine in a few
   plain types. [UniFFI](https://mozilla.github.io/uniffi-rs/) writes the
   Kotlin classes that call it, through [JNA](https://github.com/java-native-access/jna).
+- `crates/watershed-jvm/src/fast.rs` and `kotlin/.../Fast.kt` are the
+  direct calls: four C functions, and the JVM side that calls them through
+  `java.lang.foreign`. A direct call only says whether it worked; if not,
+  the same call is made through the generated bindings, which explain.
 - `crates/watershed-jvm/kotlin/` is the typed layer, written by hand over
   those generated calls: `Expr<T>`, `Node<T>`, `Input<T>`, `Field<T>` and
   the operators. An expression crosses into the engine as a list of steps

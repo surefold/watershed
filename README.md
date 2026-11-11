@@ -597,6 +597,8 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **Decimals in the grid:** it has no decimal columns yet. Decimals hold
   28 digits; nothing holds more.
 - **Bindings:** the JVM ones are a first cut (no groupings or history, one
-  call per row, about 10 µs a call through JNA, nothing packaged as a jar), the Python package is not
+  call per row, nothing packaged as a jar). Updating from Kotlin or Scala
+  is as fast as from Rust; building a graph and values that are not a
+  `Double` cost about 10 µs a call, the Python package is not
   published, and there is no cluster.
   Formulas as text have no whole-number constants yet.

@@ -15,8 +15,9 @@
 //! val now: Double = g[total]
 //! ```
 //!
-//! That is the typed layer in `kotlin/`, written by hand over the calls
-//! here. In it an expression has a type, so adding a number to a string
+//! That is the typed layer in `kotlin/` (and `scala/`), written by hand
+//! over the calls here, which is why the objects here are `RawGraph` and
+//! `RawCollection`: the typed layers have `Graph` and `Collection`. In it an expression has a type, so adding a number to a string
 //! does not compile, as in Rust. The calls here deal in [`Value`]s, node
 //! numbers and expressions as lists of [`Op`]s, and have plainer names
 //! (`input_value`, `define_expression`...) so that the typed layer can have
@@ -37,6 +38,8 @@ use watershed_core::{
     AggregateOp, BinOp, CalcError, CalcType, Collection as CoreCollection, Decimal, Ir, NodeId,
     Rounding, Type, UnOp,
 };
+
+mod fast;
 
 uniffi::setup_scaffolding!();
 
@@ -353,7 +356,7 @@ pub struct Report {
 /// The JVM names a node by a number. The engine's own ids cannot be made
 /// from a number outside it, so each node handed out is kept here and its
 /// place in this list is the number.
-struct State {
+pub(crate) struct State {
     graph: watershed_core::Graph,
     handed_out: Vec<NodeId>,
     numbers: HashMap<NodeId, i32>,
@@ -372,7 +375,7 @@ impl State {
     }
 
     /// The node the JVM means by this number.
-    fn node(&self, number: i32) -> Result<NodeId> {
+    pub(crate) fn node(&self, number: i32) -> Result<NodeId> {
         let found = usize::try_from(number)
             .ok()
             .and_then(|at| self.handed_out.get(at));
@@ -398,12 +401,12 @@ impl std::ops::DerefMut for State {
 
 /// A graph of inputs and calculated nodes.
 #[derive(uniffi::Object)]
-pub struct Graph {
+pub struct RawGraph {
     inner: Mutex<State>,
 }
 
-impl Graph {
-    fn lock(&self) -> MutexGuard<'_, State> {
+impl RawGraph {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
         // A panic while the graph was held would be a bug in the engine;
         // the graph is still the best there is to carry on with.
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
@@ -411,16 +414,22 @@ impl Graph {
 }
 
 #[uniffi::export]
-impl Graph {
+impl RawGraph {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        Arc::new(Graph {
+        Arc::new(RawGraph {
             inner: Mutex::new(State {
                 graph: watershed_core::Graph::new(),
                 handed_out: Vec::new(),
                 numbers: HashMap::new(),
             }),
         })
+    }
+
+    /// Where this graph is, for the fast calls in `fast.rs`. It is good for
+    /// as long as the object it was asked of is alive.
+    pub fn address(&self) -> i64 {
+        self as *const RawGraph as i64
     }
 
     /// Adds an input with a starting value. Returns the node's number.
@@ -639,9 +648,9 @@ impl Graph {
     }
 
     /// A new, empty keyed table of rows in this graph.
-    pub fn collection(self: Arc<Self>, name: String) -> Arc<Collection> {
+    pub fn collection(self: Arc<Self>, name: String) -> Arc<RawCollection> {
         let inner = CoreCollection::new(&self.lock(), &name);
-        Arc::new(Collection {
+        Arc::new(RawCollection {
             graph: self,
             inner: Mutex::new(inner),
             fields: Mutex::new(HashMap::new()),
@@ -652,14 +661,14 @@ impl Graph {
 /// A keyed table of rows, with fields, calculated columns and totals that
 /// update by only the rows that change.
 #[derive(uniffi::Object)]
-pub struct Collection {
-    graph: Arc<Graph>,
+pub struct RawCollection {
+    graph: Arc<RawGraph>,
     inner: Mutex<CoreCollection>,
     /// What each field holds, to fit whole numbers to number fields.
     fields: Mutex<HashMap<String, Type>>,
 }
 
-impl Collection {
+impl RawCollection {
     fn lock(&self) -> MutexGuard<'_, CoreCollection> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -679,9 +688,9 @@ impl Collection {
 }
 
 #[uniffi::export]
-impl Collection {
+impl RawCollection {
     /// The graph this collection is in.
-    pub fn graph(&self) -> Arc<Graph> {
+    pub fn graph(&self) -> Arc<RawGraph> {
         self.graph.clone()
     }
 

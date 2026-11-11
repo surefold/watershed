@@ -3,7 +3,7 @@
 //     sbt run     builds the Rust library and its JVM bindings, runs Main.scala
 //     sbt test    the same, then runs the tests
 //
-// It needs Rust (cargo, 1.88 or later), a JDK (21 or later), Gradle and sbt.
+// It needs Rust (cargo, 1.88 or later), a JDK (22 or later), Gradle and sbt.
 // Gradle is there because the bindings are generated as Kotlin (by UniFFI)
 // and compiled in ../kotlin; this build takes the classes from there.
 
