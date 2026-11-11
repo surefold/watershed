@@ -1,193 +1,239 @@
-/* The grid. Colours come from the page's tokens (see index.html), with fallbacks. */
+/* The grid. Colours come from the page's tokens (see index.html), with fallbacks.
+   The look: one quiet surface, hairlines between rows and none between columns,
+   colour kept for what is live (a moving number, the focus, what is picked out). */
 .wg {
-  --wg-line: var(--rule, #d3dcdc);
   --wg-surface: var(--surface, #fff);
-  --wg-band: var(--band, #f6f8f8);
-  --wg-head: var(--head, #e8eeee);
   --wg-ink: var(--ink, #13242c);
   --wg-muted: var(--muted, #56676e);
   --wg-accent: var(--water, #1d6c88);
-  --wg-select: var(--select, #d9ecf2);
-  --wg-up: var(--up, rgba(44, 140, 88, 0.42));
-  --wg-down: var(--down, rgba(196, 95, 39, 0.42));
+  --wg-line: var(--rule, #d3dcdc);
+  --wg-hair: color-mix(in srgb, var(--wg-line) 55%, var(--wg-surface));
+  --wg-wash: color-mix(in srgb, var(--wg-ink) 3.5%, var(--wg-surface));
+  --wg-hover: color-mix(in srgb, var(--wg-accent) 6%, var(--wg-surface));
+  --wg-select: color-mix(in srgb, var(--wg-accent) 13%, var(--wg-surface));
+  --wg-head: var(--wg-surface);
+  --wg-up: var(--up, rgba(44, 140, 88, 0.3));
+  --wg-down: var(--down, rgba(196, 95, 39, 0.3));
+  --wg-good: var(--rain, #2c8c58);
+  --wg-bad: var(--sediment, #c45f27);
+  position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   border: 1px solid var(--wg-line);
-  border-radius: 8px;
+  border-radius: 12px;
   overflow: hidden;
   background: var(--wg-surface);
   color: var(--wg-ink);
   font: 13px/1 var(--body, system-ui, sans-serif);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--wg-ink) 6%, transparent), 0 12px 32px -18px color-mix(in srgb, var(--wg-ink) 30%, transparent);
 }
 .wg *, .wg *::before { box-sizing: border-box; }
 
-.wg-head, .wg-foot { overflow: hidden; background: var(--wg-head); }
-.wg-head { border-bottom: 1px solid var(--wg-line); }
-.wg-foot { border-top: 1px solid var(--wg-line); }
+/* ---------------------------------------------------------------- header */
+
+.wg-head, .wg-foot { position: relative; overflow: hidden; background: var(--wg-head); z-index: 5; }
+.wg-head { border-bottom: 1px solid var(--wg-line); transition: box-shadow 0.2s; }
+.wg-scrolled .wg-head { box-shadow: 0 6px 12px -8px color-mix(in srgb, var(--wg-ink) 35%, transparent); }
+.wg-foot { border-top: 1px solid var(--wg-line); box-shadow: 0 -6px 12px -10px color-mix(in srgb, var(--wg-ink) 30%, transparent); }
 /* Room to scroll as far as the body does, past its scrollbar. */
 .wg-hrow, .wg-frow, .wg-foot .wg-row { display: flex; width: calc(var(--wg-width) + 32px); }
 
 .wg-hcell {
-  position: relative; flex: none; display: flex; align-items: center; gap: 5px;
-  height: 34px; padding: 0 12px;
-  font: 600 11px/1 var(--mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.06em;
+  position: relative; flex: none; display: flex; align-items: center; gap: 6px;
+  height: 38px; padding: 0 14px;
+  font: 600 10.5px/1 var(--mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.09em;
   color: var(--wg-muted); background: var(--wg-head);
-  cursor: pointer; user-select: none;
+  cursor: pointer; user-select: none; touch-action: none;
+  transition: color 0.12s, background-color 0.12s;
 }
-.wg-hcell.wg-pin { cursor: default; }
 .wg-hcell.wg-num { justify-content: flex-end; }
-.wg-hcell:not(.wg-pin):hover { color: var(--wg-ink); }
+.wg-hcell:hover { color: var(--wg-ink); background: var(--wg-wash); }
+.wg-hcell[aria-sort="ascending"], .wg-hcell[aria-sort="descending"] { color: var(--wg-ink); }
 .wg-hname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wg-fx { color: var(--wg-accent); font-style: italic; text-transform: none; }
-.wg-sort { color: var(--wg-accent); font-size: 10px; }
+.wg-fx { color: var(--wg-accent); font: italic 600 11px/1 var(--body, system-ui, sans-serif); text-transform: none; letter-spacing: 0; opacity: 0.8; }
+.wg-sort { color: var(--wg-accent); font-size: 9px; letter-spacing: 0; }
 .wg-sort:empty { display: none; }
-.wg-resize { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 3; touch-action: none; }
-.wg-resize::before { content: ""; position: absolute; left: 4px; top: 9px; bottom: 9px; width: 1px; background: var(--wg-line); }
-.wg-resize:hover::before { background: var(--wg-accent); width: 2px; left: 3px; }
 
-.wg-fcell { flex: none; padding: 0 5px 6px; background: var(--wg-head); }
-.wg-fcell input {
-  width: 100%; height: 24px; padding: 0 7px;
-  border: 1px solid var(--wg-line); border-radius: 4px;
-  background: var(--wg-surface); color: var(--wg-ink);
-  font: 12px/1 var(--mono, ui-monospace, monospace);
+/* The edge of a header: nothing until the pointer is near, then a handle to drag. */
+.wg-resize { position: absolute; top: 0; right: -5px; width: 11px; height: 100%; cursor: col-resize; z-index: 3; touch-action: none; }
+.wg-resize::before { content: ""; position: absolute; left: 5px; top: 11px; bottom: 11px; width: 1px; background: var(--wg-line); opacity: 0; transition: opacity 0.12s; }
+.wg-head:hover .wg-resize::before { opacity: 1; }
+.wg-resize:hover::before { background: var(--wg-accent); width: 3px; left: 4px; top: 6px; bottom: 6px; border-radius: 2px; }
+
+/* The menu button takes no room: it appears over the far end of the header
+   from the name (the near end for numbers, whose names sit on the right). */
+.wg-more {
+  position: absolute; top: 8px; right: 8px; width: 22px; height: 22px; padding: 0;
+  border: 0; border-radius: 6px; background: var(--wg-wash); color: var(--wg-muted);
+  font: 700 14px/1 var(--body, system-ui, sans-serif); cursor: pointer; opacity: 0; transition: opacity 0.12s;
+  box-shadow: 0 0 0 4px var(--wg-wash);
 }
-.wg-fcell input::placeholder { color: var(--wg-muted); opacity: 0.55; }
-.wg-fcell input:focus-visible, .wg-editor:focus-visible { outline: 2px solid var(--wg-accent); outline-offset: -1px; }
-.wg-fcell input.wg-bad { border-color: var(--sediment, #c45f27); background: color-mix(in srgb, var(--sediment, #c45f27) 12%, var(--wg-surface)); }
+.wg-hcell.wg-num .wg-more { right: auto; left: 8px; }
+.wg-hcell:hover .wg-more, .wg-more:focus-visible { opacity: 1; }
+.wg-more:hover { background: color-mix(in srgb, var(--wg-ink) 12%, var(--wg-surface)); color: var(--wg-ink); }
+.wg-more:focus-visible { outline: 2px solid var(--wg-accent); }
+@media (hover: none) { .wg-more { opacity: 0.7; } }
 
-.wg-body { position: relative; overflow: auto; min-height: 0; outline: none; overscroll-behavior: contain; }
+/* Filters: quiet until used. */
+.wg-fcell { flex: none; padding: 0 6px 8px; background: var(--wg-head); }
+.wg-fcell input {
+  width: 100%; height: 26px; padding: 0 8px;
+  border: 1px solid transparent; border-radius: 6px;
+  background: var(--wg-wash); color: var(--wg-ink);
+  font: 12px/1 var(--mono, ui-monospace, monospace);
+  transition: border-color 0.12s, background-color 0.12s;
+}
+.wg-fcell input::placeholder { color: var(--wg-muted); opacity: 0.45; }
+.wg-fcell input:hover { border-color: var(--wg-line); }
+.wg-fcell input:not(:placeholder-shown) { background: var(--wg-select); border-color: color-mix(in srgb, var(--wg-accent) 45%, transparent); }
+.wg-fcell input:focus-visible { outline: 2px solid var(--wg-accent); outline-offset: -1px; background: var(--wg-surface); }
+.wg-fcell input.wg-bad { border-color: var(--wg-bad); background: color-mix(in srgb, var(--wg-bad) 12%, var(--wg-surface)); }
+
+/* ------------------------------------------------------------------ rows */
+
+.wg-body {
+  position: relative; overflow: auto; min-height: 0; outline: none; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--wg-muted) 45%, transparent) transparent;
+}
+.wg-body:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--wg-accent) 35%, transparent); }
 .wg-spacer { width: var(--wg-width); }
-.wg-rows { position: absolute; inset: 0 auto auto 0; width: var(--wg-width); }
-.wg-empty { position: absolute; inset: 40px 0 auto 0; text-align: center; color: var(--wg-muted); }
+.wg-rows { position: absolute; inset: 0 auto auto 0; width: var(--wg-width); user-select: none; }
+.wg-empty { position: absolute; inset: 56px 0 auto 0; text-align: center; color: var(--wg-muted); font-size: 14px; }
 
 .wg-row { display: flex; height: var(--wg-row); width: var(--wg-width); background: var(--wg-surface); }
 .wg-rows .wg-row { position: absolute; top: 0; left: 0; }
-.wg-row.wg-odd { background: var(--wg-band); }
-.wg-rows .wg-row:hover { background: color-mix(in srgb, var(--wg-select) 45%, var(--wg-surface)); }
+.wg-rows .wg-row:hover { background: var(--wg-hover); }
 .wg-row.wg-selected, .wg-rows .wg-row.wg-selected:hover { background: var(--wg-select); }
-.wg-row.wg-group { background: var(--wg-head); font-weight: 600; cursor: default; }
-.wg-row.wg-group .wg-pin { cursor: pointer; }
-.wg-row.wg-total { background: var(--wg-head); font-weight: 700; }
+.wg-row.wg-selected .wg-cell:first-child { box-shadow: inset 3px 0 0 var(--wg-accent); color: var(--wg-ink); }
 
 .wg-cell {
-  position: relative; flex: none; height: 100%; padding: 0 12px;
+  position: relative; flex: none; height: 100%; padding: 0 14px;
   line-height: var(--wg-row);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  border-bottom: 1px solid color-mix(in srgb, var(--wg-line) 55%, transparent);
+  border-bottom: 1px solid var(--wg-hair);
 }
 .wg-cell.wg-num { text-align: right; font: 12.5px/var(--wg-row) var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
-.wg-group .wg-cell.wg-num, .wg-total .wg-cell.wg-num { font-weight: 600; }
-.wg-cell.wg-calc { color: color-mix(in srgb, var(--wg-ink) 86%, var(--wg-accent)); }
-.wg-cell.wg-neg { color: var(--sediment, #c45f27); }
-.wg-cell.wg-pos { color: var(--rain, #2c8c58); }
-.wg-cell.wg-focus { box-shadow: inset 0 0 0 2px var(--wg-accent); }
+.wg-cell.wg-calc { color: color-mix(in srgb, var(--wg-ink) 82%, var(--wg-accent)); }
+.wg-cell.wg-neg { color: var(--wg-bad); }
+.wg-cell.wg-pos { color: var(--wg-good); }
+.wg-cell.wg-range { background: var(--wg-select); border-bottom-color: color-mix(in srgb, var(--wg-accent) 16%, var(--wg-surface)); }
+.wg-cell.wg-focus { box-shadow: inset 0 0 0 2px var(--wg-accent); border-radius: 5px; }
 .wg-cell.wg-editing { overflow: visible; padding: 0; }
 .wg-editor {
-  position: absolute; inset: 0; width: 100%; height: 100%; padding: 0 11px;
-  border: 0; background: var(--wg-surface); color: var(--wg-ink); font: inherit; text-align: inherit;
+  position: absolute; inset: 0; width: 100%; height: 100%; padding: 0 13px;
+  border: 0; border-radius: 5px; background: var(--wg-surface); color: var(--wg-ink); font: inherit; text-align: inherit;
+  box-shadow: 0 0 0 2px var(--wg-accent), 0 6px 18px -6px color-mix(in srgb, var(--wg-ink) 45%, transparent);
+}
+.wg-editor:focus-visible { outline: none; }
+
+/* A group's line: a chevron that turns, the group's name, how many rows. */
+.wg-row.wg-group { background: var(--wg-wash); font-weight: 600; }
+.wg-rows .wg-row.wg-group:hover { background: color-mix(in srgb, var(--wg-accent) 8%, var(--wg-wash)); }
+.wg-group .wg-cell { border-bottom-color: var(--wg-line); }
+.wg-group .wg-cell.wg-num { font-weight: 600; }
+.wg-group .wg-cell:first-child { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--wg-ink); font: 600 13px/1 var(--body, system-ui, sans-serif); }
+.wg-group .wg-cell:first-child::before {
+  content: ""; flex: none; width: 6px; height: 6px; margin: 0 2px 0 1px;
+  border: solid var(--wg-muted); border-width: 0 1.5px 1.5px 0;
+  transform: rotate(-45deg); transition: transform 0.15s;
+}
+.wg-group[aria-expanded="true"] .wg-cell:first-child::before { transform: rotate(45deg) translate(-1px, -1px); }
+.wg-gname { overflow: hidden; text-overflow: ellipsis; }
+.wg-gcount {
+  flex: none; padding: 2px 7px; border-radius: 999px;
+  background: color-mix(in srgb, var(--wg-ink) 8%, transparent); color: var(--wg-muted);
+  font: 600 10.5px/1.2 var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums;
 }
 
-/* The key column stays put while the rest scrolls sideways. */
-.wg-pin { position: sticky; left: 0; z-index: 2; background: inherit; border-right: 1px solid var(--wg-line); }
-.wg-cell.wg-pin { font: 12px/var(--wg-row) var(--mono, ui-monospace, monospace); color: var(--wg-muted); }
-.wg-group .wg-cell.wg-pin { color: var(--wg-ink); font-weight: 600; }
-.wg-total .wg-cell.wg-pin { color: var(--wg-ink); font-weight: 700; font-family: var(--body, system-ui, sans-serif); overflow: visible; }
+/* The totals. */
+.wg-row.wg-total { background: var(--wg-head); height: calc(var(--wg-row) + 6px); }
+.wg-total .wg-cell { border-bottom: 0; line-height: calc(var(--wg-row) + 6px); font-weight: 700; cursor: default; }
+.wg-total .wg-cell.wg-num { font-weight: 600; line-height: calc(var(--wg-row) + 6px); }
+.wg-total .wg-cell:first-child { font: 600 10.5px/calc(var(--wg-row) + 6px) var(--mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.09em; color: var(--wg-muted); overflow: visible; }
+
+/* Pinned columns stay put while the rest scrolls sideways; the last one casts
+   a shadow once something has scrolled under it. */
+.wg-pin { position: sticky; left: 0; z-index: 2; background: inherit; }
+.wg-hcell.wg-pin, .wg-fcell.wg-pin { z-index: 4; background: var(--wg-head); }
+.wg-cell.wg-pin:first-child { font: 12px/var(--wg-row) var(--mono, ui-monospace, monospace); color: var(--wg-muted); }
+.wg-pin-edge { border-right: 1px solid var(--wg-hair); transition: box-shadow 0.2s; }
+.wg-scrolled-x .wg-pin-edge { border-right-color: var(--wg-line); box-shadow: 8px 0 12px -10px color-mix(in srgb, var(--wg-ink) 55%, transparent); }
+.wg-row.wg-selected .wg-cell.wg-pin-edge:first-child { box-shadow: inset 3px 0 0 var(--wg-accent); }
+
+/* A cell with its recent movement drawn beside the number. */
+.wg-cell.wg-trend { display: flex; align-items: center; gap: 10px; }
+.wg-cell.wg-trend > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wg-spark { flex: none; width: 44px; height: 16px; overflow: visible; color: color-mix(in srgb, var(--wg-muted) 60%, transparent); }
+.wg-spark path { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.wg-spark.wg-rose { color: var(--wg-good); }
+.wg-spark.wg-fell { color: var(--wg-bad); }
+
+/* ------------------------------------------------------------ column menu */
+
+.wg-menu {
+  position: absolute; z-index: 20; width: 228px; padding: 6px; overflow: auto;
+  background: var(--wg-surface); color: var(--wg-ink);
+  border: 1px solid var(--wg-line); border-radius: 12px;
+  box-shadow: 0 2px 6px color-mix(in srgb, #000 8%, transparent), 0 18px 40px -12px color-mix(in srgb, #000 35%, transparent);
+  font: 13px/1.3 var(--body, system-ui, sans-serif);
+  animation: wg-menu-in 0.12s ease-out;
+  scrollbar-width: thin;
+}
+@keyframes wg-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+.wg-menu hr { border: 0; border-top: 1px solid var(--wg-hair); margin: 6px 2px; }
+.wg-item, .wg-check { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 9px; border: 0; border-radius: 7px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.wg-item:hover, .wg-check:hover, .wg-item:focus-visible { background: var(--wg-wash); outline: none; }
+.wg-item:focus-visible { box-shadow: inset 0 0 0 2px var(--wg-accent); }
+.wg-check input { accent-color: var(--wg-accent); margin: 0; }
+.wg-count { margin-left: auto; color: var(--wg-muted); font: 11.5px/1 var(--mono, ui-monospace, monospace); }
+.wg-menu-title { padding: 6px 9px 3px; font: 600 10px/1.3 var(--mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.1em; color: var(--wg-muted); }
+.wg-menu-note { padding: 4px 9px; color: var(--wg-muted); font-size: 12.5px; }
+.wg-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 9px 3px; }
+.wg-chip { padding: 4px 10px; border: 1px solid var(--wg-line); border-radius: 999px; background: none; color: inherit; font: 11.5px/1.3 var(--mono, ui-monospace, monospace); cursor: pointer; transition: border-color 0.12s, background-color 0.12s; }
+.wg-chip:hover { border-color: var(--wg-accent); }
+.wg-chip[aria-pressed="true"] { background: var(--wg-accent); color: var(--wg-surface); border-color: var(--wg-accent); }
+.wg-chip:focus-visible { outline: 2px solid var(--wg-accent); outline-offset: 1px; }
+
+/* -------------------------------------------- moving a column; a cell block */
+
+.wg-moving-column, .wg-moving-column * { cursor: grabbing !important; user-select: none; }
+.wg-cell.wg-moving, .wg-fcell.wg-moving { background: color-mix(in srgb, var(--wg-accent) 11%, var(--wg-surface)); }
+.wg-hcell.wg-moving { background: color-mix(in srgb, var(--wg-accent) 20%, var(--wg-surface)); color: var(--wg-ink); box-shadow: inset 0 -3px 0 var(--wg-accent); }
+.wg-moving-column .wg-more { opacity: 0; }
+.wg-ranging, .wg-ranging * { cursor: cell !important; }
+
+/* Said to a screen reader as the focus moves; not shown. */
+.wg-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   .wg { --wg-up: transparent; --wg-down: transparent; }
+  .wg-menu { animation: none; }
+  .wg *, .wg *::before { transition: none !important; }
 }
 
-/* Pinned columns sit at their own offset; the last one draws the edge. */
-.wg { position: relative; }
-.wg-pin { border-right: 0; }
-.wg-pin-edge { border-right: 1px solid var(--wg-line); box-shadow: 4px 0 6px -4px color-mix(in srgb, var(--wg-ink) 28%, transparent); }
-.wg-hcell.wg-pin { z-index: 4; }
-.wg-fcell.wg-pin { position: sticky; z-index: 4; }
+/* ------------------------------------- the chart of group totals (chart.js) */
 
-/* Column menu and drag marker. */
-.wg-more {
-  flex: none; margin-left: auto; width: 18px; height: 22px; padding: 0;
-  border: 0; border-radius: 4px; background: transparent; color: var(--wg-muted);
-  font: 700 14px/1 var(--body, system-ui, sans-serif); cursor: pointer; opacity: 0;
-}
-.wg-hcell.wg-num .wg-more { margin-left: 0; order: -1; margin-right: auto; }
-.wg-hcell:hover .wg-more, .wg-more:focus-visible { opacity: 1; }
-.wg-more:hover { background: color-mix(in srgb, var(--wg-ink) 10%, transparent); color: var(--wg-ink); }
-.wg-more:focus-visible { outline: 2px solid var(--wg-accent); }
-@media (hover: none) { .wg-more { opacity: 0.7; } }
-.wg-head { position: relative; }
-.wg-menu {
-  position: absolute; z-index: 20; width: 220px; padding: 6px; overflow: auto;
-  background: var(--wg-surface); color: var(--wg-ink);
-  border: 1px solid var(--wg-line); border-radius: 8px;
-  box-shadow: 0 10px 28px color-mix(in srgb, #000 22%, transparent);
-  font: 13px/1.3 var(--body, system-ui, sans-serif);
-}
-.wg-menu hr { border: 0; border-top: 1px solid var(--wg-line); margin: 5px 0; }
-.wg-item, .wg-check { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 5px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.wg-item:hover, .wg-check:hover, .wg-item:focus-visible { background: var(--wg-band); outline: none; }
-.wg-item:focus-visible { box-shadow: inset 0 0 0 2px var(--wg-accent); }
-.wg-check input { accent-color: var(--wg-accent); margin: 0; }
-.wg-menu-title { padding: 4px 8px 2px; font: 600 10.5px/1.3 var(--mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.08em; color: var(--wg-muted); }
-
-/* A cell with its recent movement drawn beside the number. */
-.wg-cell.wg-trend { display: flex; align-items: center; gap: 8px; }
-.wg-cell.wg-trend > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.wg-spark { flex: none; width: 44px; height: 16px; overflow: visible; color: var(--wg-muted); }
-.wg-spark path { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
-.wg-spark.wg-rose { color: var(--rain, #2c8c58); }
-.wg-spark.wg-fell { color: var(--sediment, #c45f27); }
-
-/* The chart of group totals (chart.js). */
-.gc { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 8px; min-height: 0; height: 100%; }
+.gc { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 10px; min-height: 0; height: 100%; }
 .gc-figure { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.gc-total { font: 600 1.25rem/1.1 var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; color: var(--ink, #13242c); }
+.gc-total { font: 600 1.4rem/1.1 var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; color: var(--ink, #13242c); }
 .gc-caption { font-size: 12px; color: var(--muted, #56676e); text-align: right; }
 .gc-line { width: 100%; height: 40px; overflow: visible; }
 .gc-line path { fill: none; stroke: var(--water, #1d6c88); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
-.gc-bars { display: grid; gap: 2px; overflow: auto; min-height: 0; }
+.gc-bars { display: grid; gap: 1px; overflow: auto; min-height: 0; align-content: start; scrollbar-width: thin; }
 .gc-row {
-  display: grid; grid-template-columns: minmax(64px, 30%) minmax(0, 1fr) auto; align-items: center; gap: 8px;
-  height: 22px; padding: 0 4px; border: 0; border-radius: 4px; background: none; color: inherit; cursor: pointer; text-align: left;
-  font: 12.5px/1 var(--body, system-ui, sans-serif);
+  display: grid; grid-template-columns: minmax(64px, 30%) minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  height: 24px; padding: 0 6px; border: 0; border-radius: 6px; background: none; color: inherit; cursor: pointer; text-align: left;
+  font: 12.5px/1 var(--body, system-ui, sans-serif); transition: background-color 0.12s;
 }
-.gc-row:hover, .gc-row:focus-visible { background: var(--band, #f6f8f8); outline: none; }
+.gc-row:hover, .gc-row:focus-visible { background: color-mix(in srgb, var(--ink, #13242c) 5%, transparent); outline: none; }
 .gc-row:focus-visible { box-shadow: inset 0 0 0 2px var(--water, #1d6c88); }
 .gc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink, #13242c); }
-.gc-track { position: relative; height: 10px; }
-.gc-both .gc-track::before { content: ""; position: absolute; left: 50%; top: -4px; bottom: -4px; width: 1px; background: var(--rule, #d3dcdc); }
-.gc-bar { position: absolute; top: 0; height: 100%; min-width: 1px; background: var(--water, #1d6c88); border-radius: 0 4px 4px 0; }
+.gc-track { position: relative; height: 8px; }
+.gc-both .gc-track::before { content: ""; position: absolute; left: 50%; top: -5px; bottom: -5px; width: 1px; background: var(--rule, #d3dcdc); }
+.gc-bar { position: absolute; top: 0; height: 100%; min-width: 2px; background: var(--water, #1d6c88); border-radius: 0 4px 4px 0; transition: width 0.25s ease-out, left 0.25s ease-out; }
 .gc-bar.gc-pos { background: var(--rain, #2c8c58); }
 .gc-bar.gc-neg { background: var(--sediment, #c45f27); border-radius: 4px 0 0 4px; }
 .gc-value { font: 12px/1 var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; color: var(--muted, #56676e); min-width: 9ch; text-align: right; }
 .gc-note { margin: 0; font-size: 13px; color: var(--muted, #56676e); }
 .gc-note:empty { display: none; }
-
-.wg-count { margin-left: auto; color: var(--wg-muted); font: 11.5px/1 var(--mono, ui-monospace, monospace); }
-.wg-menu-note { padding: 4px 8px; color: var(--wg-muted); font-size: 12.5px; }
-
-.wg-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px 2px; }
-.wg-chip { padding: 3px 9px; border: 1px solid var(--wg-line); border-radius: 999px; background: none; color: inherit; font: 12px/1.3 var(--mono, ui-monospace, monospace); cursor: pointer; }
-.wg-chip:hover { border-color: var(--wg-accent); }
-.wg-chip[aria-pressed="true"] { background: var(--wg-ink); color: var(--wg-surface); border-color: var(--wg-ink); }
-.wg-chip:focus-visible { outline: 2px solid var(--wg-accent); outline-offset: 1px; }
-
-/* A pinned header or filter cell covers what scrolls under it. (`.wg-pin` takes
-   its row's background, and these rows have none of their own.) */
-.wg-hcell.wg-pin, .wg-fcell.wg-pin { background: var(--wg-head); }
-
-/* A column being dragged: it moves as the pointer does, picked out so the eye can follow it. */
-.wg-hcell { touch-action: none; }
-.wg-moving-column, .wg-moving-column * { cursor: grabbing !important; user-select: none; }
-.wg-cell.wg-moving, .wg-fcell.wg-moving { background: color-mix(in srgb, var(--wg-accent) 13%, var(--wg-surface)); }
-.wg-hcell.wg-moving { background: color-mix(in srgb, var(--wg-accent) 24%, var(--wg-head)); color: var(--wg-ink); box-shadow: inset 0 -3px 0 var(--wg-accent); }
-.wg-moving-column .wg-more { opacity: 0; }
-
-/* A block of cells picked out by dragging or Shift+arrows. */
-.wg-rows { user-select: none; }
-.wg-cell.wg-range { background: color-mix(in srgb, var(--wg-accent) 16%, var(--wg-surface)); }
-.wg-ranging, .wg-ranging * { cursor: cell !important; }
-/* Said to a screen reader as the focus moves; not shown. */
-.wg-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
