@@ -194,7 +194,7 @@ impl Grid {
         self.table.set_quick_filter(text);
     }
 
-    /// Groups rows by a text field; a negative column for no grouping.
+    /// Groups rows by a text column, a field or a formula; a negative column for no grouping.
     pub fn set_group(&mut self, col: i32) -> Result<(), JsError> {
         self.table
             .set_group(usize::try_from(col).ok())
