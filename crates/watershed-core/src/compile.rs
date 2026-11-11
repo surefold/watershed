@@ -56,6 +56,11 @@ pub(crate) enum Op {
     ToText,
     Concat,
     Join,
+    /// Any operation on one value, worked out as the tree evaluator does.
+    /// Used where no instruction is made for the exact types: decimals.
+    Un(UnOp),
+    /// Any operation on two values, worked out as the tree evaluator does.
+    Bin(BinOp),
     /// Pop this many strings and push them as a list.
     MakeList(u32),
     /// Pop a condition. True: carry on. False: jump to `otherwise`. An error:
@@ -347,6 +352,7 @@ fn decompile_general(ops: &[Op], constants: &[Value], tables: &[u32], graph: Gra
                         Op::AbsF | Op::AbsI => Some(UnOp::Abs),
                         Op::Not => Some(UnOp::Not),
                         Op::ToText => Some(UnOp::ToText),
+                        Op::Un(op) => Some(op),
                         _ => None,
                     };
                     if let Some(u) = unary {
@@ -366,6 +372,7 @@ fn decompile_general(ops: &[Op], constants: &[Value], tables: &[u32], graph: Gra
                             Op::Or => BinOp::Or,
                             Op::Concat => BinOp::Concat,
                             Op::Join => BinOp::Join,
+                            Op::Bin(op) => op,
                             Op::CmpF(c) | Op::CmpI(c) | Op::CmpS(c) | Op::CmpB(c) | Op::CmpL(c) => {
                                 match c {
                                     Cmp::Lt => BinOp::Lt,
@@ -556,6 +563,12 @@ fn eval_general(
             }),
 
             Op::ToText => unary(stack, crate::ir::to_text),
+            Op::Un(op) => unary(stack, |v| crate::ir::unary(op, v)),
+            Op::Bin(op) => {
+                let b = stack.pop().expect("well-formed program");
+                let a = stack.pop().expect("well-formed program");
+                stack.push(crate::ir::binary(op, a, b));
+            }
             Op::Concat => {
                 let result = match pop2(stack) {
                     Ok((Value::Str(x), Value::Str(y))) => crate::ir::concat(&x, &y),
@@ -640,8 +653,13 @@ impl Compiler<'_> {
             }
             Ir::Ref(r) => self.ops.push(Op::Load(r.node.0)),
             Ir::Unary(op, a) => {
-                let float = self.ty(a) == Type::F64;
+                let ty = self.ty(a);
+                let float = ty == Type::F64;
                 self.emit(a);
+                if ty == Type::Decimal || matches!(op, UnOp::ToDecimal | UnOp::ToFloat) {
+                    self.ops.push(Op::Un(*op));
+                    return;
+                }
                 self.ops.push(match (op, float) {
                     (UnOp::Neg, true) => Op::NegF,
                     (UnOp::Neg, false) => Op::NegI,
@@ -649,18 +667,24 @@ impl Compiler<'_> {
                     (UnOp::Abs, false) => Op::AbsI,
                     (UnOp::Not, _) => Op::Not,
                     (UnOp::ToText, _) => Op::ToText,
+                    (UnOp::ToDecimal | UnOp::ToFloat, _) => unreachable!("handled above"),
                 });
             }
             Ir::Binary(op, a, b) => {
                 let ty = self.ty(a);
                 self.emit(a);
                 self.emit(b);
+                if ty == Type::Decimal {
+                    self.ops.push(Op::Bin(*op));
+                    return;
+                }
                 let cmp = |c| match ty {
                     Type::F64 => Op::CmpF(c),
                     Type::I64 => Op::CmpI(c),
                     Type::Str => Op::CmpS(c),
                     Type::Bool => Op::CmpB(c),
                     Type::StrList => Op::CmpL(c),
+                    Type::Decimal => unreachable!("handled above"),
                 };
                 let f = ty == Type::F64;
                 self.ops.push(match op {
@@ -716,6 +740,7 @@ impl Compiler<'_> {
                     BinOp::Or => Op::Or,
                     BinOp::Concat => Op::Concat,
                     BinOp::Join => Op::Join,
+                    BinOp::Round(_) => unreachable!("only a decimal is rounded"),
                 });
             }
             Ir::List(items) => {

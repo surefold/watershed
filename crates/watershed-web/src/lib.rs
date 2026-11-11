@@ -486,6 +486,8 @@ fn value_json(v: &Value) -> String {
         Value::F64(x) if x.is_finite() => ("f64", x.to_string()),
         Value::F64(_) => ("f64", "null".into()),
         Value::I64(x) => ("i64", x.to_string()),
+        // As text: JavaScript's numbers would lose its exactness.
+        Value::Decimal(x) => ("decimal", json_str(&x.to_string())),
         Value::Bool(b) => ("bool", b.to_string()),
         Value::Str(s) => ("string", json_str(s)),
         Value::List(items) => {

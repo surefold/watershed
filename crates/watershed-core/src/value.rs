@@ -3,11 +3,15 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::decimal::Decimal;
+
 /// The type of a node. Every node has exactly one, fixed when it is defined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
     F64,
     I64,
+    /// An exact decimal number (see the [`decimal`](crate::decimal) module).
+    Decimal,
     Bool,
     Str,
     /// A list of strings.
@@ -17,12 +21,12 @@ pub enum Type {
 impl Type {
     /// Types that support `+ - * / min max abs` and negation.
     pub fn is_numeric(self) -> bool {
-        matches!(self, Type::F64 | Type::I64)
+        matches!(self, Type::F64 | Type::I64 | Type::Decimal)
     }
 
     /// Types that support `< <= > >=`.
     pub fn is_ordered(self) -> bool {
-        matches!(self, Type::F64 | Type::I64 | Type::Str)
+        matches!(self, Type::F64 | Type::I64 | Type::Decimal | Type::Str)
     }
 }
 
@@ -31,6 +35,7 @@ impl fmt::Display for Type {
         f.write_str(match self {
             Type::F64 => "f64",
             Type::I64 => "i64",
+            Type::Decimal => "decimal",
             Type::Bool => "bool",
             Type::Str => "string",
             Type::StrList => "list",
@@ -47,6 +52,9 @@ impl fmt::Display for Type {
 pub enum Value {
     F64(f64),
     I64(i64),
+    /// Behind a pointer, like text, so that every `Value` stays 16 bytes
+    /// and graphs of `f64` cost nothing for decimals existing.
+    Decimal(Arc<Decimal>),
     Bool(bool),
     Str(Text),
     List(TextList),
@@ -123,6 +131,7 @@ impl Value {
         match self {
             Value::F64(_) => Some(Type::F64),
             Value::I64(_) => Some(Type::I64),
+            Value::Decimal(_) => Some(Type::Decimal),
             Value::Bool(_) => Some(Type::Bool),
             Value::Str(_) => Some(Type::Str),
             Value::List(_) => Some(Type::StrList),
@@ -149,12 +158,23 @@ impl Value {
     /// deliberately strict: treating two values as the same when they are not
     /// would skip work that was needed, while the reverse only costs a little
     /// extra work.
+    #[inline]
     pub fn same_as(&self, other: &Value) -> bool {
+        // Floats first and on their own: every recalculated node asks this,
+        // most nodes are floats, and the rest need not be part of that loop.
+        if let (Value::F64(a), Value::F64(b)) = (self, other) {
+            return a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        }
+        self.same_as_unless_floats(other)
+    }
+
+    #[inline(never)]
+    fn same_as_unless_floats(&self, other: &Value) -> bool {
         match (self, other) {
-            (Value::F64(a), Value::F64(b)) => {
-                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
-            }
             (Value::I64(a), Value::I64(b)) => a == b,
+            // `1.5` and `1.50` are equal but show differently, so they are
+            // not identical: something above may be showing the value.
+            (Value::Decimal(a), Value::Decimal(b)) => crate::decimal::identical(a, b),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
@@ -174,6 +194,7 @@ impl fmt::Display for Value {
         match self {
             Value::F64(x) => write!(f, "{x}"),
             Value::I64(x) => write!(f, "{x}"),
+            Value::Decimal(x) => write!(f, "{x}"),
             Value::Bool(x) => write!(f, "{x}"),
             Value::Str(s) => write!(f, "{:?}", &**s),
             Value::List(items) => write!(f, "{items:?}"),
@@ -186,28 +207,32 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for f64 {}
     impl Sealed for i64 {}
+    impl Sealed for crate::decimal::Decimal {}
     impl Sealed for bool {}
     impl Sealed for String {}
     impl Sealed for Vec<String> {}
 }
 
-/// A Rust type that a node can hold: `f64`, `i64`, `bool`, `String` or
-/// `Vec<String>`.
+/// A Rust type that a node can hold: `f64`, `i64`, [`Decimal`], `bool`,
+/// `String` or `Vec<String>`.
 pub trait CalcType: sealed::Sealed + Sized + 'static {
     const TYPE: Type;
     fn into_value(self) -> Value;
     fn from_value(value: &Value) -> Option<Self>;
 }
 
-/// Types that support arithmetic: `f64` and `i64`.
+/// Types that support arithmetic: `f64`, `i64` and [`Decimal`].
 pub trait Numeric: CalcType {}
 impl Numeric for f64 {}
 impl Numeric for i64 {}
+impl Numeric for Decimal {}
 
-/// Types that support ordering comparisons: `f64`, `i64` and `String`.
+/// Types that support ordering comparisons: `f64`, `i64`, [`Decimal`] and
+/// `String`.
 pub trait Ordered: CalcType {}
 impl Ordered for f64 {}
 impl Ordered for i64 {}
+impl Ordered for Decimal {}
 impl Ordered for String {}
 
 impl CalcType for f64 {
@@ -231,6 +256,19 @@ impl CalcType for i64 {
     fn from_value(value: &Value) -> Option<Self> {
         match value {
             Value::I64(x) => Some(*x),
+            _ => None,
+        }
+    }
+}
+
+impl CalcType for Decimal {
+    const TYPE: Type = Type::Decimal;
+    fn into_value(self) -> Value {
+        Value::Decimal(Arc::new(self))
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Decimal(x) => Some(**x),
             _ => None,
         }
     }
@@ -273,5 +311,15 @@ impl CalcType for Vec<String> {
             Value::List(items) => Some(items.iter().map(|s| s.to_string()).collect()),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_value_takes_16_bytes() {
+        assert_eq!(std::mem::size_of::<Value>(), 16);
     }
 }

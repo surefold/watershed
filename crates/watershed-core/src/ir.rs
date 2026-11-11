@@ -9,6 +9,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::decimal::{self, Rounding};
 use crate::handle::{NodeId, NodeRef};
 use crate::value::{Text, TextList, Type, Value};
 
@@ -20,6 +21,10 @@ pub enum UnOp {
     /// Any value as text: `3` as `"3"`, `2.0` as `"2.0"`, `true` as `"true"`.
     /// Text stays as it is.
     ToText,
+    /// An `i64` as the same decimal, exactly.
+    ToDecimal,
+    /// A decimal as the nearest `f64`.
+    ToFloat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -44,6 +49,9 @@ pub enum BinOp {
     /// `Join(list, separator)`: a list's items as one string. A result over
     /// [`MAX_TEXT_BYTES`] is an error.
     Join,
+    /// `Round(decimal, places)`: the decimal to that many decimal places
+    /// (an `i64` from 0 to 28).
+    Round(Rounding),
 }
 
 /// The longest text a join can produce. Joining a value to itself doubles its
@@ -149,6 +157,8 @@ pub(crate) fn to_text(value: Value) -> Value {
         // The debug form keeps the `.0` of a whole number, as Kotlin does.
         Value::F64(x) => format!("{x:?}"),
         Value::I64(x) => x.to_string(),
+        // With the decimal places it has: `1.50` stays `1.50`.
+        Value::Decimal(x) => x.to_string(),
         Value::Bool(x) => x.to_string(),
         // As Kotlin shows a list: `[a, b]`.
         Value::List(items) => match join(&items, ", ") {
@@ -188,6 +198,8 @@ impl Ir {
                     UnOp::Neg | UnOp::Abs if a.is_numeric() => Ok(a),
                     UnOp::Not if a == Type::Bool => Ok(Type::Bool),
                     UnOp::ToText => Ok(Type::Str),
+                    UnOp::ToDecimal if a == Type::I64 => Ok(Type::Decimal),
+                    UnOp::ToFloat if a == Type::Decimal => Ok(Type::F64),
                     _ => Err(TypeError(format!("{op:?} cannot be applied to {a}"))),
                 }
             }
@@ -200,6 +212,16 @@ impl Ir {
                     )));
                 }
                 Ok(Type::Str)
+            }
+            Ir::Binary(BinOp::Round(_), a, b) => {
+                let a = a.type_check(type_of_node)?;
+                let b = b.type_check(type_of_node)?;
+                if a != Type::Decimal || b != Type::I64 {
+                    return Err(TypeError(format!(
+                        "Round needs a decimal and an i64 number of places, got {a} and {b}"
+                    )));
+                }
+                Ok(Type::Decimal)
             }
             Ir::Binary(op, a, b) => {
                 let a = a.type_check(type_of_node)?;
@@ -397,6 +419,17 @@ impl Ir {
             Ir::Unary(UnOp::Not, a) => format!("!{}", a.render_operand(name)),
             Ir::Unary(UnOp::Abs, a) => format!("abs({})", a.render(name)),
             Ir::Unary(UnOp::ToText, a) => format!("text({})", a.render(name)),
+            Ir::Unary(UnOp::ToDecimal, a) => format!("decimal({})", a.render(name)),
+            Ir::Unary(UnOp::ToFloat, a) => format!("float({})", a.render(name)),
+            Ir::Binary(BinOp::Round(rounding), a, b) => {
+                let how = match rounding {
+                    Rounding::HalfEven => "round",
+                    Rounding::HalfUp => "round_half_up",
+                    Rounding::Down => "round_down",
+                    Rounding::Up => "round_up",
+                };
+                format!("{how}({}, {})", a.render(name), b.render(name))
+            }
             Ir::Binary(BinOp::Min, a, b) => format!("min({}, {})", a.render(name), b.render(name)),
             Ir::Binary(BinOp::Max, a, b) => format!("max({}, {})", a.render(name), b.render(name)),
             Ir::Binary(BinOp::Join, a, b) => {
@@ -425,7 +458,7 @@ impl Ir {
                     BinOp::Ne => "!=",
                     BinOp::And => "&&",
                     BinOp::Or => "||",
-                    BinOp::Min | BinOp::Max | BinOp::Concat | BinOp::Join => {
+                    BinOp::Min | BinOp::Max | BinOp::Concat | BinOp::Join | BinOp::Round(_) => {
                         unreachable!("handled above")
                     }
                 };
@@ -470,9 +503,13 @@ fn internal(message: String) -> Value {
     Value::error(format!("internal type error: {message}"))
 }
 
-fn unary(op: UnOp, a: Value) -> Value {
+pub(crate) fn unary(op: UnOp, a: Value) -> Value {
     match (op, a) {
         (_, Value::Error(e)) => Value::Error(e),
+        (UnOp::Neg, Value::Decimal(x)) => decimal::neg(&x),
+        (UnOp::Abs, Value::Decimal(x)) => decimal::abs(&x),
+        (UnOp::ToDecimal, Value::I64(x)) => decimal::from_whole(x),
+        (UnOp::ToFloat, Value::Decimal(x)) => decimal::to_float(&x),
         (UnOp::Neg, Value::F64(x)) => Value::F64(-x),
         (UnOp::Neg, Value::I64(x)) => x
             .checked_neg()
@@ -487,10 +524,20 @@ fn unary(op: UnOp, a: Value) -> Value {
     }
 }
 
-fn binary(op: BinOp, a: Value, b: Value) -> Value {
+pub(crate) fn binary(op: BinOp, a: Value, b: Value) -> Value {
     use BinOp::*;
     match (op, a, b) {
         (_, Value::Error(e), _) | (_, _, Value::Error(e)) => Value::Error(e),
+
+        (Add, Value::Decimal(x), Value::Decimal(y)) => decimal::add(&x, &y),
+        (Sub, Value::Decimal(x), Value::Decimal(y)) => decimal::sub(&x, &y),
+        (Mul, Value::Decimal(x), Value::Decimal(y)) => decimal::mul(&x, &y),
+        (Div, Value::Decimal(x), Value::Decimal(y)) => decimal::div(&x, &y),
+        (Min, Value::Decimal(x), Value::Decimal(y)) => decimal::min(&x, &y),
+        (Max, Value::Decimal(x), Value::Decimal(y)) => decimal::max(&x, &y),
+        (Round(rounding), Value::Decimal(x), Value::I64(places)) => {
+            decimal::round(&x, places, rounding)
+        }
 
         (Add, Value::F64(x), Value::F64(y)) => Value::F64(x + y),
         (Sub, Value::F64(x), Value::F64(y)) => Value::F64(x - y),
@@ -529,6 +576,8 @@ fn compare(op: BinOp, a: &Value, b: &Value) -> Value {
     let ordering: Option<Ordering> = match (a, b) {
         (Value::F64(x), Value::F64(y)) => x.partial_cmp(y), // None when either is NaN
         (Value::I64(x), Value::I64(y)) => Some(x.cmp(y)),
+        // By value: `1.5` equals `1.50`.
+        (Value::Decimal(x), Value::Decimal(y)) => Some(x.cmp(y)),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
         (Value::List(x), Value::List(y)) => Some(x.cmp(y)),

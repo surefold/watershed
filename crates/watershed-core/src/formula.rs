@@ -35,26 +35,33 @@
 //! sum     := product ( ( "+" | "-" ) product )*
 //! product := unary ( ( "*" | "/" ) unary )*
 //! unary   := ( "-" | "!" ) unary | primary
-//! primary := number | "text" | 'text' | true | false | name | `any name`
+//! primary := number | decimal | "text" | 'text' | true | false | name | `any name`
 //!          | "(" formula ")" | "[" formula, ... "]"
 //!          | if(c, a, b) | min(a, b) | max(a, b) | abs(a)
 //!          | text(a) | concat(a, b) | join(list, separator)
 //!          | choose(index, a, b, ...)
+//!          | round(d, places) | round_half_up(..) | round_down(..) | round_up(..)
+//!          | decimal(whole) | float(d)
 //! ```
 //!
-//! Numbers are always `f64`. A name is letters, digits and `_`; any other
+//! A number is an `f64`, unless it ends in `d`: `19.99d` is a
+//! [decimal](crate::decimal), exact, and keeps its two places. Decimals and
+//! floats do not mix; `round` puts a decimal on a number of places, a tie
+//! going to the even neighbour unless another way is named. A name is letters, digits and `_`; any other
 //! name, such as `orders[3].qty` or `tax rate`, goes between backticks. A
 //! list holds strings. `choose` takes the option at position `index`, an
 //! `i64` counting from 0.
 
 use std::sync::Arc;
 
+use crate::decimal::{Decimal, Rounding};
 use crate::ir::{BinOp, Ir, UnOp};
-use crate::value::Value;
+use crate::value::{CalcType, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Number(f64),
+    Decimal(Decimal),
     Text(String),
     Name(String),
     /// A name between backticks: always a node, never a function or `true`.
@@ -98,6 +105,19 @@ fn tokens(src: &str) -> Result<Vec<Token>, String> {
                 }
             }
             let text: String = chars[start..i].iter().filter(|&&c| c != '_').collect();
+            // A `d` straight after the digits makes it a decimal: 19.99d.
+            let decimal = chars.get(i) == Some(&'d')
+                && !chars
+                    .get(i + 1)
+                    .is_some_and(|c| c.is_alphanumeric() || *c == '_');
+            if decimal {
+                i += 1;
+                let number = text
+                    .parse::<Decimal>()
+                    .map_err(|_| format!("{text:?} is not a decimal of up to 28 digits"))?;
+                out.push(Token::Decimal(number));
+                continue;
+            }
             let number = text
                 .parse::<f64>()
                 .map_err(|_| format!("{text:?} is not a number"))?;
@@ -307,6 +327,7 @@ impl Parser<'_> {
         self.at += 1;
         match token {
             Token::Number(x) => Ok(Ir::Const(Value::F64(x))),
+            Token::Decimal(x) => Ok(Ir::Const(x.into_value())),
             Token::Text(s) => Ok(Ir::Const(Value::Str(s.into()))),
             Token::Symbol("(") => {
                 let inner = self.nested()?;
@@ -354,6 +375,33 @@ impl Parser<'_> {
                         };
                         Ok(binary(op, args.next().unwrap(), args.next().unwrap()))
                     }
+                    ("round" | "round_half_up" | "round_down" | "round_up", true) => {
+                        let rounding = match name.as_str() {
+                            "round" => Rounding::HalfEven,
+                            "round_half_up" => Rounding::HalfUp,
+                            "round_down" => Rounding::Down,
+                            _ => Rounding::Up,
+                        };
+                        let mut args = self.arguments(&name, 2)?.into_iter();
+                        let (value, places) = (args.next().unwrap(), args.next().unwrap());
+                        // A number of places written out (`2`) is a whole number.
+                        let places = match places {
+                            Ir::Const(Value::F64(x)) if x.fract() == 0.0 && x.abs() < 1e9 => {
+                                Ir::Const(Value::I64(x as i64))
+                            }
+                            other => other,
+                        };
+                        Ok(binary(BinOp::Round(rounding), value, places))
+                    }
+                    ("decimal" | "float", true) => {
+                        let op = if name == "decimal" {
+                            UnOp::ToDecimal
+                        } else {
+                            UnOp::ToFloat
+                        };
+                        let mut args = self.arguments(&name, 1)?.into_iter();
+                        Ok(Ir::Unary(op, Arc::new(args.next().unwrap())))
+                    }
                     ("choose", true) => {
                         self.expect("(")?;
                         let mut args = self.items(")")?.into_iter().map(Arc::new);
@@ -366,7 +414,8 @@ impl Parser<'_> {
                     }
                     (_, true) => Err(format!(
                         "there is no function {name:?} (there are if, min, max, abs, text, \
-                         concat, join and choose)"
+                         concat, join, choose, round, round_half_up, round_down, round_up, \
+                         decimal and float)"
                     )),
                     (_, false) => self.named(&name),
                 }
@@ -382,6 +431,7 @@ impl Parser<'_> {
 fn describe(token: &Token) -> String {
     match token {
         Token::Number(x) => x.to_string(),
+        Token::Decimal(x) => format!("{x}d"),
         Token::Text(s) => format!("{s:?}"),
         Token::Name(s) => s.clone(),
         Token::Quoted(s) => format!("`{s}`"),
@@ -569,6 +619,25 @@ mod tests {
         );
         assert_eq!(orders.get_value(&g, "b", &big).unwrap().to_string(), "true");
         g.check_consistency().unwrap();
+    }
+
+    #[test]
+    fn decimals_are_written_with_a_d_and_stay_exact() {
+        assert_eq!(value("0.1d + 0.2d"), "0.3");
+        assert_eq!(value("1.50d * 3d"), "4.50");
+        assert_eq!(value("round(2.345d, 2)"), "2.34");
+        assert_eq!(value("round_half_up(2.345d, 2)"), "2.35");
+        assert_eq!(value("round_down(-2.349d, 2)"), "-2.34");
+        assert_eq!(value("round_up(2.341d, 2)"), "2.35");
+        assert_eq!(value("float(1.5d) * a"), "9");
+        assert_eq!(value("1d / 3d > 0.33d"), "true");
+        assert_eq!(value("text(-1.50d)"), "\"-1.50\"");
+        assert_eq!(
+            value("1.5d + a"),
+            "define: type error: Add needs both sides to have the same type, got decimal and f64"
+        );
+        // A name that starts with d is still a name.
+        assert_eq!(value("2 delta"), "parse: unexpected delta");
     }
 
     #[test]

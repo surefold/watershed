@@ -41,9 +41,15 @@ Expressions are typed, as in Rust, and nothing is written as text:
 - `g[total] = 5.0` does not compile: `total` is a `Node`, not an `Input`.
 - `g[price] = "three"` does not compile: `price` holds a `Double`.
 
-The types are `Double`, `Long`, `Boolean`, `String` and `List<String>`. A
-whole number written next to a `Double` expression is taken as a `Double`
-(`price * 12`). Kotlin's `<` and `==` cannot build an expression, so
+The types are `Double`, `Long`, `BigDecimal`, `Boolean`, `String` and
+`List<String>`. A whole number written next to a `Double` or `BigDecimal`
+expression is taken as one (`price * 12`).
+
+A `BigDecimal` is exact, for money: `net * vat` keeps every digit,
+`.round(2)` puts it on two places (a tie going to the even neighbour, or
+`.round(2, RoundingMode.HALF_UP)`), and it does not mix with a `Double`
+unless you say `.toDouble()`. The engine holds 28 significant digits; a
+`BigDecimal` with more is refused, not rounded. Kotlin's `<` and `==` cannot build an expression, so
 comparisons are words: `a lt b`, `le`, `gt`, `ge`, `eq`, `ne`, with `and`,
 `or`, `!`, `whenever(condition, then, otherwise)`, `choose`, `text`, `texts`,
 `join`, `abs`, `least` and `greatest`.

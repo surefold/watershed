@@ -1,4 +1,5 @@
 import dev.surefold.watershed.*
+import java.math.BigDecimal
 
 fun main() {
     // ---------------------------------------------------------------- a graph
@@ -46,6 +47,17 @@ fun main() {
     } catch (e: WatershedException) {
         println("refused: ${e.message}")
     }
+    println()
+
+    // ------------------------------------------------------------- decimals
+    // A BigDecimal is exact: money that has to reconcile to the last digit.
+    val net = g.input("net", BigDecimal("19.99"))
+    val vat = g.input("vat", BigDecimal("0.20"))
+    val tax = g.define("tax", (net * vat).round(2))             // Node<BigDecimal>
+    val gross = g.define("gross", net + tax)
+    println("net ${g[net]} + tax ${g[tax]} = ${g[gross]}")
+    println("0.1 + 0.2 = ${g[g.define("exact", value(BigDecimal("0.1")) + BigDecimal("0.2"))]}")
+    // g.define("mixed", net * price) does not compile: a BigDecimal and a Double.
     println()
 
     // ------------------------------------------------------------ a collection

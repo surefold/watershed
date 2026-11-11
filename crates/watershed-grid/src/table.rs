@@ -2133,6 +2133,9 @@ fn write_value(out: &mut String, value: &Value) {
         Value::I64(x) => {
             let _ = write!(out, "{x}");
         }
+        // As text: JavaScript's numbers would lose its exactness. (The grid
+        // has no decimal columns yet; this is for values that reach it.)
+        Value::Decimal(x) => out.push_str(&json_str(&x.to_string())),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Str(s) => out.push_str(&json_str(s)),
         Value::List(items) => out.push_str(&json_str(&format!("{items:?}"))),

@@ -1,8 +1,9 @@
 """Type hints for watershed, an incremental calculation engine written in Rust."""
 
+from decimal import Decimal
 from typing import Literal, Sequence, Union
 
-Scalar = Union[float, int, bool, str]
+Scalar = Union[float, int, Decimal, bool, str]
 ExprLike = Union["Expr", Scalar]
 
 class CalcError(Exception):
@@ -18,7 +19,7 @@ class Expr:
     """
 
     @property
-    def type(self) -> Literal["float", "int", "bool", "str"]: ...
+    def type(self) -> Literal["float", "int", "Decimal", "bool", "str", "list"]: ...
     @property
     def id(self) -> int:
         """The node's id in its graph (nodes only)."""
@@ -28,6 +29,12 @@ class Expr:
     @property
     def value(self) -> Scalar:
         """The node's value as of the last update; raises CalcError if it is an error."""
+    def round(
+        self, places: int, rounding: Literal["half_even", "half_up", "down", "up"] = "half_even"
+    ) -> Expr:
+        """A Decimal to this many decimal places (0 to 28)."""
+    def to_float(self) -> Expr:
+        """A Decimal as the nearest float."""
     def min(self, other: ExprLike) -> Expr: ...
     def max(self, other: ExprLike) -> Expr: ...
     def __add__(self, other: ExprLike) -> Expr: ...
@@ -117,7 +124,9 @@ class Groups:
 class Collection:
     """A keyed table of rows, with fields, calculated columns and totals."""
 
-    def field(self, name: str, type: type[float] | type[int] | type[bool] | type[str]) -> Expr: ...
+    def field(
+        self, name: str, type: type[float] | type[int] | type[Decimal] | type[bool] | type[str]
+    ) -> Expr: ...
     def column(self, name: str, formula: ExprLike) -> Expr: ...
     def formula(self, source: str) -> Expr:
         """A formula written as text, over this collection's fields and columns."""

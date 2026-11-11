@@ -12,13 +12,18 @@
 //     g.stabilize()
 //     val now: Double = g[total]
 //
-// The types: Double, Long, Boolean, String and List<String>. A whole number
-// written next to a Double expression is taken as a Double (`price * 12`).
+// The types: Double, Long, BigDecimal, Boolean, String and List<String>. A
+// whole number written next to a Double or BigDecimal expression is taken
+// as one (`price * 12`). A BigDecimal is exact, holds up to 28 digits in the
+// engine, and never mixes with a Double by accident.
 
 @file:JvmName("Typed")
 @file:Suppress("UNCHECKED_CAST")
 
 package dev.surefold.watershed
+
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 /** Something that works out to a [T]: a node, a constant, or a calculation over them. */
 open class Expr<T> internal constructor(internal val ops: List<Op>)
@@ -48,14 +53,17 @@ private fun valueOf(value: Any?): Value = when (value) {
     is Double -> Value.Number(value)
     is Long -> Value.Whole(value)
     is Int -> Value.Whole(value.toLong())
+    // Through its digits, written out in full, so nothing is lost on the way.
+    is BigDecimal -> Value.Decimal(value.toPlainString())
     is Boolean -> Value.Flag(value)
     is String -> Value.Text(value)
-    else -> throw IllegalArgumentException("a value is a Double, a Long, a Boolean or a String, not $value")
+    else -> throw IllegalArgumentException("a value is a Double, a Long, a BigDecimal, a Boolean or a String, not $value")
 }
 
 private fun <T> read(value: Value, what: String): T = when (value) {
     is Value.Number -> value.value
     is Value.Whole -> value.value
+    is Value.Decimal -> BigDecimal(value.value)
     is Value.Flag -> value.value
     is Value.Text -> value.value
     is Value.Texts -> value.items
@@ -75,6 +83,7 @@ fun <T : Any> value(value: T): Expr<T> = constant(value)
 
 fun Graph.input(name: String, value: Double): Input<Double> = Input(inputValue(name, Value.Number(value)))
 fun Graph.input(name: String, value: Long): Input<Long> = Input(inputValue(name, Value.Whole(value)))
+fun Graph.input(name: String, value: BigDecimal): Input<BigDecimal> = Input(inputValue(name, valueOf(value)))
 fun Graph.input(name: String, value: Boolean): Input<Boolean> = Input(inputValue(name, Value.Flag(value)))
 fun Graph.input(name: String, value: String): Input<String> = Input(inputValue(name, Value.Text(value)))
 
@@ -86,6 +95,9 @@ operator fun <T : Any> Graph.set(input: Input<T>, value: T) = setValue(input.id,
 
 @JvmName("setNumberToWhole")
 operator fun Graph.set(input: Input<Double>, value: Int) = setValue(input.id, Value.Number(value.toDouble()))
+
+@JvmName("setDecimalToWhole")
+operator fun Graph.set(input: Input<BigDecimal>, value: Int) = setValue(input.id, valueOf(value.toBigDecimal()))
 
 /** The node's value as of the last update. A node that could not be calculated throws, with why. */
 operator fun <T> Graph.get(node: Node<T>): T = read(value(node.id), name(node.id))
@@ -105,6 +117,7 @@ fun Graph.remove(node: Node<*>) = remove(node.id)
 
 @JvmName("numberField") fun Collection.number(name: String): Field<Double> = field(name, Kind.NUMBER)
 @JvmName("wholeField") fun Collection.whole(name: String): Field<Long> = field(name, Kind.WHOLE)
+@JvmName("decimalField") fun Collection.decimal(name: String): Field<BigDecimal> = field(name, Kind.DECIMAL)
 @JvmName("flagField") fun Collection.flag(name: String): Field<Boolean> = field(name, Kind.FLAG)
 @JvmName("textField") fun Collection.text(name: String): Field<String> = field(name, Kind.TEXT)
 
@@ -129,6 +142,9 @@ operator fun <T : Any> Field<T>.invoke(value: T) = FieldValue(name, valueOf(valu
 
 @JvmName("numberFieldToWhole")
 operator fun Field<Double>.invoke(value: Int) = FieldValue(name, Value.Number(value.toDouble()))
+
+@JvmName("decimalFieldToWhole")
+operator fun Field<BigDecimal>.invoke(value: Int) = FieldValue(name, valueOf(value.toBigDecimal()))
 
 /** Adds a row, or changes the fields given of one that is there: `orders.upsert("o-1", qty(2.0), price(9.99))`. */
 fun Collection.upsert(key: String, vararg fields: FieldValue) =
@@ -265,3 +281,71 @@ fun Expr<List<String>>.join(separator: String): Expr<String> = binary(BinaryOp.J
 @JvmName("geWhole") infix fun Expr<Long>.ge(other: Expr<Long>): Expr<Boolean> = binary(BinaryOp.GREATER_OR_EQUAL, this, other)
 @JvmName("geWholeByLong") infix fun Expr<Long>.ge(other: Long): Expr<Boolean> = binary(BinaryOp.GREATER_OR_EQUAL, this, constant<Long>(other))
 @JvmName("geWholeByInt") infix fun Expr<Long>.ge(other: Int): Expr<Boolean> = binary(BinaryOp.GREATER_OR_EQUAL, this, constant<Long>(other.toLong()))
+
+// Decimals: exact, for money and anything that must reconcile to the last
+// digit. Adding, subtracting and multiplying are exact within 28 digits;
+// dividing rounds at the last digit; `round` puts a value on the number of
+// places you want.
+
+@JvmName("negateDecimal") operator fun Expr<BigDecimal>.unaryMinus(): Expr<BigDecimal> = unary(UnaryOp.NEGATE, this)
+@JvmName("absDecimal") fun abs(a: Expr<BigDecimal>): Expr<BigDecimal> = unary(UnaryOp.ABSOLUTE, a)
+
+/** To this many decimal places (0 to 28). A tie goes to the even neighbour unless another way is given. */
+fun Expr<BigDecimal>.round(places: Int, rounding: RoundingMode = RoundingMode.HALF_EVEN): Expr<BigDecimal> =
+    round(constant<Long>(places.toLong()), rounding)
+
+fun Expr<BigDecimal>.round(places: Expr<Long>, rounding: RoundingMode = RoundingMode.HALF_EVEN): Expr<BigDecimal> {
+    val op = when (rounding) {
+        RoundingMode.HALF_EVEN -> BinaryOp.ROUND_HALF_EVEN
+        RoundingMode.HALF_UP -> BinaryOp.ROUND_HALF_UP
+        RoundingMode.DOWN -> BinaryOp.ROUND_DOWN
+        RoundingMode.UP -> BinaryOp.ROUND_UP
+        else -> throw IllegalArgumentException("rounding is HALF_EVEN, HALF_UP, DOWN or UP, not $rounding")
+    }
+    return binary(op, this, places)
+}
+
+/** A whole number as the same decimal, exactly. */
+fun Expr<Long>.toDecimal(): Expr<BigDecimal> = unary(UnaryOp.TO_DECIMAL, this)
+
+/** A decimal as the nearest Double, for where exactness is not needed. */
+fun Expr<BigDecimal>.toDouble(): Expr<Double> = unary(UnaryOp.TO_NUMBER, this)
+
+@JvmName("plusDecimal") operator fun Expr<BigDecimal>.plus(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.ADD, this, other)
+@JvmName("plusDecimalByBigDecimal") operator fun Expr<BigDecimal>.plus(other: BigDecimal): Expr<BigDecimal> = binary(BinaryOp.ADD, this, constant<BigDecimal>(other))
+@JvmName("bigdecimalPlusDecimal") operator fun BigDecimal.plus(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.ADD, constant<BigDecimal>(this), other)
+@JvmName("plusDecimalByInt") operator fun Expr<BigDecimal>.plus(other: Int): Expr<BigDecimal> = binary(BinaryOp.ADD, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("intPlusDecimal") operator fun Int.plus(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.ADD, constant<BigDecimal>(this.toBigDecimal()), other)
+@JvmName("minusDecimal") operator fun Expr<BigDecimal>.minus(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.SUBTRACT, this, other)
+@JvmName("minusDecimalByBigDecimal") operator fun Expr<BigDecimal>.minus(other: BigDecimal): Expr<BigDecimal> = binary(BinaryOp.SUBTRACT, this, constant<BigDecimal>(other))
+@JvmName("bigdecimalMinusDecimal") operator fun BigDecimal.minus(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.SUBTRACT, constant<BigDecimal>(this), other)
+@JvmName("minusDecimalByInt") operator fun Expr<BigDecimal>.minus(other: Int): Expr<BigDecimal> = binary(BinaryOp.SUBTRACT, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("intMinusDecimal") operator fun Int.minus(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.SUBTRACT, constant<BigDecimal>(this.toBigDecimal()), other)
+@JvmName("timesDecimal") operator fun Expr<BigDecimal>.times(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.MULTIPLY, this, other)
+@JvmName("timesDecimalByBigDecimal") operator fun Expr<BigDecimal>.times(other: BigDecimal): Expr<BigDecimal> = binary(BinaryOp.MULTIPLY, this, constant<BigDecimal>(other))
+@JvmName("bigdecimalTimesDecimal") operator fun BigDecimal.times(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.MULTIPLY, constant<BigDecimal>(this), other)
+@JvmName("timesDecimalByInt") operator fun Expr<BigDecimal>.times(other: Int): Expr<BigDecimal> = binary(BinaryOp.MULTIPLY, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("intTimesDecimal") operator fun Int.times(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.MULTIPLY, constant<BigDecimal>(this.toBigDecimal()), other)
+@JvmName("divDecimal") operator fun Expr<BigDecimal>.div(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.DIVIDE, this, other)
+@JvmName("divDecimalByBigDecimal") operator fun Expr<BigDecimal>.div(other: BigDecimal): Expr<BigDecimal> = binary(BinaryOp.DIVIDE, this, constant<BigDecimal>(other))
+@JvmName("bigdecimalDivDecimal") operator fun BigDecimal.div(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.DIVIDE, constant<BigDecimal>(this), other)
+@JvmName("divDecimalByInt") operator fun Expr<BigDecimal>.div(other: Int): Expr<BigDecimal> = binary(BinaryOp.DIVIDE, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("intDivDecimal") operator fun Int.div(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.DIVIDE, constant<BigDecimal>(this.toBigDecimal()), other)
+@JvmName("leastDecimal") infix fun Expr<BigDecimal>.least(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.LEAST, this, other)
+@JvmName("leastDecimalByBigDecimal") infix fun Expr<BigDecimal>.least(other: BigDecimal): Expr<BigDecimal> = binary(BinaryOp.LEAST, this, constant<BigDecimal>(other))
+@JvmName("leastDecimalByInt") infix fun Expr<BigDecimal>.least(other: Int): Expr<BigDecimal> = binary(BinaryOp.LEAST, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("greatestDecimal") infix fun Expr<BigDecimal>.greatest(other: Expr<BigDecimal>): Expr<BigDecimal> = binary(BinaryOp.GREATEST, this, other)
+@JvmName("greatestDecimalByBigDecimal") infix fun Expr<BigDecimal>.greatest(other: BigDecimal): Expr<BigDecimal> = binary(BinaryOp.GREATEST, this, constant<BigDecimal>(other))
+@JvmName("greatestDecimalByInt") infix fun Expr<BigDecimal>.greatest(other: Int): Expr<BigDecimal> = binary(BinaryOp.GREATEST, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("ltDecimal") infix fun Expr<BigDecimal>.lt(other: Expr<BigDecimal>): Expr<Boolean> = binary(BinaryOp.LESS, this, other)
+@JvmName("ltDecimalByBigDecimal") infix fun Expr<BigDecimal>.lt(other: BigDecimal): Expr<Boolean> = binary(BinaryOp.LESS, this, constant<BigDecimal>(other))
+@JvmName("ltDecimalByInt") infix fun Expr<BigDecimal>.lt(other: Int): Expr<Boolean> = binary(BinaryOp.LESS, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("leDecimal") infix fun Expr<BigDecimal>.le(other: Expr<BigDecimal>): Expr<Boolean> = binary(BinaryOp.LESS_OR_EQUAL, this, other)
+@JvmName("leDecimalByBigDecimal") infix fun Expr<BigDecimal>.le(other: BigDecimal): Expr<Boolean> = binary(BinaryOp.LESS_OR_EQUAL, this, constant<BigDecimal>(other))
+@JvmName("leDecimalByInt") infix fun Expr<BigDecimal>.le(other: Int): Expr<Boolean> = binary(BinaryOp.LESS_OR_EQUAL, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("gtDecimal") infix fun Expr<BigDecimal>.gt(other: Expr<BigDecimal>): Expr<Boolean> = binary(BinaryOp.GREATER, this, other)
+@JvmName("gtDecimalByBigDecimal") infix fun Expr<BigDecimal>.gt(other: BigDecimal): Expr<Boolean> = binary(BinaryOp.GREATER, this, constant<BigDecimal>(other))
+@JvmName("gtDecimalByInt") infix fun Expr<BigDecimal>.gt(other: Int): Expr<Boolean> = binary(BinaryOp.GREATER, this, constant<BigDecimal>(other.toBigDecimal()))
+@JvmName("geDecimal") infix fun Expr<BigDecimal>.ge(other: Expr<BigDecimal>): Expr<Boolean> = binary(BinaryOp.GREATER_OR_EQUAL, this, other)
+@JvmName("geDecimalByBigDecimal") infix fun Expr<BigDecimal>.ge(other: BigDecimal): Expr<Boolean> = binary(BinaryOp.GREATER_OR_EQUAL, this, constant<BigDecimal>(other))
+@JvmName("geDecimalByInt") infix fun Expr<BigDecimal>.ge(other: Int): Expr<Boolean> = binary(BinaryOp.GREATER_OR_EQUAL, this, constant<BigDecimal>(other.toBigDecimal()))

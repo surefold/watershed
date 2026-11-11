@@ -11,7 +11,7 @@ use arrow_array::{
     Array, BooleanArray, Float64Array, Int64Array, ListArray, RecordBatch, StringArray,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use watershed_core::Value;
+use watershed_core::{CalcType, Value};
 
 /// A run's history, loaded from its files.
 #[derive(Default)]
@@ -58,6 +58,13 @@ impl Run {
                 let value = match kind.value(r) {
                     "f64" => Value::F64(f.value(r)),
                     "i64" => Value::I64(i.value(r)),
+                    "decimal" => {
+                        let digits = text.value(r);
+                        let decimal: watershed_core::Decimal = digits.parse().map_err(|_| {
+                            io::Error::other(format!("{digits:?} is not a decimal"))
+                        })?;
+                        decimal.into_value()
+                    }
                     "bool" => Value::Bool(b.value(r)),
                     "str" => Value::Str(text.value(r).into()),
                     "error" => Value::Error(text.value(r).into()),
