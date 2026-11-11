@@ -56,9 +56,9 @@ use std::sync::Arc;
 use crate::aggregate::AggregateOp;
 use crate::error::CalcError;
 use crate::expr::IntoExpr;
-use crate::graph::{Graph, next_graph_id};
+use crate::graph::{Graph, KeyedRow, key_text, next_graph_id};
 use crate::handle::{GraphId, Node, NodeId, NodeRef};
-use crate::ir::{BinOp, Ir, TypeError};
+use crate::ir::{Ir, TypeError};
 use crate::value::{CalcType, Numeric, Type, Value};
 
 /// Marks a placeholder that stands for a column rather than a field.
@@ -201,30 +201,21 @@ pub struct Collection {
     groupings: Vec<Grouping>,
 }
 
-/// Totals per group: one aggregate per distinct value of a field.
+/// Totals per group: one aggregate per distinct value of a field or
+/// column. The groups themselves are kept by the graph, which can move a
+/// row to a new group during an update (see `graph::keyed`).
 struct Grouping {
     name: String,
-    op: AggregateOp,
-    value_type: Type,
-    /// The field whose value names a row's group.
-    by: usize,
+    /// The field or column whose value names a row's group.
+    by: NodeRef,
     target: Target,
-    /// The height the group totals sit above.
-    height: usize,
-    /// Each group's total, by the group's key.
-    groups: HashMap<String, NodeId>,
-    /// For each row and each group it has been in, the `bool` node saying
-    /// whether it is in that group now (present, and its key is that group's).
-    membership: HashMap<(usize, String), NodeId>,
-    /// Each row's group as of the latest upsert (None if absent).
-    slot_key: Vec<Option<String>>,
-    /// How many rows each group has, as of the latest upserts.
-    counts: HashMap<String, usize>,
+    /// The grouping's number in the graph.
+    keyed: usize,
 }
 
-/// A grouped total: one total per distinct value of a field, made by
-/// [`Collection::group_sum`] and its siblings. `K` is the field's type and
-/// `T` the totals' type.
+/// A grouped total: one total per distinct value of a field or column,
+/// made by [`Collection::group_sum`] and its siblings. `K` is the type of
+/// the field or column and `T` the totals' type.
 pub struct Groups<K, T> {
     template: GraphId,
     index: usize,
@@ -237,14 +228,6 @@ impl<K, T> Clone for Groups<K, T> {
     }
 }
 impl<K, T> Copy for Groups<K, T> {}
-
-/// A group's key as text, the same for a key however it is given.
-fn key_text(value: &Value) -> String {
-    match value {
-        Value::Str(s) => s.to_string(),
-        other => other.to_string(),
-    }
-}
 
 impl Collection {
     /// A new, empty collection in graph `g`. Its nodes are named
@@ -464,11 +447,16 @@ impl Collection {
             }
             values[set.field.node.0 as usize] = Some(set.value.clone());
         }
-        // Each grouping's new key for this row, if this upsert sets it.
+        // Each grouping's new key for this row, if it is a field and this
+        // upsert sets it. (A column's value is only known at the update,
+        // where the graph moves the row to its new group.)
         let group_keys: Vec<Option<Value>> = self
             .groupings
             .iter()
-            .map(|grouping| values[grouping.by].clone())
+            .map(|grouping| match grouping.by.node.0 {
+                column if column & COLUMN != 0 => None,
+                field => values[field as usize].clone(),
+            })
             .collect();
         if let Some(&slot) = self.keys.get(key) {
             for (k, value) in values.into_iter().enumerate() {
@@ -476,9 +464,9 @@ impl Collection {
                     g.set_value(self.slots[slot].fields[k], value)?;
                 }
             }
-            for (i, new) in group_keys.into_iter().enumerate() {
+            for (grouping, new) in self.groupings.iter().zip(group_keys) {
                 if let Some(new) = new {
-                    self.join_group(g, i, slot, &new)?;
+                    g.keyed_follow(grouping.keyed, slot, &new)?;
                 }
             }
             return Ok(());
@@ -501,9 +489,17 @@ impl Collection {
         };
         g.set_value(self.slots[slot].present, Value::Bool(true))?;
         self.keys.insert(key.to_string(), slot);
-        for (i, new) in group_keys.into_iter().enumerate() {
-            let new = new.expect("a new row has every field");
-            self.join_group(g, i, slot, &new)?;
+        for (grouping, new) in self.groupings.iter().zip(group_keys) {
+            // A column still holds what it held for the row before, if the
+            // row's nodes are being reused; if this row's value differs,
+            // the update moves it.
+            let key = match new {
+                Some(field) => field,
+                None => g
+                    .value(self.member(slot, Target::Placeholder(grouping.by)))
+                    .clone(),
+            };
+            g.keyed_follow(grouping.keyed, slot, &key)?;
         }
         Ok(())
     }
@@ -522,10 +518,8 @@ impl Collection {
         self.key_changed(g, slot, key.to_string());
         g.set_value(self.slots[slot].present, Value::Bool(false))?;
         self.free.push(slot);
-        for grouping in &mut self.groupings {
-            if let Some(old) = grouping.slot_key[slot].take() {
-                *grouping.counts.entry(old).or_default() -= 1;
-            }
+        for grouping in &self.groupings {
+            g.keyed_leave(grouping.keyed, slot);
         }
         Ok(true)
     }
@@ -540,7 +534,7 @@ impl Collection {
         &mut self,
         g: &mut Graph,
         name: &str,
-        by: Field<K>,
+        by: impl Part<K>,
         of: impl Part<T>,
     ) -> Result<Groups<K, T>, CalcError> {
         let index = self.grouping(
@@ -548,7 +542,7 @@ impl Collection {
             name,
             AggregateOp::Sum,
             T::TYPE,
-            by.at,
+            by.placeholder(),
             Target::Placeholder(of.placeholder()),
         )?;
         Ok(Groups {
@@ -563,7 +557,7 @@ impl Collection {
         &mut self,
         g: &mut Graph,
         name: &str,
-        by: Field<K>,
+        by: impl Part<K>,
         of: impl Part<T>,
     ) -> Result<Groups<K, T>, CalcError> {
         let index = self.grouping(
@@ -571,7 +565,7 @@ impl Collection {
             name,
             AggregateOp::Min,
             T::TYPE,
-            by.at,
+            by.placeholder(),
             Target::Placeholder(of.placeholder()),
         )?;
         Ok(Groups {
@@ -586,7 +580,7 @@ impl Collection {
         &mut self,
         g: &mut Graph,
         name: &str,
-        by: Field<K>,
+        by: impl Part<K>,
         of: impl Part<T>,
     ) -> Result<Groups<K, T>, CalcError> {
         let index = self.grouping(
@@ -594,7 +588,7 @@ impl Collection {
             name,
             AggregateOp::Max,
             T::TYPE,
-            by.at,
+            by.placeholder(),
             Target::Placeholder(of.placeholder()),
         )?;
         Ok(Groups {
@@ -609,14 +603,14 @@ impl Collection {
         &mut self,
         g: &mut Graph,
         name: &str,
-        by: Field<K>,
+        by: impl Part<K>,
     ) -> Result<Groups<K, i64>, CalcError> {
         let index = self.grouping(
             g,
             name,
             AggregateOp::Count,
             Type::I64,
-            by.at,
+            by.placeholder(),
             Target::Presence,
         )?;
         Ok(Groups {
@@ -636,26 +630,21 @@ impl Collection {
         if groups.template != self.template {
             return None;
         }
-        let id = *self.groupings[groups.index]
-            .groups
-            .get(&key_text(&key.into_value()))?;
+        let id = g.keyed_group(
+            self.groupings[groups.index].keyed,
+            &key_text(&key.into_value()),
+        )?;
         Some(Node::new(g.node_ref(id)))
     }
 
-    /// The keys of the groups that have rows (including changes since the
-    /// last update), sorted.
-    pub fn group_keys<K, T>(&self, groups: Groups<K, T>) -> Vec<String> {
+    /// The keys of the groups that have rows, sorted. Grouped by a field,
+    /// that includes changes since the last update; grouped by a column,
+    /// a row is in the group its column named at the last update.
+    pub fn group_keys<K, T>(&self, g: &Graph, groups: Groups<K, T>) -> Vec<String> {
         if groups.template != self.template {
             return Vec::new();
         }
-        let mut keys: Vec<String> = self.groupings[groups.index]
-            .counts
-            .iter()
-            .filter(|&(_, &n)| n > 0)
-            .map(|(k, _)| k.clone())
-            .collect();
-        keys.sort();
-        keys
+        g.keyed_keys(self.groupings[groups.index].keyed)
     }
 
     /// Adds a grouping; rows that already exist join their groups.
@@ -669,9 +658,9 @@ impl Collection {
         target: Target,
     ) -> Result<usize, CalcError> {
         self.check_graph(g)?;
-        if by.graph != self.template || by.node.0 & COLUMN != 0 {
+        if by.graph != self.template || self.type_of(g, by).is_err() {
             return Err(CalcError::Invalid(format!(
-                "{}: group by one of its fields",
+                "{}: group by one of its fields or columns",
                 self.name
             )));
         }
@@ -687,93 +676,38 @@ impl Collection {
             }
             Target::Presence => 0,
         }
-        // A row's membership node (present and key == group) sits at height 1.
-        .max(1);
+        // A row's membership node (present and key == group) sits one above
+        // its key: at height 1 for a field.
+        .max(self.height_of(g, by) + 1);
+        let keyed = g.keyed_groups(&self.name, name, op, value_type, height);
         self.groupings.push(Grouping {
             name: name.to_string(),
-            op,
-            value_type,
-            by: by.node.0 as usize,
+            by,
             target,
-            height,
-            groups: HashMap::new(),
-            membership: HashMap::new(),
-            slot_key: vec![None; self.slots.len()],
-            counts: HashMap::new(),
+            keyed,
         });
-        let index = self.groupings.len() - 1;
+        // Every row's nodes, including removed rows', which can be reused.
+        for slot in 0..self.slots.len() {
+            g.keyed_row(keyed, self.keyed_row(slot, by, target));
+        }
         let present: Vec<usize> = self.keys.values().copied().collect();
         for slot in present {
-            let field = self.slots[slot].fields[self.groupings[index].by];
-            let key = g.value(field).clone();
-            self.join_group(g, index, slot, &key)?;
+            let key = g.value(self.member(slot, Target::Placeholder(by))).clone();
+            g.keyed_follow(keyed, slot, &key)?;
         }
-        Ok(index)
+        Ok(self.groupings.len() - 1)
     }
 
-    /// Puts a row in the group for `key`: counts it there, and makes sure it
-    /// has a membership node in that group (and that the group exists).
-    fn join_group(
-        &mut self,
-        g: &mut Graph,
-        index: usize,
-        slot: usize,
-        key: &Value,
-    ) -> Result<(), CalcError> {
-        let text = key_text(key);
-        let grouping = &mut self.groupings[index];
-        if grouping.slot_key.len() <= slot {
-            grouping.slot_key.resize(slot + 1, None);
+    /// A row's nodes, as a grouping needs them.
+    fn keyed_row(&self, slot: usize, by: NodeRef, target: Target) -> KeyedRow {
+        KeyedRow {
+            present: self.slots[slot].present,
+            key: self.member(slot, Target::Placeholder(by)),
+            value: match target {
+                Target::Presence => None,
+                Target::Placeholder(_) => Some(self.member(slot, target)),
+            },
         }
-        if grouping.slot_key[slot].as_ref() == Some(&text) {
-            return Ok(());
-        }
-        if let Some(old) = grouping.slot_key[slot].replace(text.clone()) {
-            *grouping.counts.entry(old).or_default() -= 1;
-        }
-        *grouping.counts.entry(text.clone()).or_default() += 1;
-        if grouping.membership.contains_key(&(slot, text.clone())) {
-            return Ok(()); // it has been in this group before, so it already counts there
-        }
-        // present && key == this group's key
-        let (present, field) = (
-            self.slots[slot].present,
-            self.slots[slot].fields[grouping.by],
-        );
-        let in_group = Ir::Binary(
-            BinOp::And,
-            Arc::new(g.reference(present)),
-            Arc::new(Ir::Binary(
-                BinOp::Eq,
-                Arc::new(g.reference(field)),
-                Arc::new(Ir::Const(key.clone())),
-            )),
-        );
-        let in_group = g.define_ir(
-            &format!("{}[{slot}].{}={text}", self.name, grouping.name),
-            in_group,
-        )?;
-        let target = grouping.target;
-        let value = match target {
-            Target::Presence => in_group,
-            Target::Placeholder(_) => self.member(slot, target),
-        };
-        let grouping = &mut self.groupings[index];
-        grouping.membership.insert((slot, text.clone()), in_group);
-        match grouping.groups.get(&text) {
-            Some(&total) => g.extend_aggregate(total, value, in_group)?,
-            None => {
-                let total = g.aggregate(
-                    &format!("{}[{text}]", grouping.name),
-                    grouping.op,
-                    grouping.value_type,
-                    grouping.height,
-                    &[(value, in_group)],
-                )?;
-                grouping.groups.insert(text, total);
-            }
-        }
-        Ok(())
     }
 
     /// A field or column of a row, as of the last update.
@@ -1091,7 +1025,7 @@ impl Collection {
     ) -> Result<usize, CalcError> {
         let Ir::Ref(by) = by else {
             return Err(CalcError::Invalid(format!(
-                "{}: group by one of its fields",
+                "{}: group by one of its fields or columns",
                 self.name
             )));
         };
@@ -1124,21 +1058,20 @@ impl Collection {
     }
 
     /// The total for one group of the grouping at `index`, if any row has had that key.
-    pub fn group_node(&self, index: usize, key: &Value) -> Option<NodeId> {
-        self.groupings
-            .get(index)?
-            .groups
-            .get(&key_text(key))
-            .copied()
+    pub fn group_node(&self, g: &Graph, index: usize, key: &Value) -> Option<NodeId> {
+        g.keyed_group(self.groupings.get(index)?.keyed, &key_text(key))
     }
 
     /// The keys of the groups at `index` that have rows, sorted.
-    pub fn group_keys_of(&self, index: usize) -> Vec<String> {
-        self.group_keys(Groups::<(), ()> {
-            template: self.template,
-            index,
-            _type: PhantomData,
-        })
+    pub fn group_keys_of(&self, g: &Graph, index: usize) -> Vec<String> {
+        self.group_keys(
+            g,
+            Groups::<(), ()> {
+                template: self.template,
+                index,
+                _type: PhantomData,
+            },
+        )
     }
 
     // ---------------------------------------------------------------- inside
@@ -1256,6 +1189,12 @@ impl Collection {
         }
         for &(total, target) in &self.totals {
             g.extend_aggregate(total, self.member(s, target), present)?;
+        }
+        for grouping in &self.groupings {
+            g.keyed_row(
+                grouping.keyed,
+                self.keyed_row(s, grouping.by, grouping.target),
+            );
         }
         Ok(s)
     }

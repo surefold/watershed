@@ -271,3 +271,22 @@ def test_groups_by_an_int_field():
         c.upsert(f"p{i}", team=i % 3, points=i)
     g.stabilize()
     assert best.to_dict() == {0: 27, 1: 28, 2: 29}
+
+
+def test_groups_by_a_calculated_column_follow_it_within_the_update():
+    g = ws.Graph()
+    limit = g.input("limit", 100.0)
+    trades = g.collection("trades")
+    notional = trades.field("notional", float)
+    size = trades.column("size", ws.when(notional > limit).then("large").otherwise("small"))
+    by_size = trades.group_sum("by_size", size, notional)
+    trades.upsert("t1", notional=50.0)
+    trades.upsert("t2", notional=150.0)
+    g.stabilize()
+    assert by_size.to_dict() == {"large": 150.0, "small": 50.0}
+
+    g.set(limit, 10.0)
+    g.stabilize()
+    assert by_size.to_dict() == {"large": 200.0}
+    assert by_size.keys() == ["large"]
+    g.check_consistency()

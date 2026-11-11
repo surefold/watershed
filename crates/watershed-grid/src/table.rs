@@ -1640,7 +1640,7 @@ impl Table {
     fn group_node(&self, by: usize, key: &str, col: usize) -> Option<NodeId> {
         let op = self.cols.get(col)?.agg.op()?;
         let index = self.groupings.get(&by)?.get(col)?[slot(op)]?;
-        self.c.group_node(index, &Value::Str(key.into()))
+        self.c.group_node(&self.g, index, &Value::Str(key.into()))
     }
 
     fn group_number(&self, by: usize, key: &str, col: usize) -> Option<f64> {

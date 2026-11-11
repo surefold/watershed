@@ -786,7 +786,7 @@ proptest! {
 /// update against a plain map added up from scratch.
 fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Result<(), String> {
     use std::collections::BTreeMap;
-    use watershed_core::Collection;
+    use watershed_core::{Collection, when};
     let mut rng = Rng(seed);
     let mut g = Graph::new();
     if parallel {
@@ -809,6 +809,30 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
         .map_err(|e| e.to_string())?;
     let group_counts = c
         .group_count(&mut g, "group_count", group)
+        .map_err(|e| e.to_string())?;
+    // Groups by a calculated column: a row's band follows its score, so one
+    // change to `bonus` moves many rows between bands in a single update.
+    let band_of = |score: i64| match score {
+        s if s > 8 => "high",
+        s if s < -8 => "low",
+        _ => "middle",
+    };
+    let band = c
+        .column(
+            &mut g,
+            "band",
+            when(score.gt(8)).then("high".to_string()).otherwise(
+                when(score.lt(-8))
+                    .then("low".to_string())
+                    .otherwise("middle".to_string()),
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+    let band_totals = c
+        .group_sum(&mut g, "band_total", band, x)
+        .map_err(|e| e.to_string())?;
+    let band_counts = c
+        .group_count(&mut g, "band_count", band)
         .map_err(|e| e.to_string())?;
     let mut model: BTreeMap<String, (i64, i64)> = BTreeMap::new();
     let mut groups: BTreeMap<String, String> = BTreeMap::new();
@@ -903,10 +927,44 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
             }
         }
         expected_keys.sort();
-        if c.group_keys(group_totals) != expected_keys {
+        if c.group_keys(&g, group_totals) != expected_keys {
             return Err(format!(
                 "step {step}: groups {:?}, expected {expected_keys:?}",
-                c.group_keys(group_totals)
+                c.group_keys(&g, group_totals)
+            ));
+        }
+        // Every band's total and count against the plain map.
+        let mut expected_bands: Vec<String> = Vec::new();
+        for name in ["high", "low", "middle"] {
+            let members: Vec<i64> = model
+                .values()
+                .filter(|&&(x, y)| band_of(x * 2 + y + bonus_value) == name)
+                .map(|&(x, _)| x)
+                .collect();
+            if !members.is_empty() {
+                expected_bands.push(name.to_string());
+            }
+            let total = c.group(&g, band_totals, name.to_string());
+            let count = c.group(&g, band_counts, name.to_string());
+            let got = match (total, count) {
+                (Some(total), Some(count)) => (
+                    g.get(total).map_err(|e| e.to_string())?,
+                    g.get(count).map_err(|e| e.to_string())?,
+                ),
+                (None, None) => (0, 0),
+                _ => return Err(format!("step {step}: band {name} is half there")),
+            };
+            let want = (members.iter().sum::<i64>(), members.len() as i64);
+            if got != want {
+                return Err(format!(
+                    "step {step}: band {name} has {got:?}, expected {want:?}"
+                ));
+            }
+        }
+        if c.group_keys(&g, band_totals) != expected_bands {
+            return Err(format!(
+                "step {step}: bands {:?}, expected {expected_bands:?}",
+                c.group_keys(&g, band_totals)
             ));
         }
         if c.len() != model.len() {
