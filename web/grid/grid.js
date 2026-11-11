@@ -84,9 +84,7 @@ export class WatershedGrid {
     this.head = el("div", "wg-head");
     this.headRow = el("div", "wg-hrow");
     this.filterRow = el("div", "wg-frow");
-    this.marker = el("div", "wg-marker");
-    this.marker.hidden = true;
-    this.head.append(this.headRow, this.filterRow, this.marker);
+    this.head.append(this.headRow, this.filterRow);
     this.body = el("div", "wg-body");
     this.body.tabIndex = 0;
     this.body.setAttribute("role", "grid");
@@ -163,19 +161,12 @@ export class WatershedGrid {
   /** Lays the columns out again after their order, pinning or visibility changed. */
   rebuildColumns() {
     this.cols = JSON.parse(this.grid.columns());
-    const shown = this.order.filter((col) => !this.hidden.has(col));
-    this.display = [
-      0,
-      ...shown.filter((c) => this.pinned.has(c)).map((c) => c + 1),
-      ...shown.filter((c) => !this.pinned.has(c)).map((c) => c + 1),
-    ];
-    this.lastPinned = this.display.filter((pos) => this.isPinned(pos)).at(-1);
-    this.trendCols = this.display.filter((pos) => pos > 0 && this.trend(pos - 1)).map((pos) => pos - 1);
-    this.applyWidths();
+    this.arrange();
 
     this.headRow.replaceChildren();
     this.filterRow.replaceChildren();
     this.headCells = [];
+    this.filterCells = [];
     this.filterInputs = [];
     for (const pos of this.display) {
       const col = this.cols[pos - 1];
@@ -212,6 +203,7 @@ export class WatershedGrid {
       this.place(filter, pos);
       if (pos > 0) filter.append(this.filterInput(pos - 1, col));
       this.filterRow.append(filter);
+      this.filterCells[pos] = filter;
     }
 
     this.footRow.replaceChildren();
@@ -227,15 +219,28 @@ export class WatershedGrid {
     this.showSort();
   }
 
-  /** Gives a cell its column's width, and pins it if its column is pinned. */
+  /** Works out which columns are on screen and in what order: the key, the pinned, the rest. */
+  arrange() {
+    const shown = this.order.filter((col) => !this.hidden.has(col));
+    this.display = [
+      0,
+      ...shown.filter((c) => this.pinned.has(c)).map((c) => c + 1),
+      ...shown.filter((c) => !this.pinned.has(c)).map((c) => c + 1),
+    ];
+    this.lastPinned = this.display.filter((pos) => this.isPinned(pos)).at(-1);
+    this.trendCols = this.display.filter((pos) => pos > 0 && this.trend(pos - 1)).map((pos) => pos - 1);
+    this.applyWidths();
+  }
+
+  /** Gives a cell its column's width, and pins it if its column is pinned. Returns the cell. */
   place(cell, pos) {
+    const pinned = this.isPinned(pos);
     cell.style.width = `var(--wg-w${pos})`;
     cell._pos = pos;
-    if (this.isPinned(pos)) {
-      cell.classList.add("wg-pin");
-      cell.style.left = `var(--wg-l${pos})`;
-      if (pos === this.lastPinned) cell.classList.add("wg-pin-edge");
-    }
+    cell.classList.toggle("wg-pin", pinned);
+    cell.classList.toggle("wg-pin-edge", pinned && pos === this.lastPinned);
+    cell.style.left = pinned ? `var(--wg-l${pos})` : "";
+    return cell;
   }
 
   filterInput(col, info) {
@@ -322,60 +327,104 @@ export class WatershedGrid {
 
   // ------------------------------------------- column order, pins and menu
 
-  /** Dragging a header sideways moves its column among its neighbours (pinned or not). */
+  /**
+   * Dragging a header sideways moves its column, there and then: the whole
+   * column follows the pointer, stepping past each neighbour as the pointer
+   * crosses its middle. Dragging onto the pinned columns pins it, and
+   * dragging a pinned column off them unpins it. Near the grid's edges the
+   * grid scrolls.
+   */
   dragHeader(e, pos, cell) {
     if (e.button !== 0 || e.target.closest(".wg-resize, .wg-more")) return;
     const col = pos - 1;
     const startX = e.clientX;
-    const zone = this.display.filter((p) => p > 0 && this.pinned.has(p - 1) === this.pinned.has(col));
+    let x = startX;
     let dragging = false;
-    let before = -1; // the column this one will go in front of; -1 for the end
+    let frame = 0;
     cell.setPointerCapture(e.pointerId);
+
+    const settle = () => {
+      const rootBox = this.root.getBoundingClientRect();
+      const onPinned = x - rootBox.left < this.pinnedWidth;
+      let moved = onPinned !== this.pinned.has(col);
+      if (moved && onPinned) this.pinned.add(col);
+      else if (moved) this.pinned.delete(col);
+      // Its place among the columns of its kind: after each one whose middle the pointer has passed.
+      const zone = this.display.filter((p) => p > 0 && this.pinned.has(p - 1) === this.pinned.has(col)).map((p) => p - 1);
+      const others = zone.filter((c) => c !== col);
+      const place = others.filter((c) => {
+        const box = this.headCells[c + 1].getBoundingClientRect();
+        return x > box.left + box.width / 2;
+      }).length;
+      moved ||= place !== zone.indexOf(col);
+      if (!moved) return;
+      this.order.splice(this.order.indexOf(col), 1);
+      const at = others.length === 0 ? this.order.length : place < others.length ? this.order.indexOf(others[place]) : this.order.indexOf(others.at(-1)) + 1;
+      this.order.splice(at, 0, col);
+      this.reflow();
+    };
+    // While the pointer rests near an edge the grid keeps scrolling, and the column keeps up.
+    const scroll = () => {
+      const box = this.body.getBoundingClientRect();
+      const [left, right] = [box.left + this.pinnedWidth, box.left + this.body.clientWidth];
+      const before = this.body.scrollLeft;
+      if (x > right - 48) this.body.scrollLeft += 16;
+      else if (x >= left && x < left + 48) this.body.scrollLeft -= 16;
+      if (this.body.scrollLeft !== before) settle();
+      frame = requestAnimationFrame(scroll);
+    };
     const move = (m) => {
-      if (!dragging && Math.abs(m.clientX - startX) < 6) return;
-      dragging = true;
-      cell.classList.add("wg-dragging");
-      const headBox = this.head.getBoundingClientRect();
-      let x = 0;
-      before = -1;
-      for (const p of zone) {
-        const box = this.headCells[p].getBoundingClientRect();
-        if (m.clientX < box.left + box.width / 2) {
-          before = p - 1;
-          x = box.left;
-          break;
-        }
-        x = box.right;
+      x = m.clientX;
+      if (!dragging) {
+        if (Math.abs(x - startX) < 5) return;
+        dragging = true;
+        this.closeMenu();
+        this.root.classList.add("wg-moving-column");
+        this.markColumn(pos, true);
+        frame = requestAnimationFrame(scroll);
       }
-      this.marker.hidden = false;
-      this.marker.style.left = `${x - headBox.left + this.head.scrollLeft - 1}px`;
+      settle();
     };
     const done = () => {
       cell.removeEventListener("pointermove", move);
       cell.removeEventListener("pointerup", done);
       cell.removeEventListener("pointercancel", done);
-      this.marker.hidden = true;
-      cell.classList.remove("wg-dragging");
       if (!dragging) return;
+      cancelAnimationFrame(frame);
+      this.root.classList.remove("wg-moving-column");
+      this.markColumn(pos, false);
       // The click that follows a drag is not a request to sort.
       this.dragged = true;
       setTimeout(() => (this.dragged = false));
-      this.moveColumn(col, before, zone.map((p) => p - 1));
     };
     cell.addEventListener("pointermove", move);
     cell.addEventListener("pointerup", done);
     cell.addEventListener("pointercancel", done);
   }
 
-  /** Moves a column in front of another of its zone, or to the zone's end if `before` is negative. */
-  moveColumn(col, before, zone) {
-    if (before === col) return;
-    const others = zone.filter((c) => c !== col);
-    if (others.length === 0) return;
-    this.order.splice(this.order.indexOf(col), 1);
-    const at = before < 0 ? this.order.indexOf(others.at(-1)) + 1 : this.order.indexOf(before);
-    this.order.splice(at, 0, col);
-    this.layoutChanged();
+  /** Every cell on screen of the column at `pos`: header, filter, total and rows. */
+  columnCells(pos) {
+    const rows = [...this.live.values(), ...this.spare];
+    return [this.headCells[pos], this.filterCells[pos], this.footRow._cells[pos], ...rows.map((row) => row._cells[pos])];
+  }
+
+  markColumn(pos, on) {
+    for (const cell of this.columnCells(pos)) cell.classList.toggle("wg-moving", on);
+  }
+
+  /**
+   * Puts the columns on screen in their order again, moving the cells there
+   * are rather than making new ones. For a change of order or pinning; a
+   * column shown or hidden needs `layoutChanged`.
+   */
+  reflow() {
+    this.arrange();
+    const rows = [this.footRow, ...this.live.values(), ...this.spare];
+    for (const pos of this.display) {
+      this.headRow.append(this.place(this.headCells[pos], pos));
+      this.filterRow.append(this.place(this.filterCells[pos], pos));
+      for (const row of rows) row.append(this.place(row._cells[pos], pos));
+    }
   }
 
   layoutChanged() {
@@ -386,7 +435,7 @@ export class WatershedGrid {
   setPinned(col, pinned) {
     if (pinned) this.pinned.add(col);
     else this.pinned.delete(col);
-    this.layoutChanged();
+    this.reflow();
   }
 
   setHidden(col, hidden) {
