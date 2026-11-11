@@ -329,3 +329,21 @@ def test_groups_by_a_calculated_column_follow_it_within_the_update():
     assert by_size.to_dict() == {"large": 200.0}
     assert by_size.keys() == ["large"]
     g.check_consistency()
+
+
+def test_a_node_nothing_uses_can_be_removed():
+    g, qty, price, tax, subtotal, total = order_graph()
+    with pytest.raises(ws.CalcError, match='"subtotal" cannot be removed: "total" uses it'):
+        g.remove(subtotal)
+    g.remove(total)
+    assert g.find("total") is None
+    with pytest.raises(ws.CalcError, match="has been removed"):
+        g.get(total)
+    with pytest.raises(ws.CalcError, match="has been removed"):
+        total.value
+
+    g.set(qty, 20.0)
+    assert g.stabilize().recalculated == 1  # subtotal only
+    again = g.define("total", subtotal * 2)
+    assert again.value == pytest.approx(100.0)
+    g.check_consistency()

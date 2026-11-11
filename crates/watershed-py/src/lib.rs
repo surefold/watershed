@@ -364,7 +364,11 @@ impl Expr {
         let (graph, id) = self.node.as_ref().ok_or_else(|| {
             PyTypeError::new_err("this is an expression, not a node: define it first")
         })?;
-        to_py(py, graph.borrow(py).inner.value(*id))
+        let graph = graph.borrow(py);
+        if graph.inner.is_removed(*id) {
+            return Err(CalcError::new_err("that node has been removed"));
+        }
+        to_py(py, graph.inner.value(*id))
     }
 
     fn __repr__(&self, py: Python<'_>) -> String {
@@ -527,7 +531,12 @@ impl Graph {
     /// A node of this graph, or an error if it belongs to another.
     fn own(slf: &Bound<'_, Self>, node: &Expr) -> PyResult<NodeId> {
         match &node.node {
-            Some((graph, id)) if graph.is(slf) => Ok(*id),
+            Some((graph, id)) if graph.is(slf) => {
+                if slf.borrow().inner.is_removed(*id) {
+                    return Err(CalcError::new_err("that node has been removed"));
+                }
+                Ok(*id)
+            }
             Some(_) => Err(CalcError::new_err("that node belongs to a different graph")),
             None => Err(PyTypeError::new_err(
                 "this is an expression, not a node: define it first",
@@ -578,6 +587,13 @@ impl Graph {
             .parse_formula(source)
             .map_err(to_py_err)?;
         Ok(Expr::new(ir, ty))
+    }
+
+    /// Removes a node that nothing uses. It is no longer calculated or
+    /// found, its name is free for a new node, and using it is an error.
+    fn remove(slf: &Bound<'_, Self>, node: &Bound<'_, Expr>) -> PyResult<()> {
+        let id = Graph::own(slf, node.get())?;
+        slf.borrow_mut().inner.remove_node(id).map_err(to_py_err)
     }
 
     /// Records a new value for an input; it takes effect at the next `stabilize()`.

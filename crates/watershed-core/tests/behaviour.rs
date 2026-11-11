@@ -2,7 +2,7 @@
 //! tests reads as a specification. `cargo test` runs them all.
 
 use watershed_core::prelude::*;
-use watershed_core::{Ir, Value};
+use watershed_core::{AggregateOp, Ir, Type, Value};
 
 type Result = std::result::Result<(), CalcError>;
 
@@ -1082,6 +1082,147 @@ fn redefining_cannot_change_a_type_or_touch_an_input() -> Result {
 }
 
 // ---------------------------------------------------------------- text
+
+// ---------------------------------------------------------------- removing
+
+#[test]
+fn a_removed_node_is_gone_and_its_name_is_free() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 2.0)?;
+    let double = g.define("double", a * 2.0)?;
+    let spare = g.define("spare", a + 1.0)?;
+    g.remove(spare)?;
+
+    assert!(g.find("spare").is_none());
+    assert!(matches!(g.get(spare), Err(CalcError::UnknownNode(_))));
+    assert!(matches!(
+        g.define("uses_spare", spare + 1.0),
+        Err(CalcError::UnknownNode(_))
+    ));
+    assert!(matches!(g.remove(spare), Err(CalcError::UnknownNode(_))));
+    assert_eq!(g.explain(spare), "(\"spare\" has been removed)");
+    assert!(!g.node_ids().any(|id| id == spare.id()));
+
+    // Nothing recalculates it, and what is left carries on.
+    g.set(a, 5.0)?;
+    let report = g.stabilize();
+    assert_eq!(report.recalculated, 1);
+    assert_eq!(g.get(double)?, 10.0);
+
+    // The name can be given to a new node, which is a different node.
+    let again = g.define("spare", a * 100.0)?;
+    assert_ne!(again.id(), spare.id());
+    assert_eq!(g.find("spare"), Some(again.id()));
+    assert_eq!(g.get(again)?, 500.0);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn a_node_something_uses_cannot_be_removed() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 2.0)?;
+    let b = g.define("b", a * 2.0)?;
+    let c = g.define("c", b + 1.0)?;
+    assert_eq!(
+        g.remove(b).unwrap_err().to_string(),
+        "\"b\" cannot be removed: \"c\" uses it"
+    );
+    assert_eq!(
+        g.remove(a).unwrap_err().to_string(),
+        "\"a\" cannot be removed: \"b\" uses it"
+    );
+    // From the top down, each one goes.
+    g.remove(c)?;
+    g.remove(b)?;
+    g.remove(a)?;
+    assert_eq!(g.node_ids().count(), 0);
+    assert_eq!(g.stabilize().recalculated, 0);
+    Ok(())
+}
+
+#[test]
+fn a_node_no_longer_used_after_a_redefinition_can_be_removed() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 2.0)?;
+    let old = g.input("old", 10.0)?;
+    let out = g.define("out", a + old)?;
+    assert!(g.remove(old).is_err());
+    g.redefine(out, a * 3.0)?;
+    g.remove(old)?;
+    g.stabilize();
+    assert_eq!(g.get(out)?, 6.0);
+    assert!(matches!(g.set(old, 1.0), Err(CalcError::UnknownNode(_))));
+    g.set(a, 3.0)?;
+    assert_eq!(g.stabilize().recalculated, 1);
+    assert_eq!(g.get(out)?, 9.0);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn a_total_and_its_rows_can_be_removed_from_the_top_down() -> Result {
+    let mut g = Graph::new();
+    let x = g.input("x", 1.0)?;
+    let y = g.input("y", 2.0)?;
+    let here = g.input("here", true)?;
+    let total = g.aggregate(
+        "total",
+        AggregateOp::Sum,
+        Type::F64,
+        0,
+        &[(x.id(), here.id()), (y.id(), here.id())],
+    )?;
+    assert_eq!(
+        g.remove(x).unwrap_err().to_string(),
+        "\"x\" cannot be removed: \"total\" uses it"
+    );
+    g.remove_node(total)?;
+    g.remove(x)?;
+    // What it used no longer wakes it.
+    g.set(y, 5.0)?;
+    let report = g.stabilize();
+    assert_eq!((report.inputs_changed, report.recalculated), (1, 0));
+    assert!(g.dependents(y.id()).is_empty());
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn a_removed_node_can_still_be_read_as_of_updates_it_was_part_of() -> Result {
+    let mut g = Graph::new();
+    let a = g.input("a", 1.0)?;
+    let b = g.define("b", a * 2.0)?;
+    g.keep_history(10);
+    g.set(a, 2.0)?;
+    g.stabilize(); // update 1
+    g.remove(b)?;
+    g.set(a, 3.0)?;
+    g.stabilize(); // update 2
+    assert_eq!(g.get_at(a, 1)?, 2.0);
+    assert_eq!(g.value_at(b.id(), 1)?.to_string(), "4");
+    assert!(matches!(
+        g.value_at(b.id(), 2),
+        Err(CalcError::UnknownNode(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn the_nodes_a_collection_groups_by_cannot_be_removed() -> Result {
+    let mut g = Graph::new();
+    let mut sales = Collection::new(&g, "sales");
+    let region = sales.field::<String>("region")?;
+    let amount = sales.field::<f64>("amount")?;
+    sales.group_sum(&mut g, "by_region", region, amount)?;
+    sales.upsert(&mut g, "s1", &[region.is("EU".into()), amount.is(1.0)])?;
+    g.stabilize();
+    sales.remove(&mut g, "s1")?;
+    g.stabilize();
+    let amount_node = g.find("sales[0].amount").expect("the row's nodes stay");
+    assert!(g.remove_node(amount_node).is_err());
+    Ok(())
+}
 
 #[test]
 fn concat_joins_two_strings() -> Result {

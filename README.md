@@ -119,6 +119,22 @@ update's changes to a `ChangeSink`. `crates/watershed-parquet` is one that
 writes them to Parquet files on a background thread, about 10 bytes per
 change.
 
+### Removing nodes
+
+A node that nothing uses can be removed:
+
+```rust
+g.remove(scratch)?;     // refused while another node or a total uses it
+```
+
+It is no longer calculated or found, its name is free for a new node, and
+reading it, setting it or using it in an expression is an error. Its id is
+not handed out again, so a handle kept from before never comes to mean a
+different node, and with history on it can still be read as of the updates
+it was part of. Its slot in the graph stays: removing frees a node's name
+and its work, not its memory. Like `redefine`, the next update rebuilds the
+graph's links, so it suits edits rather than a stream of changes.
+
 ## From Python
 
 `crates/watershed-py` is a Python package with the same engine, built with
@@ -345,6 +361,8 @@ and the tests failed every time:
 | When many rows change at once, rebuild only the lower half of a total's partial results | ✅ |
 | Never move a row whose calculated group changed during an update | ✅ |
 | Count a row that joins a group during an update from the next update instead | ✅ |
+| Leave the links to a removed node in place | ✅ |
+| Remove a node that something still uses | ✅ |
 | Explain an earlier update by the branch of an `if` that was not taken then | ✅ |
 | Explain a total as of an earlier update with members that joined later | ✅ |
 
@@ -451,9 +469,9 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **Collections:** the grid grouping its rows by a formula column (the
   engine can; the grid's view cannot yet). A million rows of four nodes
   each build and total in under two seconds, about 0.45 µs per node.
-- **Removing nodes** in general (collections reuse rows instead, and build
-  files redefine a removed value as a constant), and **pull mode** (only
-  calculating what someone is watching).
+- **Reusing removed nodes' memory** (a removed node keeps its slot, and a
+  removed row of a collection keeps its membership nodes), and **pull
+  mode** (only calculating what someone is watching).
 - **More time travel:** restoring an earlier update, a redefined node's
   earlier expressions (so `explain_at` can go back past a `redefine`), a
   collection's groups as of an earlier update, and a sink that writes to S3.

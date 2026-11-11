@@ -47,6 +47,7 @@ pub(crate) fn next_graph_id() -> GraphId {
 }
 
 mod keyed;
+mod removal;
 pub(crate) use keyed::{KeyedRow, key_text};
 
 /// Marks the end of a list in the edge arrays.
@@ -99,6 +100,18 @@ impl Names {
 
     fn find(&self, name: &str) -> Option<NodeId> {
         self.find_hashed(name, self.hash(name))
+    }
+
+    /// Forgets which node has a name, so that it is not found and the name
+    /// can be given again. The node still knows what it was called.
+    fn forget(&mut self, id: NodeId) {
+        let name = self.get(id).to_string();
+        let hash = self.hash(&name);
+        if self.index.get(&hash) == Some(&id) {
+            self.index.remove(&hash);
+        } else {
+            self.collisions.remove(&name);
+        }
     }
 
     /// A name's hash, so that checking a name is new and then adding it
@@ -266,6 +279,10 @@ pub struct Graph {
     rekey: Vec<u32>,
     /// Whether an update is in progress.
     updating: bool,
+    /// Every node a grouping's rows are built on.
+    keyed_nodes: HashSet<u32>,
+    /// Nodes that have been removed, and the last update each was part of.
+    removed: HashMap<NodeId, u64>,
     /// For each node given a new expression by `redefine`, the update from
     /// which it has had its current one. Earlier expressions are not kept,
     /// so this is how far back the node can be explained.
@@ -322,6 +339,8 @@ impl Graph {
             watched: HashMap::new(),
             rekey: Vec::new(),
             updating: false,
+            keyed_nodes: HashSet::new(),
+            removed: HashMap::new(),
             redefined_from: HashMap::new(),
         }
     }
@@ -575,6 +594,9 @@ impl Graph {
     /// other than the typed Rust API. The type is checked here instead.
     pub fn redefine_ir(&mut self, id: NodeId, ir: Ir) -> Result<(), CalcError> {
         let old = *self.hot.get(id.index()).ok_or(CalcError::UnknownNode(id))?;
+        if self.is_removed(id) {
+            return Err(CalcError::UnknownNode(id));
+        }
         if !matches!(old.kind, Kind::Float | Kind::General) {
             let what = if old.kind == Kind::Input {
                 "an input"
@@ -1007,7 +1029,7 @@ impl Graph {
         present: NodeId,
     ) -> Result<(), CalcError> {
         for id in [value, present] {
-            if id.index() >= self.hot.len() {
+            if id.index() >= self.hot.len() || self.is_removed(id) {
                 return Err(CalcError::UnknownNode(id));
             }
         }
@@ -1060,6 +1082,9 @@ impl Graph {
     /// feed has failed).
     pub fn set_value(&mut self, id: NodeId, value: Value) -> Result<(), CalcError> {
         let hot = self.hot.get(id.index()).ok_or(CalcError::UnknownNode(id))?;
+        if self.is_removed(id) {
+            return Err(CalcError::UnknownNode(id));
+        }
         if hot.kind != Kind::Input {
             return Err(CalcError::NotAnInput(self.name(id).to_string()));
         }
@@ -1448,6 +1473,9 @@ impl Graph {
                 epoch,
             });
         }
+        if self.removed.get(&id).is_some_and(|&last| epoch > last) {
+            return Err(CalcError::UnknownNode(id));
+        }
         if self.changed_in[i] <= epoch {
             return Ok(&self.values[i]);
         }
@@ -1515,7 +1543,7 @@ impl Graph {
     }
 
     pub fn is_input(&self, id: NodeId) -> bool {
-        self.hot[id.index()].kind == Kind::Input
+        self.hot[id.index()].kind == Kind::Input && !self.is_removed(id)
     }
 
     /// The nodes this node uses, in id order, without repeats.
@@ -1619,7 +1647,9 @@ impl Graph {
     }
 
     pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        (0..self.hot.len()).map(|i| NodeId(i as u32))
+        (0..self.hot.len())
+            .map(|i| NodeId(i as u32))
+            .filter(|&id| !self.is_removed(id))
     }
 
     // ---------------------------------------------------------------- checking
@@ -1751,6 +1781,9 @@ impl Graph {
     pub fn explain_node(&self, id: NodeId) -> String {
         if id.index() >= self.hot.len() {
             return "(not a node of this graph)".into();
+        }
+        if self.is_removed(id) {
+            return format!("({:?} has been removed)", self.name(id));
         }
         let mut out = String::new();
         let mut shown = HashSet::new();
@@ -2083,7 +2116,7 @@ impl Graph {
         if r.graph != self.id {
             return Err(CalcError::ForeignNode);
         }
-        if r.node.index() >= self.hot.len() {
+        if r.node.index() >= self.hot.len() || self.is_removed(r.node) {
             return Err(CalcError::UnknownNode(r.node));
         }
         Ok(())

@@ -98,6 +98,11 @@ impl Graph {
         let index = u32::try_from(k.rows.len()).expect("too many rows");
         k.rows.push(row);
         k.row_key.push(None);
+        self.keyed_nodes.extend(
+            [row.present.0, row.key.0]
+                .into_iter()
+                .chain(row.value.map(|v| v.0)),
+        );
         if self.hot[row.key.index()].kind != Kind::Input {
             self.watched
                 .entry(row.key.0)
