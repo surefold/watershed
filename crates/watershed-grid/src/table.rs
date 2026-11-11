@@ -244,6 +244,25 @@ fn contains_lower(text: &str, needle: &str) -> bool {
     }
 }
 
+/// Whether a cell has a place in a sorted column. An error or a number that
+/// is not a number has none, and goes last whichever way the column is sorted.
+fn sortable(value: &Value) -> bool {
+    match value {
+        Value::F64(x) => !x.is_nan(),
+        Value::Error(_) => false,
+        _ => true,
+    }
+}
+
+/// The order of two cells in a column sorted ascending, or descending.
+fn compare_directed(a: &Value, b: &Value, descending: bool) -> Ordering {
+    match (sortable(a), sortable(b)) {
+        (true, true) if descending => compare(b, a),
+        (true, true) => compare(a, b),
+        (a, b) => b.cmp(&a),
+    }
+}
+
 /// The order of two cells in a sorted column. Errors come last.
 fn compare(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
@@ -280,6 +299,10 @@ struct Group {
     plain: Vec<f64>,
 }
 
+/// The most rows noted as set between updates; past that the view is worked
+/// out from scratch, which is quicker by then anyway.
+const MOST_TRACKED: usize = 1 << 16;
+
 /// One entry of the view with this bit set is a group; otherwise a row.
 const GROUP: u32 = 1 << 31;
 
@@ -287,8 +310,11 @@ const GROUP: u32 = 1 << 31;
 #[derive(Debug, Clone, Copy)]
 pub struct Update {
     pub report: Report,
-    /// Whether the view (which rows show, in what order) was worked out again.
+    /// Whether the view (which rows show, in what order) was worked out
+    /// again from scratch.
     pub rebuilt: bool,
+    /// Whether the view was brought up to date by moving only the rows that were set.
+    pub patched: bool,
 }
 
 /// A table of keyed rows with calculated columns and totals, and a filtered,
@@ -335,6 +361,10 @@ pub struct Table {
     value_touched: bool,
     /// Something was set, added or removed since the last update.
     pending: bool,
+    /// The rows with cells set since the last update (a row may be noted twice).
+    changed_rows: Vec<u32>,
+    /// More rows were set than `changed_rows` holds.
+    changed_unknown: bool,
 
     /// The update whose values the grid shows, when looking back.
     as_of: Option<u64>,
@@ -382,6 +412,8 @@ impl Table {
             touched: Vec::new(),
             value_touched: false,
             pending: false,
+            changed_rows: Vec::new(),
+            changed_unknown: false,
             as_of: None,
             missing: Value::error("not there yet"),
         }
@@ -571,10 +603,11 @@ impl Table {
         self.c
             .upsert_named(&mut self.g, key, &row)
             .map_err(|e| e.to_string())?;
-        if self.index.contains_key(key) {
+        if let Some(&row) = self.index.get(key) {
             for (touched, col) in self.touched.iter_mut().zip(&self.cols) {
                 *touched |= col.formula.is_none();
             }
+            self.note_changed(row);
             return Ok(());
         }
         self.index.insert(key.to_string(), self.keys.len() as u32);
@@ -630,6 +663,7 @@ impl Table {
                 .map_err(|e| e.to_string())?;
         }
         self.touched[col] = true;
+        self.note_changed(row as u32);
         Ok(())
     }
 
@@ -812,14 +846,55 @@ impl Table {
         };
         self.pending = false;
         self.compact();
-        let rebuilt = self.view_is_stale();
+        let stale = self.view_is_stale();
+        let patched = stale && self.can_patch() && self.patch();
+        let rebuilt = stale && !patched;
         if rebuilt {
             self.rebuild();
         }
         self.structural = false;
         self.value_touched = false;
         self.touched.fill(false);
-        Update { report, rebuilt }
+        self.changed_rows.clear();
+        self.changed_unknown = false;
+        Update {
+            report,
+            rebuilt,
+            patched,
+        }
+    }
+
+    /// Works the view out from scratch, whatever has or has not changed.
+    /// The grid does this itself when it needs to; this is for checking that
+    /// a view kept up to date row by row is the one a fresh start gives.
+    pub fn rebuild_view(&mut self) {
+        self.rebuild();
+    }
+
+    /// Notes that a row's cells were set, so the view can move just that row.
+    fn note_changed(&mut self, row: u32) {
+        if self.changed_rows.len() < MOST_TRACKED {
+            self.changed_rows.push(row);
+        } else {
+            self.changed_unknown = true;
+        }
+    }
+
+    /// Whether the view can be brought up to date by moving only the rows
+    /// whose cells were set: nothing else about it changed, and they are few
+    /// enough for that to be quicker than starting again.
+    ///
+    /// A row's cells depend only on its own fields and on named values, so
+    /// with no named value changed, a row that was not set shows what it
+    /// showed before, passes the filters as before, and sorts where it did.
+    fn can_patch(&self) -> bool {
+        !self.structural
+            && !self.value_touched
+            && !self.changed_unknown
+            && self.as_of.is_none()
+            && self.changed_rows.len() <= (self.keys.len() / 8).max(64)
+            // A row set into another group may need a group that is not there yet.
+            && !self.group_by.is_some_and(|by| self.touched[by])
     }
 
     /// Whether the changes since the last update could change which rows
@@ -862,8 +937,13 @@ impl Table {
         }
     }
 
-    /// Works out the view from scratch: filter, sort, group.
-    fn rebuild(&mut self) {
+    /// Whether any filter is set.
+    fn filtering(&self) -> bool {
+        !self.quick.is_empty() || self.cols.iter().any(|c| c.filter.is_some())
+    }
+
+    /// A test of whether a row passes every filter.
+    fn row_test(&self) -> impl Fn(u32) -> bool + '_ {
         let n = self.cols.len();
         let filters: Vec<(usize, &Filter)> = self
             .cols
@@ -875,38 +955,51 @@ impl Table {
             .filter(|&k| self.cols[k].kind == Kind::Text)
             .collect();
         let quick = self.quick.as_str();
-        let filter_on = !filters.is_empty() || !quick.is_empty();
-
-        // Looking back, only the rows that were there then.
-        let there = |r: u32| match self.as_of {
-            Some(epoch) if n > 0 => self.g.value_at(self.nodes[r as usize * n], epoch).is_ok(),
-            _ => true,
-        };
-        let mut rows: Vec<u32> = (0..self.keys.len() as u32)
-            .filter(|&r| {
-                there(r)
-                    && filters.iter().all(|&(c, f)| f.accepts(self.cell(r, c)))
-                    && (quick.is_empty()
-                        || contains_lower(&self.keys[r as usize], quick)
-                        || text_cols.iter().any(|&c| {
-                            matches!(self.cell(r, c), Value::Str(s) if contains_lower(s, quick))
-                        }))
-            })
-            .collect();
-
-        if let Some((&(first, first_desc), rest)) = self.sort.split_first() {
-            let then = |a: u32, b: u32| {
-                for &(col, desc) in rest {
-                    let order = compare(self.cell(a, col), self.cell(b, col));
-                    if order != Ordering::Equal {
-                        return if desc { order.reverse() } else { order };
-                    }
-                }
-                Ordering::Equal
+        move |r| {
+            // Looking back, only the rows that were there then.
+            let there = match self.as_of {
+                Some(epoch) if n > 0 => self.g.value_at(self.nodes[r as usize * n], epoch).is_ok(),
+                _ => true,
             };
-            let directed = |order: Ordering| if first_desc { order.reverse() } else { order };
-            if self.cols[first].kind == Kind::Number {
-                // Numbers are read out once, so sorting compares them side by side.
+            there
+                && filters.iter().all(|&(c, f)| f.accepts(self.cell(r, c)))
+                && (quick.is_empty()
+                    || contains_lower(&self.keys[r as usize], quick)
+                    || text_cols.iter().any(
+                        |&c| matches!(self.cell(r, c), Value::Str(s) if contains_lower(s, quick)),
+                    ))
+        }
+    }
+
+    /// The order of two rows by the sorted columns from `from` on. Rows that
+    /// tie everywhere keep the order they arrived in.
+    fn order_from(&self, from: usize, a: u32, b: u32) -> Ordering {
+        for &(col, desc) in &self.sort[from..] {
+            let order = compare_directed(self.cell(a, col), self.cell(b, col), desc);
+            if order != Ordering::Equal {
+                return order;
+            }
+        }
+        a.cmp(&b)
+    }
+
+    /// The order of two rows in the sorted view.
+    fn order(&self, a: u32, b: u32) -> Ordering {
+        self.order_from(0, a, b)
+    }
+
+    /// Works out the view from scratch: filter, sort, group.
+    fn rebuild(&mut self) {
+        let filter_on = self.filtering();
+        let pass = self.row_test();
+        let mut rows: Vec<u32> = (0..self.keys.len() as u32).filter(|&r| pass(r)).collect();
+        drop(pass);
+
+        match self.sort.first() {
+            None => {}
+            Some(&(first, desc)) if self.cols[first].kind == Kind::Number => {
+                // Numbers are read out once, so sorting compares them side by
+                // side. What cannot be sorted (an error, not a number) is NaN here.
                 let mut keyed: Vec<(f64, u32)> = rows
                     .iter()
                     .map(|&r| match self.cell(r, first) {
@@ -915,97 +1008,185 @@ impl Table {
                     })
                     .collect();
                 keyed.sort_by(|a, b| {
-                    // Errors (not a number) come last either way.
                     let order = match (a.0.is_nan(), b.0.is_nan()) {
-                        (false, false) => directed(a.0.total_cmp(&b.0)),
+                        (false, false) if desc => b.0.total_cmp(&a.0),
+                        (false, false) => a.0.total_cmp(&b.0),
+                        // The unsortable come last either way.
                         (x, y) => x.cmp(&y),
                     };
-                    order.then_with(|| then(a.1, b.1))
+                    order.then_with(|| self.order_from(1, a.1, b.1))
                 });
                 rows = keyed.into_iter().map(|(_, r)| r).collect();
-            } else {
-                rows.sort_by(|&a, &b| {
-                    directed(compare(self.cell(a, first), self.cell(b, first)))
-                        .then_with(|| then(a, b))
-                });
             }
+            Some(_) => rows.sort_by(|&a, &b| self.order(a, b)),
         }
 
+        let buckets = match self.group_by {
+            None => vec![(String::new(), rows)],
+            Some(by) => {
+                // Each group's rows, in sorted order.
+                let mut slots: HashMap<&str, usize> = HashMap::new();
+                let mut buckets: Vec<(String, Vec<u32>)> = Vec::new();
+                for &r in &rows {
+                    let key = self.group_key(r, by);
+                    let slot = *slots.entry(key).or_insert_with(|| {
+                        buckets.push((key.to_string(), Vec::new()));
+                        buckets.len() - 1
+                    });
+                    buckets[slot].1.push(r);
+                }
+                buckets
+            }
+        };
+        self.finish(buckets, filter_on);
+    }
+
+    fn group_key(&self, row: u32, by: usize) -> &str {
+        match self.cell(row, by) {
+            Value::Str(s) => s,
+            _ => "",
+        }
+    }
+
+    /// Brings the view up to date by moving only the rows whose cells were
+    /// set (see [`can_patch`](Self::can_patch)): they are taken out, and those
+    /// that pass the filters go back where they now sort. Returns false,
+    /// having changed nothing, if it turns out the view needs working out
+    /// from scratch.
+    fn patch(&mut self) -> bool {
+        let filter_on = self.filtering();
+        let mut is_changed = vec![false; self.keys.len()];
+        for &r in &self.changed_rows {
+            is_changed[r as usize] = true;
+        }
+        let kept = |rows: &[u32]| -> Vec<u32> {
+            rows.iter()
+                .copied()
+                .filter(|&r| !is_changed[r as usize])
+                .collect()
+        };
+        // One bucket per group, or a single one when rows are not grouped.
+        let mut buckets: Vec<(String, Vec<u32>)> = match self.group_by {
+            None => vec![(String::new(), kept(&self.sorted))],
+            Some(_) => self
+                .groups
+                .iter()
+                .map(|g| (g.key.clone(), kept(&self.sorted[g.start..g.start + g.len])))
+                .collect(),
+        };
+
+        let pass = self.row_test();
+        let mut back: Vec<Vec<u32>> = vec![Vec::new(); buckets.len()];
+        for r in (0..self.keys.len() as u32).filter(|&r| is_changed[r as usize] && pass(r)) {
+            let bucket = match self.group_by {
+                None => 0,
+                Some(by) => {
+                    let key = self.group_key(r, by);
+                    match buckets.iter().position(|(k, _)| k == key) {
+                        Some(bucket) => bucket,
+                        // Its group has no rows showing, so it has no line yet.
+                        None => return false,
+                    }
+                }
+            };
+            back[bucket].push(r);
+        }
+        drop(pass);
+
+        for (bucket, mut rows) in buckets.iter_mut().zip(back) {
+            if rows.is_empty() {
+                continue;
+            }
+            rows.sort_by(|&a, &b| self.order(a, b));
+            let kept = std::mem::take(&mut bucket.1);
+            let mut merged = Vec::with_capacity(kept.len() + rows.len());
+            let mut from = 0;
+            for r in rows {
+                let at =
+                    from + kept[from..].partition_point(|&x| self.order(x, r) == Ordering::Less);
+                merged.extend_from_slice(&kept[from..at]);
+                merged.push(r);
+                from = at;
+            }
+            merged.extend_from_slice(&kept[from..]);
+            bucket.1 = merged;
+        }
+        if self.group_by.is_some() {
+            buckets.retain(|(_, rows)| !rows.is_empty());
+        }
+        self.finish(buckets, filter_on);
+        true
+    }
+
+    /// Stores the view from its rows in buckets, each in sorted order: one
+    /// bucket per group, or a single one when rows are not grouped. Puts the
+    /// groups in order and adds up what a filter needs added up.
+    fn finish(&mut self, mut buckets: Vec<(String, Vec<u32>)>, filter_on: bool) {
+        let n = self.cols.len();
         let fold = |col: usize, rows: &[u32]| {
             self.cols[col]
                 .agg
                 .fold(rows.iter().map(|&r| self.cell(r, col)))
+        };
+        let mut groups: Vec<Group> = Vec::new();
+        let rows = match self.group_by {
+            None => buckets.pop().map(|(_, rows)| rows).unwrap_or_default(),
+            Some(by) => {
+                // Groups go by the first sorted column's total if it has one, and by name otherwise.
+                let by_total = self
+                    .sort
+                    .first()
+                    .filter(|&&(col, _)| col != by && self.cols[col].agg != Agg::None)
+                    .copied();
+                let name_desc = matches!(self.sort.first(), Some(&(col, true)) if col == by);
+                let mut order: Vec<(f64, usize)> = buckets
+                    .iter()
+                    .enumerate()
+                    .map(|(k, (key, rows))| {
+                        let total = match by_total {
+                            Some((col, _)) if filter_on => fold(col, rows),
+                            Some((col, _)) => self.cols[col]
+                                .agg
+                                .of_graph(self.group_number(by, key, col), rows.len()),
+                            None => 0.0,
+                        };
+                        (total, k)
+                    })
+                    .collect();
+                order.sort_by(|a, b| {
+                    let by_name = buckets[a.1].0.cmp(&buckets[b.1].0);
+                    match by_total {
+                        Some((_, desc)) => {
+                            let order = a.0.total_cmp(&b.0);
+                            (if desc { order.reverse() } else { order }).then(by_name)
+                        }
+                        None if name_desc => by_name.reverse(),
+                        None => by_name,
+                    }
+                });
+                let mut rows = Vec::with_capacity(buckets.iter().map(|b| b.1.len()).sum());
+                for (_, k) in order {
+                    let (key, members) = &buckets[k];
+                    groups.push(Group {
+                        key: key.clone(),
+                        start: rows.len(),
+                        len: members.len(),
+                        plain: if filter_on {
+                            (0..n).map(|col| fold(col, members)).collect()
+                        } else {
+                            Vec::new()
+                        },
+                    });
+                    rows.extend_from_slice(members);
+                }
+                rows
+            }
         };
         let plain_totals: Vec<f64> = if filter_on {
             (0..n).map(|col| fold(col, &rows)).collect()
         } else {
             Vec::new()
         };
-
-        let mut groups: Vec<Group> = Vec::new();
-        if let Some(by) = self.group_by {
-            // Each group's rows, in sorted order, and the groups in the order first met.
-            let mut slots: HashMap<&str, usize> = HashMap::new();
-            let mut buckets: Vec<(&str, Vec<u32>)> = Vec::new();
-            for &r in &rows {
-                let key = match self.cell(r, by) {
-                    Value::Str(s) => &**s,
-                    _ => "",
-                };
-                let slot = *slots.entry(key).or_insert_with(|| {
-                    buckets.push((key, Vec::new()));
-                    buckets.len() - 1
-                });
-                buckets[slot].1.push(r);
-            }
-            // Groups go by the first sorted column's total if it has one, and by name otherwise.
-            let by_total = self
-                .sort
-                .first()
-                .filter(|&&(col, _)| col != by && self.cols[col].agg != Agg::None)
-                .copied();
-            let name_desc = matches!(self.sort.first(), Some(&(col, true)) if col == by);
-            let mut order: Vec<(f64, usize)> = buckets
-                .iter()
-                .enumerate()
-                .map(|(k, (key, rows))| {
-                    let total = match by_total {
-                        Some((col, _)) if filter_on => fold(col, rows),
-                        Some((col, _)) => self.cols[col]
-                            .agg
-                            .of_graph(self.group_number(by, key, col), rows.len()),
-                        None => 0.0,
-                    };
-                    (total, k)
-                })
-                .collect();
-            order.sort_by(|a, b| {
-                let by_name = buckets[a.1].0.cmp(buckets[b.1].0);
-                match by_total {
-                    Some((_, desc)) => {
-                        let order = a.0.total_cmp(&b.0);
-                        (if desc { order.reverse() } else { order }).then(by_name)
-                    }
-                    None if name_desc => by_name.reverse(),
-                    None => by_name,
-                }
-            });
-            rows = Vec::with_capacity(rows.len());
-            for (_, k) in order {
-                let (key, members) = &buckets[k];
-                groups.push(Group {
-                    key: key.to_string(),
-                    start: rows.len(),
-                    len: members.len(),
-                    plain: if filter_on {
-                        (0..n).map(|col| fold(col, members)).collect()
-                    } else {
-                        Vec::new()
-                    },
-                });
-                rows.extend_from_slice(members);
-            }
-        }
 
         self.filter_on = filter_on;
         self.plain_totals = plain_totals;
