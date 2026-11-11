@@ -445,7 +445,12 @@ How it is fast and small:
   is queued several times, and the repeats are removed when its level is
   sorted.
 - **Levels are processed in node-id order**, which reads memory roughly front
-  to back.
+  to back. Nodes are stored in the order they are made, so that order
+  matters: `cargo run --release --example placement` builds the same graph
+  level by level and subtree by subtree (each subtotal straight after the
+  two it adds up). Level by level, 1% and 10% of prices changing together
+  update about 2.5 to 3 times faster; one price changing takes the same
+  either way.
 - **Large levels run on all cores** (the `parallel` feature, on by default).
   Nodes on one level never use each other, so they are recalculated at once,
   and their users are queued from all cores too.
@@ -474,7 +479,7 @@ crates/watershed-core/
   src/sink.rs     passing each update's changes outside the graph
   src/error.rs    errors
   tests/          behaviour and property tests
-  examples/       tour and benchmark
+  examples/       tour, benchmark, collection and placement
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
 crates/watershed-web/   the engine as WebAssembly, with three example models
 crates/watershed-parquet/ an update's changes written to Parquet files
@@ -485,10 +490,13 @@ web/grid/               the grid's page, the script that draws it, and the chart
 
 ## Not done yet
 
-- **Speed:** small and medium updates are limited by waiting on memory, as
-  they jump between nodes scattered across the graph; placing nodes that
-  change together near each other would help. Building is about 1 µs per
-  node.
+- **Speed:** small and medium updates are limited by waiting on memory.
+  Placing nodes that change together near each other was the guess here,
+  and the `placement` example says otherwise: what helps is each level's
+  nodes sitting together, which is what building level by level gives. A
+  graph built in another order could be renumbered into that one, but only
+  if node ids were allowed to move (today a handle holds the id). Building
+  is about 1 µs per node.
 - **Collections:** the grid grouping its rows by a formula column (the
   engine can; the grid's view cannot yet). A million rows of four nodes
   each build and total in under two seconds, about 0.45 µs per node.
