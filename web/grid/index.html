@@ -303,6 +303,9 @@ async function build(size) {
   const mine = (grid = Grid.demo());
   grid.set_value("fee_bps", Number($("fee").value) || 0);
   const lazy = size === "scroll";
+  // Rows will keep arriving, so the graph is not asked to keep a total for
+  // every group: that costs a node per row per column, for good.
+  if (lazy) grid.set_group_budget(0);
   let loaded = 0;
   view = new WatershedGrid($("grid"), grid, {
     keyTitle: "trade",
