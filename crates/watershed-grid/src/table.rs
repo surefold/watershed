@@ -2,6 +2,7 @@
 //! page shows (filtered, sorted, grouped). No JavaScript here, so it can be
 //! tested like any other Rust.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -1084,12 +1085,13 @@ impl Table {
         self.structural = true;
     }
 
-    /// Groups rows by a text field, or by nothing.
+    /// Groups rows by a text column (a field, or a formula that gives
+    /// text), or by nothing.
     pub fn set_group(&mut self, col: Option<usize>) -> Result<(), String> {
         if let Some(col) = col {
             let c = self.col(col)?;
-            if c.kind != Kind::Text || c.formula.is_some() {
-                return Err(format!("{}: rows are grouped by a text field", c.name));
+            if c.kind != Kind::Text {
+                return Err(format!("{}: rows are grouped by a text column", c.name));
             }
             // The graph keeps the groups' totals if it already does for this
             // column, or if that is cheap enough to start.
@@ -1233,8 +1235,11 @@ impl Table {
             && !self.changed_unknown
             && self.as_of.is_none()
             && self.changed_rows.len() <= (self.keys.len() / 8).max(64)
-            // A row set into another group may need a group that is not there yet.
-            && !self.group_by.is_some_and(|by| self.touched[by])
+            // A row set into another group may need a group that is not there
+            // yet; and any field set may move a row a formula puts in its group.
+            && !self
+                .group_by
+                .is_some_and(|by| self.touched[by] || self.cols[by].formula.is_some())
     }
 
     /// Whether the changes since the last update could change which rows
@@ -1366,14 +1371,18 @@ impl Table {
             None => vec![Bucket::new("", rows)],
             Some(by) => {
                 // Each group's rows, in sorted order.
-                let mut slots: HashMap<&str, usize> = HashMap::new();
+                let mut slots: HashMap<Cow<str>, usize> = HashMap::new();
                 let mut buckets: Vec<Bucket> = Vec::new();
                 for &r in &rows {
                     let key = self.group_key(r, by);
-                    let slot = *slots.entry(key).or_insert_with(|| {
-                        buckets.push(Bucket::new(key, Vec::new()));
-                        buckets.len() - 1
-                    });
+                    let slot = match slots.get(&*key) {
+                        Some(&slot) => slot,
+                        None => {
+                            buckets.push(Bucket::new(&key, Vec::new()));
+                            slots.insert(key, buckets.len() - 1);
+                            buckets.len() - 1
+                        }
+                    };
                     buckets[slot].rows.push(r);
                 }
                 buckets
@@ -1382,11 +1391,20 @@ impl Table {
         self.finish(buckets, filter_on, None);
     }
 
-    fn group_key(&self, row: u32, by: usize) -> &str {
+    /// The group a row is in: its text in the grouped column. A formula
+    /// that fails puts its row in a group named after the error.
+    fn group_key(&self, row: u32, by: usize) -> Cow<'_, str> {
         match self.cell(row, by) {
-            Value::Str(s) => s,
-            _ => "",
+            Value::Str(s) => Cow::Borrowed(s),
+            other => Cow::Owned(other.to_string()),
         }
+    }
+
+    /// Whether these rows, one group's, are there because the formula they
+    /// are grouped by failed.
+    fn failed_group(&self, by: usize, rows: &[u32]) -> bool {
+        rows.first()
+            .is_some_and(|&r| !matches!(self.cell(r, by), Value::Str(_)))
     }
 
     /// Brings the view up to date by moving only the rows whose cells were
@@ -1423,7 +1441,7 @@ impl Table {
                     .collect();
                 let mut touched = vec![false; self.groups.len()];
                 for &r in &self.changed_rows {
-                    if let Some(&k) = slots.get(self.group_key(r, by)) {
+                    if let Some(&k) = slots.get(&*self.group_key(r, by)) {
                         touched[k] = true;
                     }
                 }
@@ -1453,7 +1471,7 @@ impl Table {
                 None => 0,
                 Some(by) => {
                     let key = self.group_key(r, by);
-                    match buckets.iter().position(|b| b.key == key) {
+                    match buckets.iter().position(|b| b.key == *key) {
                         Some(bucket) => bucket,
                         // Its group has no rows showing, so it has no line yet.
                         None => return false,
@@ -1524,6 +1542,26 @@ impl Table {
                         if bucket.plain.is_none() {
                             bucket.plain =
                                 Some((0..n).map(|col| fold(col, &bucket.rows)).collect());
+                        }
+                    }
+                } else if self.cols[by].formula.is_some() {
+                    // Rows whose formula failed are in no group of the
+                    // graph's (an error names none there), so the grid adds
+                    // their group up, from the cells.
+                    for bucket in &mut buckets {
+                        if self.failed_group(by, &bucket.rows) {
+                            bucket.plain = Some(
+                                (0..n)
+                                    .map(|col| {
+                                        self.cols[col].agg.fold(bucket.rows.iter().map(|&r| {
+                                            match self.cell(r, col) {
+                                                Value::F64(x) => *x,
+                                                _ => f64::NAN,
+                                            }
+                                        }))
+                                    })
+                                    .collect(),
+                            );
                         }
                     }
                 }
@@ -1698,7 +1736,7 @@ impl Table {
                 c.formula.as_deref().map_or("null".into(), json_str),
                 c.agg.name(),
                 c.formula.is_none(),
-                c.formula.is_none() && c.kind == Kind::Text,
+                c.kind == Kind::Text,
                 json_str(&c.filter_text),
             );
         }
@@ -1821,6 +1859,23 @@ impl Table {
                 c.name
             ));
         }
+        let failed = self.groups.iter().find(|g| {
+            g.key == key
+                && !self.filter_on
+                && c.agg != Agg::None
+                && self.failed_group(by, &self.sorted[g.start..g.start + g.len])
+        });
+        if let Some(group) = failed {
+            return Ok(format!(
+                "The {} of {} over this group's {} rows, added up by the grid.\n\n\
+                 These are the rows where {} could not be worked out, and the graph\n\
+                 keeps totals only for groups that have a name.",
+                c.agg.name(),
+                c.name,
+                group.len,
+                self.cols[by].name
+            ));
+        }
         let id = self
             .group_node(by, key, col)
             .ok_or_else(|| format!("{} has no total", c.name))?;
@@ -1855,7 +1910,7 @@ impl Table {
         let agg = self.cols[col].agg;
         if agg == Agg::None {
             f64::NAN
-        } else if self.filter_on || self.plain_groups {
+        } else if self.filter_on || self.plain_groups || !group.plain.is_empty() {
             group.plain[col]
         } else {
             agg.of_graph(self.group_number(by, &group.key, col), group.len)

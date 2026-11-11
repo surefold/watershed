@@ -276,13 +276,93 @@ fn with_a_filter_on_group_totals_count_only_the_rows_that_pass() {
 }
 
 #[test]
-fn only_text_fields_can_be_grouped_by() {
+fn only_text_columns_can_be_grouped_by() {
     let mut t = orders();
     assert_eq!(
         t.set_group(Some(QTY)).unwrap_err(),
-        "qty: rows are grouped by a text field"
+        "qty: rows are grouped by a text column"
+    );
+    assert_eq!(
+        t.set_group(Some(LINE)).unwrap_err(),
+        "line: rows are grouped by a text column"
     );
     t.set_group(None).unwrap();
+}
+
+#[test]
+fn rows_can_be_grouped_by_a_formula_that_gives_text() {
+    let mut t = orders();
+    let size = t
+        .add_formula("size", "if(line >= 20, \"big\", \"small\")", Agg::None)
+        .unwrap();
+    assert!(t.columns_json().contains(
+        r#""name":"size","kind":"text","formula":"if(line >= 20, \"big\", \"small\")","agg":"none","editable":false,"groupable":true"#
+    ));
+    t.set_group(Some(size)).unwrap();
+    t.update();
+    assert_eq!(
+        t.groups_json(),
+        concat!(
+            r#"[{"g":"big","n":2,"c":[null,5,10,41,null]},"#,
+            r#"{"g":"small","n":3,"c":[null,11,5,21,null]}]"#
+        )
+    );
+    assert!(t.explain_group("big", LINE).unwrap().contains("by size"));
+    // A field set moves the row to the group the formula now names.
+    t.set_cell("o-2", QTY, "8").unwrap();
+    t.update();
+    assert_eq!(t.view_groups(), [("big", 3), ("small", 2)]);
+    assert!(t.rows_json(0, 1).contains(r#""c":[null,13,10,81,null]"#));
+    // So does a named value that every row's formula reads.
+    t.set_value("tax", 1.0).unwrap();
+    t.update();
+    assert_eq!(t.view_groups(), [("big", 4), ("small", 1)]);
+    assert!(t.rows_json(1, 1).contains(r#""c":[null,6,1,12,null]"#));
+    // A group whose last row leaves goes; removing a row takes it out of its group.
+    t.set_cell("o-5", QTY, "60").unwrap();
+    t.remove("o-1").unwrap();
+    t.update();
+    assert_eq!(t.view_groups(), [("big", 4)]);
+    assert!(t.rows_json(0, 1).contains(r#""c":[null,75,7,262,null]"#));
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn a_formula_that_fails_puts_its_row_in_a_group_named_after_the_error() {
+    let mut t = orders();
+    let twice = t
+        .add_formula("twice", "concat(region, region)", Agg::None)
+        .unwrap();
+    // Twice this is more text than a value holds.
+    let long = "x".repeat(watershed_core::MAX_TEXT_BYTES / 2 + 1);
+    t.upsert("o-6", vec![text(&long), Value::F64(9.0), Value::F64(1.0)])
+        .unwrap();
+    t.set_group(Some(twice)).unwrap();
+    t.update();
+    let groups = t.view_groups();
+    assert_eq!(groups.len(), 4);
+    let failed = groups
+        .iter()
+        .find(|(key, _)| key.starts_with("error: "))
+        .expect("a group for the row whose formula failed");
+    assert_eq!(failed.1, 1);
+    // An error names no group in the graph, so the grid adds this one up.
+    let line = t.group_line(failed.0).unwrap();
+    assert!(t.rows_json(line, 1).contains(r#""c":[null,9,1,9,null]"#));
+    assert!(
+        t.explain_group(failed.0, LINE)
+            .unwrap()
+            .contains("added up by the grid")
+    );
+    // The other groups' totals are still the graph's.
+    let line = t.group_line("EUEU").unwrap();
+    assert!(t.rows_json(line, 1).contains(r#""c":[null,6,10,30,null]"#));
+    assert!(
+        !t.explain_group("EUEU", LINE)
+            .unwrap()
+            .contains("by the grid")
+    );
+    assert_eq!(t.check(), Ok(()));
 }
 
 #[test]
@@ -840,6 +920,93 @@ fn several_cells_set_together_undo_together_and_removed_rows_are_left_out() {
     assert_eq!(t.value("o-1", QTY).unwrap().to_string(), "2");
     assert_eq!(t.value("o-3", PRICE).unwrap().to_string(), "2.5");
     assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn grouped_by_a_formula_the_graphs_group_totals_are_the_ones_adding_up_gives() {
+    let regions = ["EU", "US", "APAC"];
+    let mut seed = 0x5EED_F00D_1234_5678_u64;
+    let mut pick = |n: u64| (next(&mut seed) % n) as usize;
+    // Two tables with the same rows and edits; in one the grid adds group totals up itself.
+    let mut tables = [Table::new(), Table::new()];
+    tables[1].set_group_budget(0);
+    for t in &mut tables {
+        t.add_field("region", Kind::Text, Agg::Count).unwrap();
+        t.add_field("qty", Kind::Number, Agg::Sum).unwrap();
+        t.add_field("price", Kind::Number, Agg::Avg).unwrap();
+        t.add_value("cut", 100.0).unwrap();
+        t.add_formula("line", "qty * price", Agg::Max).unwrap();
+        t.add_formula(
+            "bucket",
+            "concat(region, if(line >= cut, \" big\", \" small\"))",
+            Agg::None,
+        )
+        .unwrap();
+    }
+    for r in 0..300 {
+        let row = vec![
+            text(regions[pick(3)]),
+            Value::F64(pick(9) as f64),
+            Value::F64(pick(30) as f64),
+        ];
+        for t in &mut tables {
+            t.upsert(&format!("k{r:03}"), row.clone()).unwrap();
+        }
+    }
+    let mut nodes = [0, 0];
+    for (t, nodes) in tables.iter_mut().zip(&mut nodes) {
+        t.update();
+        *nodes = t.nodes();
+        t.set_group(Some(4)).unwrap();
+        t.set_sort(&[(1, true)]).unwrap();
+        t.expand_all(true);
+        t.update();
+        t.expand_all(true);
+    }
+    assert!(
+        tables[0].nodes() > nodes[0] + 300,
+        "the graph keeps group totals"
+    );
+    assert_eq!(tables[1].nodes(), nodes[1]);
+    assert_eq!(tables[0].group_count(), 6);
+
+    let mut gone = std::collections::HashSet::new();
+    for step in 0..150 {
+        let key = format!("k{:03}", pick(300));
+        if gone.contains(&key) {
+            continue;
+        }
+        if step % 30 == 28 {
+            gone.insert(key.clone());
+        }
+        for t in &mut tables {
+            match step % 30 {
+                // Now and then the line between big and small moves, for every row.
+                29 => t
+                    .set_value("cut", [40.0, 100.0, 160.0][step / 30 % 3])
+                    .unwrap(),
+                28 => {
+                    t.remove(&key).unwrap();
+                }
+                _ => {}
+            }
+        }
+        let (col, value) = match pick(8) {
+            0 => (0, regions[pick(3)].to_string()),
+            1..=4 => (1, pick(9).to_string()),
+            _ => (2, pick(30).to_string()),
+        };
+        for t in &mut tables {
+            if step % 30 != 28 {
+                t.set_cell(&key, col, &value).unwrap();
+            }
+            t.update();
+        }
+        assert_eq!(shown(&tables[0]), shown(&tables[1]), "step {step}");
+    }
+    for t in &tables {
+        assert_eq!(t.check(), Ok(()));
+    }
 }
 
 #[test]

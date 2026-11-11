@@ -362,7 +362,9 @@ so one of your own is one more rule, `[data-wg-theme="mine"] { ... }`.
 While a filter is on, totals are of the rows that pass it, added up the
 plain way; the graph's totals are of every row.
 
-Group totals are aggregates in the graph only for small tables. A grouping
+Rows group by any text column: a field, or a formula such as
+`if(line >= 100, "big", "small")`, where a row changes group as its cells
+change. Group totals are aggregates in the graph only for small tables. A grouping
 in the graph costs a node for each row in each totalled column, for every
 column ever grouped by, and nodes cannot be removed: 50,000 rows with six
 totals took about 175 MB per grouping column. Past 100,000 row-and-column
@@ -563,9 +565,10 @@ web/grid/               the grid's page, the script that draws it, and the chart
   graph built in another order could be renumbered into that one, but only
   if node ids were allowed to move (today a handle holds the id). Building
   is about 1 µs per node.
-- **Collections:** the grid grouping its rows by a formula column (the
-  engine can; the grid's view cannot yet). A million rows of four nodes
-  each build and total in under two seconds, about 0.45 µs per node.
+- **Collections:** a grid grouped by a formula column works its view out
+  again after every edit, where one grouped by a field moves only the rows
+  that were set. A million rows of four nodes each build and total in under
+  two seconds, about 0.45 µs per node.
 - **Reusing removed nodes' memory**: a removed node keeps its slot, and a
   removed row of a collection keeps its membership nodes.
 - **Pull mode:** what a collection's groupings are built on is always
