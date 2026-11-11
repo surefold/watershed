@@ -19,7 +19,7 @@ class WatershedTest {
 
         g[price] = 3.0
         val report = g.stabilize()
-        assertEquals(1uL, report.recalculated)
+        assertEquals(1L, report.recalculated)
         assertEquals(listOf("total"), g.lastRecalculated())
         assertEquals(30.0, g[total])
         assertTrue(g.explain(total).startsWith("total = 30  ← qty * price"))
@@ -112,7 +112,7 @@ class WatershedTest {
         assertEquals(2L, g[rows])
 
         orders.upsert("a", qty(3.0))
-        assertEquals(2uL, g.stabilize().recalculated)
+        assertEquals(2L, g.stabilize().recalculated)
         assertEquals(14.0, g[total])
         assertEquals("EU", orders["a", region])
         assertEquals(6.0, orders["a", double])
@@ -120,7 +120,7 @@ class WatershedTest {
         assertTrue(orders.remove("b"))
         g.stabilize()
         assertEquals(6.0, g[total])
-        assertEquals(1uL, orders.size())
+        assertEquals(1L, orders.size())
         g.checkConsistency()
     }
 
@@ -143,6 +143,20 @@ class WatershedTest {
     }
 
     @Test
+    fun `many nodes and many prices can go in one call each`() {
+        val g = Graph()
+        val prices = List(100) { g.input("p$it", it.toDouble()) }
+        val doubles = g.defineAll(prices.mapIndexed { i, p -> "d$i" to p * 2 })
+        val total = g.define("total", doubles.reduce<Expr<Double>, Node<Double>> { sum, d -> sum + d })
+        assertEquals(9900.0, g[total])
+
+        g.setAll(mapOf(prices[0] to 10.0, prices[1] to 11.0))
+        assertEquals(1, g.stabilize().inputsChanged.toInt() - 1)
+        assertEquals(9940.0, g[total])
+        g.checkConsistency()
+    }
+
+    @Test
     fun `in pull mode only what is watched is calculated`() {
         val g = Graph()
         val a = g.input("a", 1.0)
@@ -151,7 +165,7 @@ class WatershedTest {
         g.watch(watched)
         g.calculateOnlyWatched(true)
         g[a] = 5
-        assertEquals(1uL, g.stabilize().recalculated)
+        assertEquals(1L, g.stabilize().recalculated)
         assertEquals(6.0, g[watched])
         assertFailsWith<WatershedException> { g[other] }
 

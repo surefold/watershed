@@ -6,6 +6,7 @@ A small Kotlin program that uses the engine through `crates/watershed-jvm`.
 cd examples/kotlin
 gradle run      # builds the Rust library, writes its Kotlin side, runs src/main/kotlin/Main.kt
 gradle test     # the same, then runs src/test/kotlin/WatershedTest.kt
+gradle benchmark  # times the engine's benchmark graph from Kotlin
 ```
 
 It needs Rust 1.88 or later (`cargo`), a JDK from 21 up, and Gradle. The first
@@ -58,6 +59,37 @@ A node that could not be calculated (a division by zero, say) makes `g[node]`
 throw a `WatershedException` with the reason; `g.getOrNull(node)` gives
 `null` instead. Anything the engine refuses is a `WatershedException` too.
 
+## How fast
+
+`gradle benchmark` builds the engine's benchmark graph (about a million
+nodes) from Kotlin and times the same updates as
+`cargo run --release --example benchmark`. Side by side on one machine, run
+one after the other while it was busy with other work, so read them as a
+comparison and not as absolute numbers:
+
+| | from Rust | from Kotlin |
+|---|---|---|
+| build the graph | 1.2 s | 3.6 s (in calls of 10,000 nodes) |
+| one price changes | 240 µs | 300 µs |
+| 1% of prices change together | 9.7 ms | 13.7 ms (one `setAll`) |
+| read one `Double` | | 7 µs |
+| one set and one update that changes nothing | | 26 µs |
+
+The engine does the same work either way; what Kotlin adds is the cost of
+each call into it, about 10 µs through JNA. So:
+
+- An update is a set and a `stabilize()`: two calls, which is small beside
+  anything but the smallest update.
+- Thousands of calls add up. Building the million nodes one `define` at a
+  time took 63 s; `defineAll` in batches of 10,000 took 3.6 s. `setAll`
+  does the same for a batch of prices.
+- A `Double` is set and read as a plain number, which is the fast path;
+  other types go as a `Value`, which costs a few times more per call.
+
+If calls of 10 µs are too slow for what you are doing, the bindings want
+JNI or the JDK's foreign function API underneath instead of JNA; the typed
+layer on top would not change.
+
 ## How it fits together
 
 - `crates/watershed-jvm` is a Rust library that wraps the engine in a few
@@ -78,8 +110,7 @@ throw a `WatershedException` with the reason; `g.getOrNull(node)` gives
 
 ## What is not here yet
 
-- Calls go one at a time, each through JNA, so adding 100,000 rows from
-  Kotlin is slower than from Rust. A call that takes many rows at once
-  would fix that.
+- Rows of a collection still go one `upsert` at a time; nodes and prices
+  have calls that take many (`defineAll`, `setAll`).
 - Groupings and history (`explain` as of an earlier update).
 - A jar with the library inside for each platform.

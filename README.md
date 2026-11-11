@@ -240,6 +240,25 @@ gradle run
 
 It is a start, not a published library: see `examples/kotlin/README.md`.
 
+## From Scala 3
+
+The same bindings with a typed Scala layer (`examples/scala`, run with
+`sbt run`). Scala lets more of an expression be ordinary operators:
+
+```scala
+import watershed.*
+
+val g = Graph()
+val qty = g.input("qty", 10.0)                     // Input[Double]
+val price = g.input("price", 2.5)
+val big = g.define("big", qty * price > 20 && qty < 100)   // Node[Boolean]
+g(price) = 3.0
+g.stabilize()
+```
+
+Its tests check that what does not fit together (a number plus a string, a
+`BigDecimal` times a `Double`, setting a calculated node) fails to compile.
+
 ## Formulas as text
 
 For people who type a formula rather than write Rust or Python (a grid's
@@ -546,8 +565,9 @@ crates/watershed-core/
   tests/          behaviour and property tests
   examples/       tour, benchmark, collection and placement
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
-crates/watershed-jvm/   the engine for Kotlin and the JVM (UniFFI); a workspace of its own
-examples/kotlin/        a Kotlin project that uses it
+crates/watershed-jvm/   the engine for the JVM (UniFFI), with typed layers for Kotlin and Scala 3; a workspace of its own
+examples/kotlin/        a Kotlin project that uses it, and its benchmark
+examples/scala/         a Scala 3 project that uses it
 crates/watershed-web/   the engine as WebAssembly, with three example models
 crates/watershed-parquet/ an update's changes written to Parquet files
 crates/watershed-grid/  a data grid as WebAssembly: rows, formulas, totals, filter, sort, group
@@ -577,6 +597,6 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **Decimals in the grid:** it has no decimal columns yet. Decimals hold
   28 digits; nothing holds more.
 - **Bindings:** the JVM ones are a first cut (no groupings or history, one
-  call per row, nothing packaged as a jar), the Python package is not
+  call per row, about 10 µs a call through JNA, nothing packaged as a jar), the Python package is not
   published, and there is no cluster.
   Formulas as text have no whole-number constants yet.

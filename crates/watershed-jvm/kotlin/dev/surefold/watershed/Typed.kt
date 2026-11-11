@@ -29,14 +29,14 @@ import java.math.RoundingMode
 open class Expr<T> internal constructor(internal val ops: List<Op>)
 
 /** A node of a graph holding a [T]. */
-open class Node<T> internal constructor(val id: UInt) : Expr<T>(listOf(Op.Node(id))) {
+open class Node<T> internal constructor(val id: Int) : Expr<T>(listOf(Op.Node(id))) {
     override fun equals(other: Any?) = other is Node<*> && other.id == id
     override fun hashCode() = id.hashCode()
     override fun toString() = "Node($id)"
 }
 
 /** An input: a node that can be set. */
-class Input<T> internal constructor(id: UInt) : Node<T>(id)
+class Input<T> internal constructor(id: Int) : Node<T>(id)
 
 /** A field or calculated column of a collection's rows, holding a [T] in each row. */
 open class Part<T> internal constructor(val name: String) : Expr<T>(listOf(Op.Part(name)))
@@ -94,18 +94,36 @@ fun <T> Graph.define(name: String, expression: Expr<T>): Node<T> = Node(defineEx
 operator fun <T : Any> Graph.set(input: Input<T>, value: T) = setValue(input.id, valueOf(value))
 
 @JvmName("setNumberToWhole")
-operator fun Graph.set(input: Input<Double>, value: Int) = setValue(input.id, Value.Number(value.toDouble()))
+operator fun Graph.set(input: Input<Double>, value: Int) = setNumber(input.id, value.toDouble())
 
 @JvmName("setDecimalToWhole")
 operator fun Graph.set(input: Input<BigDecimal>, value: Int) = setValue(input.id, valueOf(value.toBigDecimal()))
 
 /** The node's value as of the last update. A node that could not be calculated throws, with why. */
-operator fun <T> Graph.get(node: Node<T>): T = read(value(node.id), name(node.id))
+operator fun <T> Graph.get(node: Node<T>): T = when (val held = value(node.id)) {
+    is Value.Failed -> throw WatershedException.Refused("${name(node.id)} could not be calculated: ${held.message}")
+    else -> read(held, "")
+}
+
+/** A Double is read and set as a plain number, which crosses into the engine far faster than other values. */
+@JvmName("getNumber")
+operator fun Graph.get(node: Node<Double>): Double = number(node.id)
+
+@JvmName("setNumber")
+operator fun Graph.set(input: Input<Double>, value: Double) = setNumber(input.id, value)
+
+/** Sets many Double inputs in one call: the way to apply a batch of prices. */
+fun Graph.setAll(values: Map<Input<Double>, Double>) =
+    setNumbers(values.keys.map { it.id }, values.values.toList())
+
+/** Adds many calculated nodes in one call, in order. Far faster than one call each when there are thousands. */
+fun <T> Graph.defineAll(definitions: List<Pair<String, Expr<T>>>): List<Node<T>> =
+    defineExpressions(definitions.map { it.first }, definitions.map { it.second.ops }).map { Node(it) }
 
 /** The node's value, or null if it could not be calculated. */
 fun <T> Graph.getOrNull(node: Node<T>): T? = when (val held = value(node.id)) {
     is Value.Failed -> null
-    else -> read(held, name(node.id))
+    else -> read(held, "")
 }
 
 fun Graph.explain(node: Node<*>): String = explain(node.id)
@@ -181,7 +199,7 @@ fun <T : Any> whenever(condition: Expr<Boolean>, then: T, otherwise: T): Expr<T>
 
 /** The option at position `index`, counting from 0; only that one is worked out. */
 fun <T> choose(index: Expr<Long>, vararg options: Expr<T>): Expr<T> =
-    Expr(index.ops + options.flatMap { it.ops } + Op.Choose(options.size.toUInt()))
+    Expr(index.ops + options.flatMap { it.ops } + Op.Choose(options.size))
 
 @JvmName("concatText")
 operator fun Expr<String>.plus(other: Expr<String>): Expr<String> = binary(BinaryOp.CONCAT, this, other)
@@ -190,7 +208,7 @@ operator fun Expr<String>.plus(other: String): Expr<String> = binary(BinaryOp.CO
 
 /** A list of these strings, in this order. */
 fun texts(vararg items: Expr<String>): Expr<List<String>> =
-    Expr(items.flatMap { it.ops } + Op.Texts(items.size.toUInt()))
+    Expr(items.flatMap { it.ops } + Op.Texts(items.size))
 
 @JvmName("concatTexts")
 operator fun Expr<List<String>>.plus(other: Expr<List<String>>): Expr<List<String>> = binary(BinaryOp.CONCAT, this, other)

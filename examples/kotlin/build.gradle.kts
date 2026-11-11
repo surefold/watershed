@@ -80,6 +80,15 @@ application {
     applicationDefaultJvmArgs = nativeAccess
 }
 
+// The engine's benchmark, driven from Kotlin: `gradle benchmark`.
+tasks.register<JavaExec>("benchmark") {
+    group = "application"
+    description = "Times the engine's benchmark graph, built and updated from Kotlin."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass = "BenchmarkKt"
+    jvmArgs(nativeAccess)
+}
+
 tasks.test {
     useJUnitPlatform()
     jvmArgs(nativeAccess)
