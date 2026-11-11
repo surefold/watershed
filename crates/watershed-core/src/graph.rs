@@ -46,6 +46,9 @@ pub(crate) fn next_graph_id() -> GraphId {
     GraphId(NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed))
 }
 
+mod keyed;
+pub(crate) use keyed::{KeyedRow, key_text};
+
 /// Marks the end of a list in the edge arrays.
 const NONE: u32 = u32::MAX;
 
@@ -254,6 +257,15 @@ pub struct Graph {
     sink: Option<Box<dyn ChangeSink>>,
     /// The nodes changed by the update in progress, while a sink is attached.
     changed: Vec<NodeId>,
+    /// Totals per group (see the `keyed` module).
+    keyed: Vec<keyed::Keyed>,
+    /// Calculated nodes whose value names a row's group: for each, the
+    /// groupings and rows that follow it.
+    watched: HashMap<u32, Vec<(u32, u32)>>,
+    /// Watched nodes that changed on the level being recalculated.
+    rekey: Vec<u32>,
+    /// Whether an update is in progress.
+    updating: bool,
 }
 
 /// The level size from which recalculating in parallel pays off. Measured on
@@ -302,6 +314,10 @@ impl Graph {
             history: None,
             sink: None,
             changed: Vec::new(),
+            keyed: Vec::new(),
+            watched: HashMap::new(),
+            rekey: Vec::new(),
+            updating: false,
         }
     }
 
@@ -963,7 +979,16 @@ impl Graph {
                 hot.height
             )));
         }
-        self.pending_members.push((aggregate, value, present));
+        if self.updating {
+            // A row joining a group during an update: the total is above
+            // the level being recalculated, so it is still to come, and
+            // counts the member in this update.
+            self.join_aggregate(aggregate, value, present);
+            self.redefined.insert(aggregate);
+            self.queue[hot.height as usize].push(aggregate);
+        } else {
+            self.pending_members.push((aggregate, value, present));
+        }
         Ok(())
     }
 
@@ -1081,7 +1106,11 @@ impl Graph {
 
         // Lowest height first. Recalculating a node can only mark nodes that
         // are higher, so they are always still ahead of us in this loop.
-        for height in 0..self.queue.len() {
+        // Rows whose group changed join their new group after each level,
+        // which can add nodes (and levels) above it.
+        self.updating = true;
+        let mut height = 0;
+        while height < self.queue.len() {
             let mut level = std::mem::take(&mut self.queue[height]);
             // A node is queued once for each changed node it uses, so remove
             // repeats. Sorting first also puts the level in id order: the
@@ -1123,7 +1152,12 @@ impl Graph {
             // Hand the emptied list back, so the next update reuses its memory.
             level.clear();
             self.queue[height] = level;
+            if !self.rekey.is_empty() {
+                self.follow_changed_keys();
+            }
+            height += 1;
         }
+        self.updating = false;
         self.redefined.clear();
         let nodes = self.hot.len();
         if let Some(history) = &mut self.history {
@@ -1165,6 +1199,9 @@ impl Graph {
         self.changed_in[i] = epoch;
         if self.sink.is_some() {
             self.changed.push(NodeId(i as u32));
+        }
+        if !self.watched.is_empty() && self.watched.contains_key(&(i as u32)) {
+            self.rekey.push(i as u32);
         }
     }
 
