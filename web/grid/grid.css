@@ -95,6 +95,9 @@
   box-shadow: 0 1px 2px color-mix(in srgb, var(--wg-ink) 6%, transparent), 0 12px 32px -18px color-mix(in srgb, var(--wg-ink) 30%, transparent);
 }
 .wg *, .wg *::before { box-sizing: border-box; }
+/* A row or bar put away for reuse is marked hidden; the display its class
+   gives it would otherwise win, and it would stay drawn where it last was. */
+.wg [hidden], .gc [hidden] { display: none !important; }
 
 /* ---------------------------------------------------------------- header */
 
