@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watershed Grid</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="grid.css">
+<style>
+:root {
+  --paper: #f2f5f4; --surface: #ffffff; --band: #f7f9f9; --head: #e8eeee;
+  --ink: #13242c; --muted: #56676e; --rule: #d3dcdc;
+  --water: #1d6c88; --rain: #23794a; --sediment: #b9541f; --select: #d6eaf1;
+  --up: rgba(44, 140, 88, 0.40); --down: rgba(196, 95, 39, 0.40);
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "Figtree", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0e161a; --surface: #142026; --band: #17252c; --head: #1b2b33;
+    --ink: #e2eaeb; --muted: #94a4a9; --rule: #2a3c43;
+    --water: #63b4d0; --rain: #5bc68b; --sediment: #f0894a; --select: #1f4250;
+    --up: rgba(91, 198, 139, 0.38); --down: rgba(240, 137, 74, 0.38);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink); font: 14px/1.5 var(--body);
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 12px;
+  padding: 18px max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+}
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 20px; }
+h1 { font: 700 1.7rem/1.1 var(--display); letter-spacing: -0.02em; margin: 0; }
+h1 span { color: var(--water); }
+header p { margin: 0; color: var(--muted); max-width: 86ch; }
+h2 { font: 600 0.7rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
+
+.tools { display: grid; gap: 8px; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.bar label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.sep { width: 1px; align-self: stretch; background: var(--rule); margin: 2px 2px; }
+input[type="text"], input[type="number"], input[type="search"], select, button {
+  height: 32px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 6px;
+  background: var(--surface); color: var(--ink); font: 13px/1 var(--body);
+}
+input[type="text"].code, input[type="number"] { font-family: var(--mono); font-size: 12.5px; }
+input[type="number"] { width: 78px; }
+button { cursor: pointer; font-weight: 600; }
+button:hover { border-color: var(--water); }
+button.primary { background: var(--water); border-color: var(--water); color: var(--paper); }
+button[aria-pressed="true"] { background: var(--rain); border-color: var(--rain); color: var(--paper); }
+:is(input, select, button):focus-visible { outline: 2px solid var(--water); outline-offset: 1px; }
+input[type="range"] { accent-color: var(--water); width: 120px; }
+output { font: 12.5px/1 var(--mono); color: var(--ink); min-width: 5ch; }
+#search { width: 200px; }
+#formula { width: min(340px, 60vw); }
+#formula-name { width: 110px; }
+.note { font-size: 13px; min-height: 1.2em; }
+.note.bad { color: var(--sediment); }
+.note.good { color: var(--rain); }
+
+main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; min-height: 0; }
+#grid { min-height: 320px; }
+aside { display: grid; grid-template-rows: auto minmax(0, 1.8fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
+.card.chart { grid-template-rows: auto minmax(0, 1fr); }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-head select { height: 26px; padding: 0 6px; font-size: 12.5px; }
+#more { height: 24px; padding: 0 8px; font-size: 12px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px; display: grid; gap: 8px; align-content: start; min-height: 0; }
+.figures { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin: 0; }
+.figures div { display: grid; gap: 2px; }
+.figures dt { font-size: 12px; color: var(--muted); }
+.figures dd { margin: 0; font: 600 1.05rem/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.figures dd small { font: 400 12px/1 var(--body); color: var(--muted); }
+#why { margin: 0; overflow: auto; font: 12px/1.55 var(--mono); white-space: pre; color: var(--ink); }
+#why.hint { white-space: pre-wrap; font: 13px/1.5 var(--body); color: var(--muted); }
+.hint { color: var(--muted); font-size: 13px; margin: 0; }
+kbd { font: 11px/1 var(--mono); border: 1px solid var(--rule); border-radius: 4px; padding: 2px 5px; background: var(--paper); }
+
+footer { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--muted); font-size: 13px; }
+footer b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+#progress { height: 3px; background: var(--water); width: 0; transition: width 0.15s; border-radius: 2px; }
+
+@media (max-width: 980px) {
+  html, body { height: auto; }
+  body { grid-template-rows: auto; }
+  main { grid-template-columns: minmax(0, 1fr); }
+  #grid { height: 70vh; }
+  aside { grid-template-rows: auto; }
+  #why { max-height: 40vh; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Watershed <span>Grid</span></h1>
+  <p>A data grid whose rows, formulas, totals, sorting, filtering and grouping all run in WebAssembly on the watershed engine.
+     Every cell is a node, so a change recalculates only the cells and totals that depend on it.</p>
+</header>
+
+<section class="tools" aria-label="Grid controls">
+  <div class="bar">
+    <input type="search" id="search" placeholder="Search keys and text…" aria-label="Search keys and text">
+    <label>Group by <select id="group"><option value="-1">nothing</option></select></label>
+    <button id="expand" disabled>Open all</button>
+    <button id="collapse" disabled>Close all</button>
+    <span class="sep"></span>
+    <button id="stream" aria-pressed="false">Stream prices</button>
+    <label>marks per frame <input type="range" id="rate" min="0" max="3.5" step="0.01" value="2"> <output id="rate-out">100</output></label>
+    <span class="sep"></span>
+    <label title="A named value used by the net column. Changing it recalculates net in every row.">fee_bps <input type="number" id="fee" value="2" min="0" max="100" step="0.5"></label>
+    <span class="sep"></span>
+    <label>Rows <select id="size">
+      <option value="10000">10,000</option>
+      <option value="50000" selected>50,000</option>
+      <option value="100000">100,000</option>
+      <option value="scroll">load as you scroll</option>
+    </select></label>
+  </div>
+  <div class="bar">
+    <label>New column <input type="text" class="code" id="formula-name" placeholder="name" spellcheck="false" aria-label="New column name"></label>
+    <label>= <input type="text" class="code" id="formula" placeholder="pnl / notional * 10000" spellcheck="false" aria-label="New column formula"></label>
+    <label>total <select id="formula-agg" aria-label="New column total">
+      <option value="sum">sum</option><option value="avg">avg</option><option value="min">min</option><option value="max">max</option><option value="count">count</option><option value="none">none</option>
+    </select></label>
+    <button id="add" class="primary">Add column</button>
+    <span class="sep"></span>
+    <button id="delete">Delete selected</button>
+    <button id="csv">Export CSV</button>
+    <button id="check" title="Recalculates every node from scratch and compares with the incremental values.">Check against full recalculation</button>
+    <span class="note" id="note" role="status"></span>
+  </div>
+  <div id="progress"></div>
+</section>
+
+<main>
+  <div id="grid"></div>
+  <aside>
+    <div class="card">
+      <h2>Last update</h2>
+      <dl class="figures">
+        <div><dt>Inputs changed</dt><dd id="s-inputs">–</dd></div>
+        <div><dt>Nodes recalculated</dt><dd id="s-recalc">–</dd></div>
+        <div><dt>Of nodes in the graph</dt><dd id="s-nodes">–</dd></div>
+        <div><dt>Update and redraw</dt><dd id="s-ms">–</dd></div>
+      </dl>
+      <p class="hint" id="s-view">&nbsp;</p>
+    </div>
+    <div class="card chart">
+      <div class="card-head">
+        <h2>Totals by group</h2>
+        <select id="chart-col" aria-label="Column to chart"></select>
+      </div>
+      <div id="chart"></div>
+    </div>
+    <div class="card">
+      <h2 id="why-title">Why this value</h2>
+      <pre id="why" class="hint">Click a cell, a group's total or a total in the bottom row to see what it was worked out from.</pre>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <span><b id="f-rows">0</b> rows</span>
+  <span><b id="f-shown">0</b> shown</span>
+  <span id="f-groups-wrap" hidden><b id="f-groups">0</b> groups</span>
+  <span><b id="f-selected">0</b> selected</span>
+  <span id="f-more-wrap" hidden><span id="f-more"></span> <button id="more">Load more</button></span>
+  <span class="hint">Click a header to sort (<kbd>Shift</kbd> adds), drag it to move, <kbd>⋮</kbd> to pin, hide or group. Filters: <kbd>&gt;100</kbd> <kbd>5..10</kbd> <kbd>=Rates</kbd>. <kbd>Enter</kbd> edits.</span>
+</footer>
+
+<script type="module">
+import init, { Grid } from "./pkg/watershed_grid.js";
+import { WatershedGrid } from "./grid.js";
+import { GroupChart } from "./chart.js";
+
+const $ = (id) => document.getElementById(id);
+const whole = new Intl.NumberFormat("en-US");
+const formats = {
+  qty: { decimals: 0, width: 116 },
+  price: { width: 96 },
+  mark: { width: 150, trend: true },
+  notional: { width: 164 },
+  pnl: { signed: true, width: 136 },
+  net: { signed: true, width: 136 },
+  side: { width: 86 },
+  symbol: { width: 96 },
+};
+
+const WHY_HINT = $("why").textContent;
+let grid = null;
+let view = null;
+let layout = null; // how the columns were arranged, kept when the rows are rebuilt
+let columns = [];
+let streaming = false;
+const chart = new GroupChart($("chart"), { onPick: (key) => view.revealGroup(key) });
+const BLOCK = 2000; // rows per load when loading as you scroll
+const MOST = 100000;
+let building = false;
+const recent = []; // the last updates' times, to steady the figure while streaming
+
+function note(text, kind = "") {
+  $("note").textContent = text;
+  $("note").className = `note ${kind}`;
+}
+
+function drawChart() {
+  const col = Number($("chart-col").value);
+  const info = columns[col];
+  if (!info || $("chart-col").value === "") return;
+  const decimals = info.agg === "count" ? 0 : (formats[info.name]?.decimals ?? 2);
+  const number = new Intl.NumberFormat("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  const by = columns[Number($("group").value)]?.name;
+  chart.update({
+    title: `${info.agg} of ${info.name}${by ? ` by ${by}` : ""}`,
+    groups: JSON.parse(grid.groups()).map((g) => ({ key: g.g, rows: g.n, value: g.c[col] })),
+    total: JSON.parse(grid.totals())[col],
+    trend: JSON.parse(grid.total_trend(col, 120)),
+    format: (v) => number.format(v),
+    hint: "Group the rows (the toolbar, or a column's ⋮ menu) to see each group's total as a bar.",
+  });
+}
+
+function status(s) {
+  if (s.selected !== undefined) $("f-selected").textContent = whole.format(s.selected);
+  if (s.loading !== undefined) {
+    $("f-more").textContent = s.loading ? "Loading more rows…" : s.done ? "Every row is loaded." : "More rows load as you scroll.";
+    $("more").hidden = s.loading || s.done;
+  }
+  if (s.epoch === undefined) return;
+  drawChart();
+  $("f-rows").textContent = whole.format(s.rows);
+  $("f-shown").textContent = whole.format(s.filtered);
+  $("f-groups-wrap").hidden = s.groups === 0;
+  $("f-groups").textContent = whole.format(s.groups);
+  recent.push(s.ms);
+  if (recent.length > 30) recent.shift();
+  const ms = streaming ? recent.reduce((a, b) => a + b, 0) / recent.length : s.ms;
+  $("s-inputs").textContent = whole.format(s.inputsChanged);
+  $("s-recalc").textContent = whole.format(s.recalculated);
+  $("s-nodes").textContent = whole.format(s.nodes);
+  $("s-ms").innerHTML = `${ms < 10 ? ms.toFixed(2) : ms.toFixed(1)} <small>ms</small>`;
+  $("s-view").textContent = s.rebuilt
+    ? "The view was filtered and sorted again."
+    : "The view stood: only cells and totals changed.";
+}
+
+function showWhy() {
+  const why = view?.explainFocus();
+  if (!why) {
+    $("why-title").textContent = "Why this value";
+    $("why").textContent = WHY_HINT;
+    $("why").className = "hint";
+    return;
+  }
+  $("why-title").textContent = `Why · ${why.title}`;
+  $("why").textContent = why.text;
+  $("why").className = "";
+}
+
+async function build(size) {
+  if (building) return;
+  building = true;
+  setStreaming(false);
+  if (view) layout = view.getState();
+  view?.destroy();
+  grid?.free();
+  const mine = (grid = Grid.demo());
+  grid.set_value("fee_bps", Number($("fee").value) || 0);
+  const lazy = size === "scroll";
+  let loaded = 0;
+  view = new WatershedGrid($("grid"), grid, {
+    keyTitle: "trade",
+    formats,
+    onStatus: status,
+    onFocus: showWhy,
+    onError: (message) => note(message, "bad"),
+    onGroup: (col) => {
+      $("group").value = String(col);
+      $("expand").disabled = $("collapse").disabled = col < 0;
+      drawChart();
+    },
+    // Stands in for a server: a short wait, then the next block of rows.
+    loadMore: lazy
+      ? async () => {
+          await new Promise((done) => setTimeout(done, 160));
+          if (grid !== mine) return false;
+          grid.demo_fill(BLOCK);
+          loaded += BLOCK;
+          return loaded < MOST;
+        }
+      : null,
+  });
+  if (layout) view.setState(layout);
+  columns = JSON.parse(grid.columns());
+  $("group").replaceChildren(
+    new Option("nothing", "-1"),
+    ...columns.flatMap((c, k) => (c.groupable ? [new Option(c.name, String(k))] : [])),
+  );
+  listChartColumns("net");
+  $("expand").disabled = $("collapse").disabled = true;
+  $("search").value = "";
+  $("f-more-wrap").hidden = !lazy;
+  showWhy();
+  if (lazy) {
+    await view.fetchMore();
+  } else {
+    const rows = Number(size);
+    const chunk = 5000;
+    for (let made = 0; made < rows; made += chunk) {
+      grid.demo_fill(Math.min(chunk, rows - made));
+      view.refresh();
+      $("progress").style.width = `${Math.round((100 * (made + chunk)) / rows)}%`;
+      note(`Building ${whole.format(Math.min(made + chunk, rows))} of ${whole.format(rows)} rows…`);
+      await new Promise((done) => setTimeout(done));
+    }
+    $("progress").style.width = "0";
+    note("");
+  }
+  building = false;
+}
+
+/** Fills the chart's column list with the columns that have totals, keeping the choice if it can. */
+function listChartColumns(preferred) {
+  const chosen = $("chart-col").value === "" ? preferred : columns[Number($("chart-col").value)]?.name;
+  $("chart-col").replaceChildren(
+    ...columns.flatMap((c, k) => (c.agg !== "none" ? [new Option(`${c.agg} of ${c.name}`, String(k))] : [])),
+  );
+  const keep = columns.findIndex((c) => c.name === chosen && c.agg !== "none");
+  if (keep >= 0) $("chart-col").value = String(keep);
+  drawChart();
+}
+
+function setStreaming(on) {
+  streaming = on;
+  $("stream").setAttribute("aria-pressed", String(on));
+  $("stream").textContent = on ? "Stop prices" : "Stream prices";
+  if (on) requestAnimationFrame(tick);
+}
+
+const rate = () => Math.round(10 ** Number($("rate").value));
+
+function tick() {
+  if (!streaming || building) return;
+  grid.demo_tick(rate());
+  view.refresh();
+  requestAnimationFrame(tick);
+}
+
+$("stream").addEventListener("click", () => setStreaming(!streaming));
+$("rate").addEventListener("input", () => ($("rate-out").textContent = whole.format(rate())));
+$("size").addEventListener("change", () => build($("size").value));
+$("more").addEventListener("click", () => view.fetchMore());
+$("chart-col").addEventListener("change", drawChart);
+
+let searchTimer = 0;
+$("search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => view.setQuickFilter($("search").value), 140);
+});
+
+$("group").addEventListener("change", () => {
+  const col = Number($("group").value);
+  note(col >= 0 ? "Grouping…" : "");
+  // Let "Grouping…" show: the first time, each row joins its group's totals.
+  setTimeout(() => {
+    view.setGroup(col);
+    note("");
+  });
+});
+$("expand").addEventListener("click", () => view.expandAll(true));
+$("collapse").addEventListener("click", () => view.expandAll(false));
+
+$("fee").addEventListener("input", () => {
+  const fee = Number($("fee").value);
+  if (!Number.isFinite(fee)) return;
+  grid.set_value("fee_bps", fee);
+  view.refresh();
+});
+
+function addColumn() {
+  const [name, formula] = [$("formula-name").value.trim(), $("formula").value.trim()];
+  if (!name || !formula) return note("Give the column a name and a formula, such as: bps = pnl / notional * 10000", "bad");
+  try {
+    grid.add_formula(name, formula, $("formula-agg").value);
+    view.columnsChanged();
+    columns = JSON.parse(grid.columns());
+    listChartColumns();
+    $("formula-name").value = $("formula").value = "";
+    note(`Added ${name}.`, "good");
+  } catch (error) {
+    note(error.message, "bad");
+  }
+}
+$("add").addEventListener("click", addColumn);
+for (const id of ["formula", "formula-name"]) {
+  $(id).addEventListener("keydown", (e) => e.key === "Enter" && addColumn());
+}
+
+$("delete").addEventListener("click", () => {
+  const count = view.selectedKeys().length;
+  if (!count) return note("Click a row to select it first. Shift-click selects a range.", "bad");
+  view.removeSelected();
+  note(`Deleted ${whole.format(count)} row${count === 1 ? "" : "s"}.`, "good");
+});
+
+$("csv").addEventListener("click", () => {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([grid.csv()], { type: "text/csv" }));
+  link.download = "watershed-grid.csv";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+});
+
+$("check").addEventListener("click", () => {
+  const started = performance.now();
+  const wrong = grid.check();
+  const ms = (performance.now() - started).toFixed(0);
+  if (wrong) note(wrong, "bad");
+  else note(`Every node matches a full recalculation (${ms} ms).`, "good");
+});
+
+await init();
+$("rate-out").textContent = whole.format(rate());
+await build($("size").value);
+</script>
+</body>
+</html>
