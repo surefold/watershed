@@ -1,0 +1,79 @@
+# watershed from Kotlin
+
+A small Kotlin program that uses the engine through `crates/watershed-jvm`.
+
+```bash
+cd examples/kotlin
+gradle run      # builds the Rust library, writes its Kotlin side, runs src/main/kotlin/Main.kt
+gradle test     # the same, then runs src/test/kotlin/WatershedTest.kt
+```
+
+It needs Rust 1.88 or later (`cargo`), a JDK from 21 up, and Gradle. The first
+run downloads UniFFI and compiles it, which takes a minute; after that only
+what changed is rebuilt.
+
+## What it looks like
+
+```kotlin
+val g = Graph()
+val qty = g.input("qty", 10.0)                     // Input<Double>
+val price = g.input("price", 2.5)
+val total = g.define("total", qty * price * 1.2)   // Node<Double>
+
+g[price] = 3.0
+val report = g.stabilize()       // report.recalculated == 1
+val now: Double = g[total]       // 36.0
+g.explain(total)                 // why, as a tree
+
+val orders = g.collection("orders")
+val units = orders.number("units")                 // Field<Double>
+val unitPrice = orders.number("unit price")
+val line = orders.column("line", units * unitPrice)
+val revenue = orders.sum("revenue", line)          // Node<Double>
+orders.upsert("o-1", units(2), unitPrice(9.99))
+g.stabilize()
+orders["o-1", line]              // 19.98
+```
+
+Expressions are typed, as in Rust, and nothing is written as text:
+
+- `qty + region` (a number plus a string) does not compile.
+- `g[total] = 5.0` does not compile: `total` is a `Node`, not an `Input`.
+- `g[price] = "three"` does not compile: `price` holds a `Double`.
+
+The types are `Double`, `Long`, `Boolean`, `String` and `List<String>`. A
+whole number written next to a `Double` expression is taken as a `Double`
+(`price * 12`). Kotlin's `<` and `==` cannot build an expression, so
+comparisons are words: `a lt b`, `le`, `gt`, `ge`, `eq`, `ne`, with `and`,
+`or`, `!`, `whenever(condition, then, otherwise)`, `choose`, `text`, `texts`,
+`join`, `abs`, `least` and `greatest`.
+
+A node that could not be calculated (a division by zero, say) makes `g[node]`
+throw a `WatershedException` with the reason; `g.getOrNull(node)` gives
+`null` instead. Anything the engine refuses is a `WatershedException` too.
+
+## How it fits together
+
+- `crates/watershed-jvm` is a Rust library that wraps the engine in a few
+  plain types. [UniFFI](https://mozilla.github.io/uniffi-rs/) writes the
+  Kotlin classes that call it, through [JNA](https://github.com/java-native-access/jna).
+- `crates/watershed-jvm/kotlin/` is the typed layer, written by hand over
+  those generated calls: `Expr<T>`, `Node<T>`, `Input<T>`, `Field<T>` and
+  the operators. An expression crosses into the engine as a list of steps
+  (`qty`, `price`, multiply), not as text, and the engine checks its types
+  again when the node is made.
+- `build.gradle.kts` has two tasks ahead of compiling Kotlin: `buildNative`
+  (`cargo build --release` in that crate) and `generateBindings` (the
+  Kotlin, into `build/generated/uniffi`). `run` and `test` tell the JVM
+  where the library is with `-Djna.library.path`.
+- Nothing is published or installed. To use it in another project today,
+  copy those two tasks, or copy the generated `watershed_jvm.kt`, the
+  typed layer's `Typed.kt` and the built library (`libwatershed_jvm.dylib`, `.so` or `.dll`) into it.
+
+## What is not here yet
+
+- Calls go one at a time, each through JNA, so adding 100,000 rows from
+  Kotlin is slower than from Rust. A call that takes many rows at once
+  would fix that.
+- Groupings and history (`explain` as of an earlier update).
+- A jar with the library inside for each platform.
