@@ -177,6 +177,13 @@ scrolls: give the view a `loadMore` function that adds the next block and
 says whether there may be more. Rows loaded that way are ordinary rows, so
 sorting, filters and totals cover everything loaded so far.
 
+With history kept, `grid.set_as_of(update)` shows the whole grid as it was
+after an earlier update: cells, totals, which rows pass the filters and
+their order. Nothing can be changed until it is back at now.
+
+A text column's filter can name several values (`=Rates|FX`); the column's
+menu lists its values to tick.
+
 While a filter is on, totals are of the rows that pass it, added up the
 plain way; the graph's totals are of every row.
 

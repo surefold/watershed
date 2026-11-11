@@ -134,6 +134,10 @@ footer b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
     <button id="delete">Delete selected</button>
     <button id="csv">Export CSV</button>
     <button id="check" title="Recalculates every node from scratch and compares with the incremental values.">Check against full recalculation</button>
+    <span class="sep"></span>
+    <label title="Drag back to see the grid as it was after an earlier update: values, totals, order and filters.">Time
+      <input type="range" id="time" min="0" max="0" value="0" step="1"> <output id="time-out">now</output></label>
+    <button id="now" disabled>Back to now</button>
     <span class="note" id="note" role="status"></span>
   </div>
   <div id="progress"></div>
@@ -198,6 +202,7 @@ let grid = null;
 let view = null;
 let layout = null; // how the columns were arranged, kept when the rows are rebuilt
 let columns = [];
+let lookingBack = false;
 let streaming = false;
 const chart = new GroupChart($("chart"), { onPick: (key) => view.revealGroup(key) });
 const BLOCK = 2000; // rows per load when loading as you scroll
@@ -235,6 +240,12 @@ function status(s) {
   }
   if (s.epoch === undefined) return;
   drawChart();
+  if (!lookingBack) {
+    // The slider covers the updates the grid still keeps.
+    const [oldest, latest] = JSON.parse(grid.history_range()) ?? [0, 0];
+    $("time").min = oldest;
+    $("time").max = $("time").value = latest;
+  }
   $("f-rows").textContent = whole.format(s.rows);
   $("f-shown").textContent = whole.format(s.filtered);
   $("f-groups-wrap").hidden = s.groups === 0;
@@ -269,6 +280,9 @@ async function build(size) {
   building = true;
   setStreaming(false);
   if (view) layout = view.getState();
+  lookingBack = false;
+  $("now").disabled = true;
+  $("time-out").textContent = "now";
   view?.destroy();
   grid?.free();
   const mine = (grid = Grid.demo());
@@ -337,7 +351,18 @@ function listChartColumns(preferred) {
   drawChart();
 }
 
+function lookBack(epoch) {
+  const back = epoch !== null;
+  if (back) setStreaming(false);
+  lookingBack = back;
+  view.setAsOf(epoch);
+  $("now").disabled = !back;
+  $("time-out").textContent = back ? `update ${whole.format(epoch)}` : "now";
+  note(back ? "Showing the grid as it was. Go back to now to edit or stream." : "");
+}
+
 function setStreaming(on) {
+  if (on && lookingBack) lookBack(null);
   streaming = on;
   $("stream").setAttribute("aria-pressed", String(on));
   $("stream").textContent = on ? "Stop prices" : "Stream prices";
@@ -357,6 +382,11 @@ $("stream").addEventListener("click", () => setStreaming(!streaming));
 $("rate").addEventListener("input", () => ($("rate-out").textContent = whole.format(rate())));
 $("size").addEventListener("change", () => build($("size").value));
 $("more").addEventListener("click", () => view.fetchMore());
+$("time").addEventListener("input", () => {
+  const epoch = Number($("time").value);
+  lookBack(epoch >= Number($("time").max) ? null : epoch);
+});
+$("now").addEventListener("click", () => lookBack(null));
 $("chart-col").addEventListener("change", drawChart);
 
 let searchTimer = 0;

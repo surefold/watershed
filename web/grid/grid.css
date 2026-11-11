@@ -166,3 +166,6 @@
 .gc-value { font: 12px/1 var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; color: var(--muted, #56676e); min-width: 9ch; text-align: right; }
 .gc-note { margin: 0; font-size: 13px; color: var(--muted, #56676e); }
 .gc-note:empty { display: none; }
+
+.wg-count { margin-left: auto; color: var(--wg-muted); font: 11.5px/1 var(--mono, ui-monospace, monospace); }
+.wg-menu-note { padding: 4px 8px; color: var(--wg-muted); font-size: 12.5px; }

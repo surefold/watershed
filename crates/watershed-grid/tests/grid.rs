@@ -560,3 +560,90 @@ fn without_history_there_are_no_trends() {
     assert_eq!(t.trends_json(0, 2, 1, 16), "[null,null]");
     assert_eq!(t.total_trend_json(1, 16), "null");
 }
+
+#[test]
+fn a_text_filter_can_name_several_values() {
+    let mut t = orders();
+    t.set_filter(REGION, "=eu|APAC").unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["o-1", "o-3", "o-4"]);
+    assert_eq!(
+        t.values_json(REGION, 10),
+        r#"{"more":false,"values":[["APAC",1],["EU",2],["US",2]]}"#
+    );
+    assert_eq!(t.values_json(REGION, 2), r#"{"more":true,"values":[]}"#);
+}
+
+#[test]
+fn an_update_with_nothing_to_apply_does_not_use_up_history() {
+    let mut t = orders();
+    let before = t.update().report.epoch;
+    t.set_sort(&[(QTY, true)]).unwrap();
+    let after = t.update();
+    assert!(after.rebuilt);
+    assert_eq!(after.report.epoch, before);
+}
+
+#[test]
+fn the_grid_can_show_itself_as_of_an_earlier_update() {
+    let mut t = Table::new();
+    t.keep_history(100);
+    t.add_field("team", Kind::Text, Agg::None).unwrap();
+    t.add_field("points", Kind::Number, Agg::Sum).unwrap();
+    t.upsert("a", vec![text("red"), Value::F64(1.0)]).unwrap();
+    t.upsert("b", vec![text("blue"), Value::F64(10.0)]).unwrap();
+    let first = t.update().report.epoch;
+    t.set_cell("a", 1, "50").unwrap();
+    t.upsert("c", vec![text("red"), Value::F64(7.0)]).unwrap();
+    let second = t.update().report.epoch;
+    t.set_sort(&[(1, true)]).unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["a", "b", "c"]);
+    assert_eq!(t.totals_json(), "[null,67]");
+
+    // Back then: `a` had 1 point, so `b` led, and `c` was not there.
+    t.set_as_of(Some(first)).unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["b", "a"]);
+    assert_eq!(t.totals_json(), "[null,11]");
+    assert_eq!(
+        t.rows_json(0, 2),
+        r#"[{"k":"b","c":["blue",10]},{"k":"a","c":["red",1]}]"#
+    );
+    // A filter looks at the values of then, and its totals add those up.
+    t.set_filter(1, "<5").unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["a"]);
+    assert_eq!(t.totals_json(), "[null,1]");
+    t.set_filter(1, "").unwrap();
+
+    // Nothing can be changed while looking back.
+    assert_eq!(
+        t.set_cell("a", 1, "9").unwrap_err(),
+        format!("the grid is showing update {first}; go back to now to change it")
+    );
+    assert!(t.remove("a").is_err());
+    assert!(
+        t.set_as_of(Some(second + 5))
+            .unwrap_err()
+            .contains("is not kept")
+    );
+
+    t.set_as_of(None).unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["a", "b", "c"]);
+    assert_eq!(t.totals_json(), "[null,67]");
+    t.set_cell("a", 1, "9").unwrap();
+    t.update();
+    assert_eq!(t.totals_json(), "[null,26]");
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn looking_back_needs_history() {
+    let mut t = orders();
+    assert_eq!(
+        t.set_as_of(Some(1)).unwrap_err(),
+        "the grid is not keeping earlier values"
+    );
+}

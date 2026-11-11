@@ -203,6 +203,25 @@ impl Grid {
         self.table.group_is_open(key)
     }
 
+    /// A text column's distinct values and their row counts, as JSON.
+    pub fn values(&self, col: u32, limit: u32) -> String {
+        self.table.values_json(col as usize, limit as usize)
+    }
+
+    /// Shows the grid as of an earlier update; a negative number for now.
+    pub fn set_as_of(&mut self, epoch: f64) -> Result<(), JsError> {
+        let epoch = (epoch >= 0.0).then_some(epoch as u64);
+        self.table.set_as_of(epoch).map_err(js_error)
+    }
+
+    /// The earliest and latest updates that can be shown: `[oldest, latest]`, or `null`.
+    pub fn history_range(&self) -> String {
+        match self.table.history_range() {
+            Some((oldest, latest)) => format!("[{oldest},{latest}]"),
+            None => "null".into(),
+        }
+    }
+
     /// Keeps values from the last `updates` updates, for `trends`.
     pub fn keep_history(&mut self, updates: u32) {
         self.table.keep_history(u64::from(updates));

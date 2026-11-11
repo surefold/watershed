@@ -156,7 +156,7 @@ enum Filter {
     /// Text containing this (already lower case).
     Contains(String),
     /// Text equal to this, ignoring case (already lower case).
-    Exactly(String),
+    Exactly(Vec<String>),
     Compare(Ordering, bool, f64),
     NotEqual(f64),
     Between(f64, f64),
@@ -177,7 +177,10 @@ impl Filter {
         };
         Ok(Some(match kind {
             Kind::Text => match text.strip_prefix('=') {
-                Some(exact) => Filter::Exactly(exact.trim().to_lowercase()),
+                // `=a|b` is any of several values.
+                Some(exact) => {
+                    Filter::Exactly(exact.split('|').map(|v| v.trim().to_lowercase()).collect())
+                }
                 None => Filter::Contains(text.to_lowercase()),
             },
             Kind::Bool => match Kind::Bool.read(text)? {
@@ -208,7 +211,13 @@ impl Filter {
     fn accepts(&self, value: &Value) -> bool {
         match (self, value) {
             (Filter::Contains(needle), Value::Str(s)) => contains_lower(s, needle),
-            (Filter::Exactly(want), Value::Str(s)) => s.to_lowercase() == *want,
+            (Filter::Exactly(wanted), Value::Str(s)) => wanted.iter().any(|want| {
+                if want.is_ascii() {
+                    s.eq_ignore_ascii_case(want)
+                } else {
+                    s.to_lowercase() == *want
+                }
+            }),
             (Filter::Compare(side, or_equal, limit), Value::F64(x)) => match x.partial_cmp(limit) {
                 Some(Ordering::Equal) => *or_equal,
                 Some(found) => found == *side,
@@ -324,6 +333,13 @@ pub struct Table {
     touched: Vec<bool>,
     /// A named value changed since the last update.
     value_touched: bool,
+    /// Something was set, added or removed since the last update.
+    pending: bool,
+
+    /// The update whose values the grid shows, when looking back.
+    as_of: Option<u64>,
+    /// What a cell shows when looking back to before it existed.
+    missing: Value,
 }
 
 impl Default for Table {
@@ -365,12 +381,16 @@ impl Table {
             structural: false,
             touched: Vec::new(),
             value_touched: false,
+            pending: false,
+            as_of: None,
+            missing: Value::error("not there yet"),
         }
     }
 
     // ------------------------------------------------------------ columns
 
     fn check_name(&self, name: &str) -> Result<(), String> {
+        self.check_now()?;
         if !is_name(name) {
             return Err(format!(
                 "{name:?} can't be a name: use letters, digits and _, starting with a letter"
@@ -480,12 +500,14 @@ impl Table {
             self.ensure_groupings(by)?;
         }
         self.structural = true;
+        self.pending = true;
         Ok(n - 1)
     }
 
     /// Adds a named number that formulas can use, such as a fee or a rate.
     pub fn add_value(&mut self, name: &str, value: f64) -> Result<(), String> {
         self.check_name(name)?;
+        self.pending = true;
         let id = self
             .g
             .input_value(name, Value::F64(value))
@@ -496,6 +518,8 @@ impl Table {
 
     /// Changes a named number. Every cell that uses it is recalculated at the next update.
     pub fn set_value(&mut self, name: &str, value: f64) -> Result<(), String> {
+        self.check_now()?;
+        self.pending = true;
         let id = self
             .values
             .iter()
@@ -528,6 +552,8 @@ impl Table {
     /// Adds a row, or replaces every field of an existing one. `values` has
     /// one value per field, in the order the fields were added.
     pub fn upsert(&mut self, key: &str, values: Vec<Value>) -> Result<(), String> {
+        self.check_now()?;
+        self.pending = true;
         let fields: Vec<&str> = self
             .cols
             .iter()
@@ -576,7 +602,9 @@ impl Table {
 
     /// Sets one cell of the row at `row` (its position in arrival order).
     pub fn set_at(&mut self, row: usize, col: usize, value: Value) -> Result<(), String> {
+        self.check_now()?;
         self.col(col)?;
+        self.pending = true;
         let c = &self.cols[col];
         if c.formula.is_some() {
             return Err(format!(
@@ -607,6 +635,8 @@ impl Table {
 
     /// Removes a row. Returns whether there was one.
     pub fn remove(&mut self, key: &str) -> Result<bool, String> {
+        self.check_now()?;
+        self.pending = true;
         let Some(row) = self.index.remove(key) else {
             return Ok(false);
         };
@@ -708,6 +738,10 @@ impl Table {
             if c.kind != Kind::Text || c.formula.is_some() {
                 return Err(format!("{}: rows are grouped by a text field", c.name));
             }
+            if !self.groupings.contains_key(&col) {
+                // The groups' totals are made now, so they have no past to show.
+                self.check_now()?;
+            }
             self.ensure_groupings(col)?;
         }
         self.group_by = col;
@@ -717,6 +751,7 @@ impl Table {
 
     /// Makes sure each column with a total has that total per group of `by`.
     fn ensure_groupings(&mut self, by: usize) -> Result<(), String> {
+        self.pending = true;
         let mut per_column = self
             .groupings
             .remove(&by)
@@ -763,7 +798,19 @@ impl Table {
     /// the changes reach, then works the view out again if they could have
     /// changed it.
     pub fn update(&mut self) -> Update {
-        let report = self.g.stabilize();
+        // With nothing to apply, the graph is left alone: an update would
+        // only use up one of the updates history keeps.
+        let report = if self.pending {
+            self.g.stabilize()
+        } else {
+            Report {
+                epoch: self.g.epoch(),
+                inputs_changed: 0,
+                recalculated: 0,
+                changed: 0,
+            }
+        };
+        self.pending = false;
         self.compact();
         let rebuilt = self.view_is_stale();
         if rebuilt {
@@ -794,8 +841,25 @@ impl Table {
     }
 
     fn cell(&self, row: u32, col: usize) -> &Value {
-        self.g
-            .value(self.nodes[row as usize * self.cols.len() + col])
+        self.read(self.nodes[row as usize * self.cols.len() + col])
+    }
+
+    /// A node's value: the latest, or when looking back, the one it had then.
+    fn read(&self, id: NodeId) -> &Value {
+        match self.as_of {
+            None => self.g.value(id),
+            Some(epoch) => self.g.value_at(id, epoch).unwrap_or(&self.missing),
+        }
+    }
+
+    /// Changes are refused while looking back.
+    fn check_now(&self) -> Result<(), String> {
+        match self.as_of {
+            None => Ok(()),
+            Some(epoch) => Err(format!(
+                "the grid is showing update {epoch}; go back to now to change it"
+            )),
+        }
     }
 
     /// Works out the view from scratch: filter, sort, group.
@@ -813,9 +877,15 @@ impl Table {
         let quick = self.quick.as_str();
         let filter_on = !filters.is_empty() || !quick.is_empty();
 
+        // Looking back, only the rows that were there then.
+        let there = |r: u32| match self.as_of {
+            Some(epoch) if n > 0 => self.g.value_at(self.nodes[r as usize * n], epoch).is_ok(),
+            _ => true,
+        };
         let mut rows: Vec<u32> = (0..self.keys.len() as u32)
             .filter(|&r| {
-                filters.iter().all(|&(c, f)| f.accepts(self.cell(r, c)))
+                there(r)
+                    && filters.iter().all(|&(c, f)| f.accepts(self.cell(r, c)))
                     && (quick.is_empty()
                         || contains_lower(&self.keys[r as usize], quick)
                         || text_cols.iter().any(|&c| {
@@ -967,7 +1037,7 @@ impl Table {
     }
 
     fn group_number(&self, by: usize, key: &str, col: usize) -> Option<f64> {
-        match self.g.value(self.group_node(by, key, col)?) {
+        match self.read(self.group_node(by, key, col)?) {
             Value::F64(x) => Some(*x),
             _ => None,
         }
@@ -1089,7 +1159,7 @@ impl Table {
             } else if self.filter_on {
                 self.plain_totals[k]
             } else {
-                let number = col.total.and_then(|id| match self.g.value(id) {
+                let number = col.total.and_then(|id| match self.read(id) {
                     Value::F64(x) => Some(*x),
                     _ => None,
                 });
@@ -1197,7 +1267,69 @@ impl Table {
         self.open.contains(key)
     }
 
+    /// A text column's distinct values and how many rows have each, sorted:
+    /// `{"more": false, "values": [["EU", 2], ["US", 3]]}`. With more than
+    /// `limit` distinct values, `more` is true and none are listed.
+    pub fn values_json(&self, col: usize, limit: usize) -> String {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        if col < self.cols.len() {
+            for r in (0..self.keys.len() as u32).filter(|r| !self.dead.contains(r)) {
+                if let Value::Str(s) = self.cell(r, col) {
+                    *counts.entry(&**s).or_default() += 1;
+                }
+            }
+        }
+        if counts.len() > limit {
+            return r#"{"more":true,"values":[]}"#.to_string();
+        }
+        let mut values: Vec<(&str, usize)> = counts.into_iter().collect();
+        values.sort();
+        let mut out = String::from(r#"{"more":false,"values":["#);
+        for (k, (value, rows)) in values.into_iter().enumerate() {
+            if k > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "[{},{rows}]", json_str(value));
+        }
+        out.push_str("]}");
+        out
+    }
+
     // ------------------------------------------------------------- history
+
+    /// Shows the grid as it was at the end of an earlier update: cells,
+    /// totals, and which rows pass the filters and in what order. `None`
+    /// goes back to now. Needs [`keep_history`](Table::keep_history); while
+    /// looking back, nothing can be changed.
+    pub fn set_as_of(&mut self, epoch: Option<u64>) -> Result<(), String> {
+        if let Some(epoch) = epoch {
+            let (oldest, latest) = self
+                .g
+                .history_range()
+                .ok_or("the grid is not keeping earlier values")?;
+            if self.pending {
+                return Err("update the grid before looking back".into());
+            }
+            if epoch < oldest || epoch > latest {
+                return Err(format!(
+                    "update {epoch} is not kept: the grid has updates {oldest} to {latest}"
+                ));
+            }
+        }
+        self.as_of = epoch;
+        self.structural = true;
+        Ok(())
+    }
+
+    /// The update the grid is showing, when looking back.
+    pub fn as_of(&self) -> Option<u64> {
+        self.as_of
+    }
+
+    /// The earliest and latest updates that can be shown, if history is kept.
+    pub fn history_range(&self) -> Option<(u64, u64)> {
+        self.g.history_range()
+    }
 
     /// Keeps each cell's and total's values from the last `updates` updates,
     /// for [`trends_json`](Table::trends_json). Each value an update

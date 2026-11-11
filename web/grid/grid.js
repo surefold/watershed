@@ -171,6 +171,7 @@ export class WatershedGrid {
     this.headRow.replaceChildren();
     this.filterRow.replaceChildren();
     this.headCells = [];
+    this.filterInputs = [];
     for (const pos of this.display) {
       const col = this.cols[pos - 1];
       const cell = el("div", "wg-hcell" + (col?.kind === "number" ? " wg-num" : ""));
@@ -239,6 +240,7 @@ export class WatershedGrid {
     input.value = info.filter;
     input.placeholder = info.kind === "number" ? ">100, 5..10" : info.kind === "bool" ? "true / false" : "contains";
     input.setAttribute("aria-label", `Filter ${info.name}`);
+    this.filterInputs[col] = input;
     let timer = 0;
     input.addEventListener("input", () => {
       clearTimeout(timer);
@@ -434,7 +436,13 @@ export class WatershedGrid {
     if (pos > 0) {
       item("Sort ascending", () => this.setSort([{ col, desc: false }]));
       item("Sort descending", () => this.setSort([{ col, desc: true }]));
-      if (this.sort.some((s) => s.col === col)) item("Clear sort", () => this.setSort(this.sort.filter((s) => s.col !== col)));
+      if (this.sort.some((s) => s.col === col)) {
+        item("Clear sort", () => this.setSort(this.sort.filter((s) => s.col !== col)));
+      } else if (this.sort.length > 0) {
+        // The same as Shift-clicking the header, for when there is no Shift key.
+        item("Then sort ascending", () => this.setSort([...this.sort, { col, desc: false }]));
+        item("Then sort descending", () => this.setSort([...this.sort, { col, desc: true }]));
+      }
       menu.append(el("hr"));
       item(this.pinned.has(col) ? "Unpin" : "Pin to the left", () => this.setPinned(col, !this.pinned.has(col)));
       item("Hide column", () => this.setHidden(col, true));
@@ -443,6 +451,7 @@ export class WatershedGrid {
         else item(`Group by ${info.name}`, () => this.setGroup(col));
       }
       menu.append(el("hr"));
+      if (info.kind === "text") this.valueFilter(menu, col);
     }
     menu.append(el("div", "wg-menu-title", "Columns"));
     this.cols.forEach((c, k) => {
@@ -471,6 +480,62 @@ export class WatershedGrid {
     this.menuPos = pos;
     document.addEventListener("pointerdown", this.outside, true);
     document.addEventListener("keydown", this.escape);
+  }
+
+  /** Adds a tick list of a text column's values to its menu; unticking one filters it out. */
+  valueFilter(menu, col) {
+    const { more, values } = JSON.parse(this.grid.values(col, 60));
+    menu.append(el("div", "wg-menu-title", "Show values"));
+    if (more) {
+      menu.append(el("div", "wg-menu-note", "Too many to list. Type in the filter box instead."));
+    } else {
+      // `=a|b` in the filter box is the list of ticked values; anything else leaves all ticked.
+      const typed = this.filterInputs[col].value.trim();
+      const ticked = typed.startsWith("=") ? new Set(typed.slice(1).split("|").map((v) => v.trim().toLowerCase())) : null;
+      const boxes = values.map(([value, rows]) => {
+        const label = el("label", "wg-check");
+        const box = el("input");
+        box.type = "checkbox";
+        box.checked = !ticked || ticked.has(value.toLowerCase());
+        box.addEventListener("change", () => {
+          const chosen = boxes.filter((b) => b.box.checked).map((b) => b.value);
+          const all = chosen.length === boxes.length || chosen.length === 0;
+          this.setFilter(col, all ? "" : `=${chosen.join("|")}`);
+        });
+        label.append(box, el("span", "", value || "(blank)"), el("span", "wg-count", rows.toLocaleString("en-US")));
+        menu.append(label);
+        return { box, value };
+      });
+    }
+    menu.append(el("hr"));
+  }
+
+  /** Sets a column's filter as if it had been typed in its box. */
+  setFilter(col, text) {
+    const input = this.filterInputs[col];
+    try {
+      this.grid.set_filter(col, text);
+      input.value = text;
+      input.classList.remove("wg-bad");
+      this.body.scrollTop = 0;
+      this.refresh();
+    } catch (error) {
+      this.onError(error.message);
+    }
+  }
+
+  /**
+   * Shows the grid as it was after an earlier update (see `grid.history_range()`),
+   * or as it is now for `null`. Nothing can be edited while looking back.
+   */
+  setAsOf(epoch) {
+    this.stopEdit(false, 0, true);
+    try {
+      this.grid.set_as_of(epoch ?? -1);
+    } catch (error) {
+      this.onError(error.message);
+    }
+    this.refresh();
   }
 
   closeMenu() {
