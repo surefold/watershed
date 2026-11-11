@@ -41,10 +41,16 @@ h1 { font: 700 1.5rem/1.1 var(--display); letter-spacing: -0.02em; margin: 0; }
 h1 span { color: var(--water); }
 header p { margin: 0 0 0 10px; flex: 1 1 44ch; color: var(--muted); max-width: 104ch; font-size: 13px; line-height: 1.4; }
 .tag { font: 600 0.68rem/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-/* Whether prices are moving, said once at the top of the page. */
-.pill { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 8px; height: 26px; padding: 0 11px; border-radius: 999px; background: var(--wash); color: var(--muted); font: 600 12px/1 var(--mono); font-variant-numeric: tabular-nums; }
+/* Whether prices are moving, said once at the top of the page, with the
+   switch that changes it right beside the words. */
+.pill { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 4px 0 12px; border: 0; border-radius: 999px; background: var(--wash); color: var(--muted); font: 600 12px/1 var(--mono); font-variant-numeric: tabular-nums; cursor: pointer; }
+.pill .act { display: inline-flex; align-items: center; gap: 7px; height: 24px; margin-left: 2px; padding: 0 12px 0 10px; border-radius: 999px; background: var(--water); color: var(--surface); font: 600 12.5px/1 var(--body); transition: background-color 0.12s; }
+.pill:hover .act { background: color-mix(in srgb, var(--water) 88%, var(--ink)); }
+/* A play triangle while paused, two bars while streaming. */
+.pill .act::before { content: ""; width: 8px; height: 10px; background: currentColor; clip-path: polygon(0 0, 100% 50%, 0 100%); }
+.pill.on .act::before { clip-path: polygon(0 0, 36% 0, 36% 100%, 0 100%, 0 0, 64% 0, 100% 0, 100% 100%, 64% 100%, 64% 0); }
 .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.6; }
-.pill.on { background: color-mix(in srgb, var(--water) 12%, var(--surface)); color: var(--water); }
+.pill.on, .pill.on:hover:not(:disabled) { background: color-mix(in srgb, var(--water) 12%, var(--surface)); color: var(--water); }
 .pill.on::before { opacity: 1; animation: blink 1.6s ease-in-out infinite; }
 @keyframes blink { 50% { opacity: 0.3; } }
 
@@ -152,7 +158,7 @@ body.embed header { display: none; }
   <span class="tag">Rust → WebAssembly</span>
   <p>A data grid whose rows, formulas, totals, sorting, filtering and grouping all run in WebAssembly on the watershed engine.
      Every cell is a node, so a change recalculates only the cells and totals that depend on it.</p>
-  <span class="pill" id="pill">Paused</span>
+  <button type="button" class="pill" id="pill" aria-pressed="false" title="Start or pause the stream of price changes"><span id="pill-state">Paused</span><span class="act" id="pill-act">Stream</span></button>
 </header>
 
 <dl class="stats" aria-label="Last update">
@@ -329,8 +335,10 @@ function share(part, all) {
 }
 
 function pill() {
-  $("pill").textContent = streaming ? `Streaming · ${whole.format(rate())}/s` : lookingBack ? "Looking back" : "Paused";
+  $("pill-state").textContent = streaming ? `Streaming · ${whole.format(rate())}/s` : lookingBack ? "Looking back" : "Paused";
+  $("pill-act").textContent = streaming ? "Pause" : "Stream";
   $("pill").classList.toggle("on", streaming);
+  $("pill").setAttribute("aria-pressed", String(streaming));
 }
 
 function status(s) {
@@ -494,7 +502,7 @@ function setStreaming(on) {
   if (on && lookingBack) lookBack(null);
   streaming = on;
   $("stream").setAttribute("aria-pressed", String(on));
-  $("stream").textContent = on ? "Stop prices" : "Stream prices";
+  $("stream").textContent = on ? "Pause prices" : "Stream prices";
   lastTick = 0;
   pill();
   if (on) requestAnimationFrame(tick);
@@ -532,7 +540,7 @@ function tick(now) {
   requestAnimationFrame(tick);
 }
 
-$("stream").addEventListener("click", () => setStreaming(!streaming));
+for (const id of ["stream", "pill"]) $(id).addEventListener("click", () => setStreaming(!streaming));
 $("rate").addEventListener("input", () => {
   $("rate-out").textContent = whole.format(rate());
   pill();
