@@ -216,9 +216,10 @@ uv sync && uv run pytest
 
 ## From Kotlin
 
-`crates/watershed-jvm` wraps the engine for the JVM, with the Kotlin side
-written by [UniFFI](https://mozilla.github.io/uniffi-rs/). `examples/kotlin`
-is a small project that builds it and runs:
+`crates/watershed-jvm` is the engine as a C library that the JVM calls
+directly, through its foreign function API (JDK 22 on), with a typed
+Kotlin layer on top. `examples/kotlin` is a small project that builds it
+and runs:
 
 ```kotlin
 val g = Graph()
@@ -238,12 +239,14 @@ cd examples/kotlin
 gradle run
 ```
 
-It is a start, not a published library: see `examples/kotlin/README.md`.
+Updating from Kotlin is as fast as from Rust, and a call costs tens to
+hundreds of nanoseconds (`gradle benchmark`). It is not a published
+library yet: see `examples/kotlin/README.md`.
 
 ## From Scala 3
 
-The same bindings with a typed Scala layer (`examples/scala`, run with
-`sbt run`). Scala lets more of an expression be ordinary operators:
+The same C library with a typed Scala layer (`examples/scala`, run with
+`sbt run`; it needs only sbt, a JDK and cargo). Scala lets more of an expression be ordinary operators:
 
 ```scala
 import watershed.*
@@ -565,7 +568,7 @@ crates/watershed-core/
   tests/          behaviour and property tests
   examples/       tour, benchmark, collection and placement
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
-crates/watershed-jvm/   the engine for the JVM (UniFFI), with typed layers for Kotlin and Scala 3; a workspace of its own
+crates/watershed-jvm/   the engine as a C library for the JVM, with typed layers for Kotlin and Scala 3
 examples/kotlin/        a Kotlin project that uses it, and its benchmark
 examples/scala/         a Scala 3 project that uses it
 crates/watershed-web/   the engine as WebAssembly, with three example models
@@ -596,9 +599,7 @@ web/grid/               the grid's page, the script that draws it, and the chart
   collection's groups as of an earlier update, and a sink that writes to S3.
 - **Decimals in the grid:** it has no decimal columns yet. Decimals hold
   28 digits; nothing holds more.
-- **Bindings:** the JVM ones are a first cut (no groupings or history, one
-  call per row, nothing packaged as a jar). Updating from Kotlin or Scala
-  is as fast as from Rust; building a graph and values that are not a
-  `Double` cost about 10 µs a call, the Python package is not
-  published, and there is no cluster.
+- **Bindings:** the JVM ones have no groupings or history yet and are not
+  packaged as a jar, the Python package is not published, and there is no
+  cluster.
   Formulas as text have no whole-number constants yet.

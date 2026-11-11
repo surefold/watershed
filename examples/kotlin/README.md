@@ -9,9 +9,7 @@ gradle test     # the same, then runs src/test/kotlin/WatershedTest.kt
 gradle benchmark  # times the engine's benchmark graph from Kotlin
 ```
 
-It needs Rust 1.88 or later (`cargo`), a JDK from 22 up, and Gradle. The first
-run downloads UniFFI and compiles it, which takes a minute; after that only
-what changed is rebuilt.
+It needs Rust (`cargo`), a JDK from 22 up, and Gradle.
 
 ## What it looks like
 
@@ -68,56 +66,57 @@ after the other:
 
 | | from Rust | from Kotlin |
 |---|---|---|
-| one price changes | 91 µs | 93 µs |
-| 1% of prices change together | 4.2 ms | 4.2 ms (one `setAll`) |
-| 10% of prices change together | 8.8 ms | 7.0 ms |
-| read one `Double` | | 0.5 µs |
-| one set and one update that changes nothing | | 0.2 µs |
-| build the graph | 0.8 s | 1.2 s (in calls of 10,000 nodes) |
+| one price changes | 95 µs | 93 µs |
+| 1% of prices change together | 4.2 ms | 4.5 ms (one `setAll`) |
+| 10% of prices change together | 8.9 ms | 7.0 ms |
+| build the graph | 0.46 s | 0.79 s (in calls of 10,000 nodes) |
 
-(The machine was doing other work, so the rows move by a tenth or two from
-run to run; Rust and Kotlin are level.)
+(The machine was doing other work, so rows move by a tenth or so from run
+to run; Rust and Kotlin are level.)
 
-It was not always so. The generated bindings go through JNA, which costs
-about 10 µs a call: one set and one update that changed nothing took 26 µs.
-So the calls a running program makes over and over (set a `Double`, read a
-`Double`, `stabilize()`, `setAll`) do not go through them. They call plain
-C functions in the Rust library through the JDK's foreign function API,
-which takes tens of nanoseconds. Everything else (building the graph,
-collections, other types of value) still goes through the generated
-bindings, so:
+What one call costs from Kotlin:
 
-- Build with `defineAll` when there are thousands of nodes. One `define`
-  at a time took 63 s for the million; in batches of 10,000, about a
-  second.
-- Values that are not a `Double` are set and read at about 10 µs each.
-- Rows of a collection go one `upsert` at a time, at that cost.
+| | set | read |
+|---|---|---|
+| a `Double` | 125 ns | 42 ns |
+| a `Long` | 41 ns | 41 ns |
+| a `BigDecimal` | 83 ns | 250 ns |
+| a `String` | 208 ns | 125 ns |
+
+An update with nothing to do is 42 ns. (The clock here ticks every 41 ns,
+so the smallest of these are "one tick".) Adding a node is about 0.8 µs one
+`define` at a time and 0.7 µs with `defineAll`; adding a row of two fields
+and a column is about 1.2 µs with `upsert` and 1.1 µs with `upsertAll`. So
+the calls that take many at once are a convenience now, not a necessity.
+
+It was not always so. The first bindings were generated (UniFFI) and went
+through JNA, at about 10 µs a call: a set and an update that changed
+nothing took 26 µs, and a million nodes took 63 s to build one `define` at
+a time. Every call now goes straight to a C function in the engine through
+the JDK's foreign function API.
 
 ## How it fits together
 
-- `crates/watershed-jvm` is a Rust library that wraps the engine in a few
-  plain types. [UniFFI](https://mozilla.github.io/uniffi-rs/) writes the
-  Kotlin classes that call it, through [JNA](https://github.com/java-native-access/jna).
-- `crates/watershed-jvm/src/fast.rs` and `kotlin/.../Fast.kt` are the
-  direct calls: four C functions, and the JVM side that calls them through
-  `java.lang.foreign`. A direct call only says whether it worked; if not,
-  the same call is made through the generated bindings, which explain.
-- `crates/watershed-jvm/kotlin/` is the typed layer, written by hand over
-  those generated calls: `Expr<T>`, `Node<T>`, `Input<T>`, `Field<T>` and
-  the operators. An expression crosses into the engine as a list of steps
-  (`qty`, `price`, multiply), not as text, and the engine checks its types
-  again when the node is made.
-- `build.gradle.kts` has two tasks ahead of compiling Kotlin: `buildNative`
-  (`cargo build --release` in that crate) and `generateBindings` (the
-  Kotlin, into `build/generated/uniffi`). `run` and `test` tell the JVM
-  where the library is with `-Djna.library.path`.
-- Nothing is published or installed. To use it in another project today,
-  copy those two tasks, or copy the generated `watershed_jvm.kt`, the
-  typed layer's `Typed.kt` and the built library (`libwatershed_jvm.dylib`, `.so` or `.dll`) into it.
+- `crates/watershed-jvm` is the engine as a C library: about thirty plain
+  functions (`src/ffi.rs`). Numbers cross in registers; a name, an
+  expression or a batch of rows crosses as bytes the JVM wrote.
+- `crates/watershed-jvm/java/` is one small Java class, `Native`, that
+  calls those functions through `java.lang.foreign` (so: JDK 22 or later,
+  and `--enable-native-access`), and `Wire`, which writes the bytes.
+- `crates/watershed-jvm/kotlin/Typed.kt` is the typed layer a program
+  uses: `Graph`, `Collection`, `Expr<T>`, `Node<T>`, `Input<T>`,
+  `Field<T>` and the operators. Scala has its own beside it.
+- `build.gradle.kts` runs `cargo build --release` and tells the JVM where
+  the library is with `-Dwatershed.library.path`.
+- Nothing is generated, published or installed, and there are no
+  dependencies beyond the JDK. To use it in another project today, copy the
+  `java/` and `kotlin/` sources and the built library
+  (`libwatershed_jvm.dylib`, `.so` or `.dll`).
 
 ## What is not here yet
 
-- Rows of a collection still go one `upsert` at a time; nodes and prices
-  have calls that take many (`defineAll`, `setAll`).
 - Groupings and history (`explain` as of an earlier update).
 - A jar with the library inside for each platform.
+- `Collection` has the name of Kotlin's own `Collection`, which wins when
+  you write the type out: say `dev.surefold.watershed.Collection`, or let
+  it be inferred.

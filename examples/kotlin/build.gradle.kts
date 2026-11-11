@@ -1,11 +1,12 @@
 // A small Kotlin program that uses watershed.
 //
-//     gradle run     builds the Rust library, writes its Kotlin side, runs Main.kt
-//     gradle test    the same, then runs the tests
+//     gradle run         builds the Rust library and runs Main.kt
+//     gradle test        the same, then runs the tests
+//     gradle benchmark   times the engine's benchmark graph from Kotlin
 //
-// It needs Rust (cargo, 1.88 or later) and a JDK (22 or later). Nothing is
-// published anywhere: the Rust library is built from this repository into
-// crates/watershed-jvm/target/release, and the JVM is told to look there.
+// It needs Rust (cargo) and a JDK (22 or later). Nothing is published
+// anywhere: the Rust library is built from this repository into
+// target/release, and the JVM is told to look for it there.
 
 plugins {
     kotlin("jvm") version "2.4.21"
@@ -17,49 +18,34 @@ repositories {
 }
 
 dependencies {
-    // The generated Kotlin calls the Rust library through JNA.
-    implementation("net.java.dev.jna:jna:5.17.0")
     testImplementation(kotlin("test"))
 }
 
 val repository: File = rootDir.resolve("../..").canonicalFile
-val bindingsCrate: File = repository.resolve("crates/watershed-jvm")
-val libraryFolder: File = bindingsCrate.resolve("target/release")
-val library: File = libraryFolder.resolve(System.mapLibraryName("watershed_jvm"))
-val generated = layout.buildDirectory.dir("generated/uniffi")
+val bindings: File = repository.resolve("crates/watershed-jvm")
+val libraryFolder: File = repository.resolve("target/release")
 
-// The engine and its JVM bindings, as one native library.
+// The engine, as a C library the JVM calls directly.
 val buildNative by tasks.registering(Exec::class) {
-    workingDir = bindingsCrate
-    commandLine("cargo", "build", "--release", "--locked")
+    workingDir = repository
+    commandLine("cargo", "build", "--release", "--locked", "-p", "watershed-jvm")
     inputs.dir(repository.resolve("crates/watershed-core/src"))
-    inputs.dir(repository.resolve("crates/watershed-jvm/src"))
-    outputs.file(library)
+    inputs.dir(bindings.resolve("src"))
+    outputs.file(libraryFolder.resolve(System.mapLibraryName("watershed_jvm")))
 }
 
-// The Kotlin classes that call it, written by UniFFI from the library itself.
-val generateBindings by tasks.registering(Exec::class) {
-    dependsOn(buildNative)
-    workingDir = bindingsCrate
-    commandLine(
-        "cargo", "run", "--release", "--locked", "--quiet", "--bin", "uniffi-bindgen", "--",
-        "generate", "--library", library.path,
-        "--language", "kotlin", "--no-format",
-        "--out-dir", generated.get().asFile.path,
-    )
-    inputs.file(library)
-    inputs.file(bindingsCrate.resolve("uniffi.toml"))
-    outputs.dir(generated)
+// The JVM side lives beside the Rust crate: one Java class that calls the
+// C library, and the typed Kotlin layer over it.
+sourceSets.main {
+    java.srcDir(bindings.resolve("java"))
 }
 
 kotlin {
     sourceSets.main {
-        // The generated calls, and the typed layer written over them.
-        kotlin.srcDir(generateBindings)
-        kotlin.srcDir(bindingsCrate.resolve("kotlin"))
+        kotlin.srcDir(bindings.resolve("kotlin"))
     }
-    // The direct calls use the JDK's foreign function API, which is in
-    // JDK 22 and later; both compilers aim at 22 so they agree.
+    // The calls use the JDK's foreign function API, which is in JDK 22 and
+    // later; both compilers aim at 22 so they agree.
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_22
     }
@@ -70,9 +56,9 @@ java {
     targetCompatibility = JavaVersion.VERSION_22
 }
 
-// Where the JVM finds the native library, and leave to call into it.
+// Where the JVM finds the library, and leave to call into it.
 val nativeAccess = listOf(
-    "-Djna.library.path=${libraryFolder.path}",
+    "-Dwatershed.library.path=${libraryFolder.path}",
     "--enable-native-access=ALL-UNNAMED",
 )
 
@@ -81,16 +67,22 @@ application {
     applicationDefaultJvmArgs = nativeAccess
 }
 
+tasks.named<JavaExec>("run") {
+    dependsOn(buildNative)
+}
+
 // The engine's benchmark, driven from Kotlin: `gradle benchmark`.
 tasks.register<JavaExec>("benchmark") {
     group = "application"
     description = "Times the engine's benchmark graph, built and updated from Kotlin."
+    dependsOn(buildNative)
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass = "BenchmarkKt"
     jvmArgs(nativeAccess)
 }
 
 tasks.test {
+    dependsOn(buildNative)
     useJUnitPlatform()
     jvmArgs(nativeAccess)
 }
