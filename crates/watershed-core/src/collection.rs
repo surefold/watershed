@@ -835,6 +835,40 @@ impl Collection {
         Ok((Ir::Ref(at), ty))
     }
 
+    /// Parses a formula written as text, such as `qty * price * fx`. A name
+    /// is one of this collection's fields or columns, or else the graph's
+    /// node of that name. Returns the expression, for
+    /// [`add_column`](Self::add_column), and its type. See the
+    /// [`formula`](crate::formula) module for what a formula can say.
+    pub fn parse_formula(&self, g: &Graph, source: &str) -> Result<(Ir, Type), CalcError> {
+        self.check_graph(g)?;
+        let ir = crate::formula::parse(source, &|name| {
+            let part = |i: usize| u32::try_from(i).expect("too many fields");
+            if let Some(i) = self.fields.iter().position(|(n, _)| n == name) {
+                Some(Ir::Ref(self.placeholder(part(i))))
+            } else if let Some(i) = self.columns.iter().position(|c| c.name == name) {
+                Some(Ir::Ref(self.placeholder(COLUMN | part(i))))
+            } else {
+                g.find(name).map(|id| g.reference(id))
+            }
+        })
+        .map_err(CalcError::Invalid)?;
+        let ty = ir.type_check(&|r| self.type_of(g, r))?;
+        Ok((ir, ty))
+    }
+
+    /// Adds a column from a formula written as text; returns its
+    /// placeholder and type. See [`parse_formula`](Self::parse_formula).
+    pub fn add_formula_column(
+        &mut self,
+        g: &mut Graph,
+        name: &str,
+        source: &str,
+    ) -> Result<(Ir, Type), CalcError> {
+        let (formula, _) = self.parse_formula(g, source)?;
+        self.add_column(g, name, formula)
+    }
+
     /// Adds a total of a field or column (given by its placeholder), or a
     /// count of rows when `of` is `None` (only for [`AggregateOp::Count`]).
     pub fn add_total(
