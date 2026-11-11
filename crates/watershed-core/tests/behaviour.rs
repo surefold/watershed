@@ -646,6 +646,59 @@ fn a_column_can_use_other_columns_and_any_node_in_the_graph() -> Result {
 }
 
 #[test]
+fn every_row_of_a_column_reads_its_own_rows_nodes() -> Result {
+    // The first row's column nodes are compiled from the formula and the
+    // other rows copy them, so each copy must read its own row.
+    let mut g = Graph::new();
+    let fx = g.input("fx", 2.0)?;
+    let mut trades = Collection::new(&g, "trades");
+    let notional = trades.field::<f64>("notional")?;
+    let side = trades.field::<String>("side")?;
+    let signed = trades.column(
+        &mut g,
+        "signed",
+        when(side.equals("sell"))
+            .then(-notional)
+            .otherwise(notional),
+    )?;
+    let converted = trades.column(&mut g, "converted", signed * fx)?;
+    for i in 0..20 {
+        let side_of = if i % 3 == 0 { "sell" } else { "buy" };
+        trades.upsert(
+            &mut g,
+            &format!("t{i}"),
+            &[notional.is(10.0 + i as f64), side.is(side_of.to_string())],
+        )?;
+    }
+    // A column added once there are rows is copied to them the same way.
+    let doubled = trades.column(&mut g, "doubled", converted + converted)?;
+    g.stabilize();
+    for i in 0..20 {
+        let sign = if i % 3 == 0 { -1.0 } else { 1.0 };
+        let key = format!("t{i}");
+        assert_eq!(trades.get(&g, &key, signed)?, sign * (10.0 + i as f64));
+        assert_eq!(
+            trades.get(&g, &key, doubled)?,
+            sign * (10.0 + i as f64) * 4.0
+        );
+    }
+    let seventh = trades.node(&g, "t7", converted).expect("row t7");
+    assert_eq!(
+        g.dependencies(seventh.id()),
+        vec![fx.id(), trades.node(&g, "t7", signed).expect("row t7").id()]
+    );
+
+    // One row changing side recalculates that row's three columns only.
+    trades.upsert(&mut g, "t7", &[side.is("sell".to_string())])?;
+    let report = g.stabilize();
+    assert_eq!(report.recalculated, 3);
+    assert_eq!(trades.get(&g, "t7", doubled)?, -68.0);
+    assert_eq!(trades.get(&g, "t8", doubled)?, 72.0);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
 fn totals_and_columns_added_after_rows_include_them() -> Result {
     let mut g = Graph::new();
     let mut c = Collection::new(&g, "c");
