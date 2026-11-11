@@ -179,8 +179,9 @@ body.embed header { display: none; }
   <span><b id="f-shown">0</b> shown</span>
   <span id="f-groups-wrap" hidden><b id="f-groups">0</b> groups</span>
   <span><b id="f-selected">0</b> selected</span>
+  <span id="f-range" hidden></span>
   <span id="f-more-wrap" hidden><span id="f-more"></span> <button id="more">Load more</button></span>
-  <span class="hint">Click a header to sort (<kbd>Shift</kbd> adds), drag it to move, <kbd>⋮</kbd> to pin, hide or group. Filters: <kbd>&gt;100</kbd> <kbd>5..10</kbd> <kbd>=Rates</kbd>. <kbd>Enter</kbd> edits, <kbd>⌘Z</kbd> undoes, copy and paste work on cells.</span>
+  <span class="hint">Click a header to sort (<kbd>Shift</kbd> adds), drag it to move, <kbd>⋮</kbd> to pin, hide or group. Filters: <kbd>&gt;100</kbd> <kbd>5..10</kbd> <kbd>=Rates</kbd>. Drag over cells (or <kbd>Shift</kbd>+arrows) for a block: copy, paste, <kbd>⌘Enter</kbd> fills. Click a trade to select its row. <kbd>⌘Z</kbd> undoes.</span>
 </footer>
 
 <script>
@@ -247,6 +248,19 @@ function drawChart() {
 
 function status(s) {
   if (s.selected !== undefined) $("f-selected").textContent = whole.format(s.selected);
+  if (s.range !== undefined) {
+    // What the block of cells picked out comes to.
+    const r = s.range;
+    $("f-range").hidden = !r;
+    if (r) {
+      const two = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+      $("f-range").replaceChildren(
+        ...[["cells", whole.format(r.cells)], ...(r.numbers ? [["sum", two.format(r.sum)], ["avg", two.format(r.avg)], ["min", two.format(r.min)], ["max", two.format(r.max)]] : [])].flatMap(
+          ([name, value]) => [Object.assign(document.createElement("b"), { textContent: value }), ` ${name}  `],
+        ),
+      );
+    }
+  }
   if (s.loading !== undefined) {
     $("f-more").textContent = s.loading ? "Loading more rows…" : s.done ? "Every row is loaded." : "More rows load as you scroll.";
     $("more").hidden = s.loading || s.done;
@@ -309,6 +323,7 @@ async function build(size) {
   let loaded = 0;
   view = new WatershedGrid($("grid"), grid, {
     keyTitle: "trade",
+    label: "Trades",
     formats,
     onStatus: status,
     onFocus: showWhy,
@@ -483,7 +498,7 @@ for (const id of ["formula", "formula-name"]) {
 
 $("delete").addEventListener("click", () => {
   const count = view.selectedKeys().length;
-  if (!count) return note("Click a row to select it first. Shift-click selects a range.", "bad");
+  if (!count) return note("Click a trade in the first column to select its row first. Shift-click selects a run of rows.", "bad");
   view.removeSelected();
   note(`Deleted ${whole.format(count)} row${count === 1 ? "" : "s"}.`, "good");
 });

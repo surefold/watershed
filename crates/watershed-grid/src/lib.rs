@@ -19,6 +19,10 @@ pub mod table;
 
 pub use table::{Agg, Kind, Table, Update};
 
+fn positions(cols: Vec<u32>) -> Vec<usize> {
+    cols.into_iter().map(|col| col as usize).collect()
+}
+
 fn js_error(message: String) -> JsError {
     JsError::new(&message)
 }
@@ -137,6 +141,29 @@ impl Grid {
         let keys = keys.iter().map(String::as_str).collect();
         let cols: Vec<usize> = cols.into_iter().map(|col| col as usize).collect();
         self.table.tsv(&keys, &cols)
+    }
+
+    /// A block of cells as tab-separated text: the columns at `cols`, over
+    /// `count` lines of the view from line `start`.
+    pub fn range_tsv(&self, start: u32, count: u32, cols: Vec<u32>) -> String {
+        self.table
+            .range_tsv(start as usize, count as usize, &positions(cols))
+    }
+
+    /// What a block of cells comes to, as JSON:
+    /// `{cells, numbers, sum, avg, min, max}`.
+    pub fn range_stats(&self, start: u32, count: u32, cols: Vec<u32>) -> String {
+        self.table
+            .range_stats_json(start as usize, count as usize, &positions(cols))
+    }
+
+    /// Sets every cell of a block to one text, as one step to undo. Returns
+    /// `{set, skipped}` as JSON.
+    pub fn fill(&mut self, start: u32, count: u32, cols: Vec<u32>, text: &str) -> String {
+        let (set, skipped) =
+            self.table
+                .fill(start as usize, count as usize, &positions(cols), text);
+        format!(r#"{{"set":{set},"skipped":{skipped}}}"#)
     }
 
     /// Removes a row. Returns whether there was one.

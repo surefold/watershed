@@ -184,3 +184,10 @@
 .wg-cell.wg-moving, .wg-fcell.wg-moving { background: color-mix(in srgb, var(--wg-accent) 13%, var(--wg-surface)); }
 .wg-hcell.wg-moving { background: color-mix(in srgb, var(--wg-accent) 24%, var(--wg-head)); color: var(--wg-ink); box-shadow: inset 0 -3px 0 var(--wg-accent); }
 .wg-moving-column .wg-more { opacity: 0; }
+
+/* A block of cells picked out by dragging or Shift+arrows. */
+.wg-rows { user-select: none; }
+.wg-cell.wg-range { background: color-mix(in srgb, var(--wg-accent) 16%, var(--wg-surface)); }
+.wg-ranging, .wg-ranging * { cursor: cell !important; }
+/* Said to a screen reader as the focus moves; not shown. */
+.wg-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
