@@ -54,7 +54,9 @@ val generateBindings by tasks.registering(Exec::class) {
 
 kotlin {
     sourceSets.main {
+        // The generated calls, and the typed layer written over them.
         kotlin.srcDir(generateBindings)
+        kotlin.srcDir(bindingsCrate.resolve("kotlin"))
     }
     // Any JDK from 21 up runs this; both compilers aim at 21 so they agree.
     compilerOptions {

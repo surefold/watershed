@@ -7,22 +7,31 @@
 //!
 //! ```kotlin
 //! val g = Graph()
-//! val qty = g.input("qty", Value.Number(10.0))
-//! val price = g.input("price", Value.Number(2.5))
-//! val total = g.define("total", "qty * price * 1.2")
-//! g.set(price, Value.Number(3.0))
+//! val qty = g.input("qty", 10.0)                // Input<Double>
+//! val price = g.input("price", 2.5)
+//! val total = g.define("total", qty * price * 1.2)   // Node<Double>
+//! g[price] = 3.0
 //! g.stabilize()
-//! println(g.get(total))
+//! val now: Double = g[total]
 //! ```
 //!
-//! A node is its id, a `UInt` in Kotlin. `examples/kotlin` is a project
-//! that builds this library, generates the Kotlin and runs it.
+//! That is the typed layer in `kotlin/`, written by hand over the calls
+//! here. In it an expression has a type, so adding a number to a string
+//! does not compile, as in Rust. The calls here deal in [`Value`]s, node
+//! numbers and expressions as lists of [`Op`]s, and have plainer names
+//! (`input_value`, `define_expression`...) so that the typed layer can have
+//! the good ones.
+//!
+//! `examples/kotlin` is a project that builds this library, generates the
+//! Kotlin and runs it.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use watershed_core::{AggregateOp, CalcError, Collection as CoreCollection, NodeId, Type};
+use watershed_core::{
+    AggregateOp, BinOp, CalcError, Collection as CoreCollection, Ir, NodeId, Type, UnOp,
+};
 
 uniffi::setup_scaffolding!();
 
@@ -109,13 +118,179 @@ impl Value {
     }
 }
 
-/// What a field of a collection holds.
-#[derive(Debug, Clone, Copy, uniffi::Enum)]
+/// What a node or a field of a collection holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum Kind {
     Number,
     Whole,
     Flag,
     Text,
+    /// A list of strings. Calculated nodes only: not an input or a field.
+    Texts,
+}
+
+impl Kind {
+    fn of(ty: Type) -> Kind {
+        match ty {
+            Type::F64 => Kind::Number,
+            Type::I64 => Kind::Whole,
+            Type::Bool => Kind::Flag,
+            Type::Str => Kind::Text,
+            Type::StrList => Kind::Texts,
+        }
+    }
+}
+
+/// A whole number given where a number is held becomes that number, so
+/// that `12` can be set where `12.0` is meant.
+fn fitted(value: watershed_core::Value, ty: Type) -> watershed_core::Value {
+    match (value, ty) {
+        (watershed_core::Value::I64(whole), Type::F64) => watershed_core::Value::F64(whole as f64),
+        (value, _) => value,
+    }
+}
+
+/// One step of an expression. An expression crosses into the engine as a
+/// list of these in the order a calculator with a stack would take them:
+/// `qty * price + 1` is `qty`, `price`, multiply, `1`, add.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum Op {
+    /// A node of the graph.
+    Node {
+        node: u32,
+    },
+    /// A field or column of the collection the expression is for.
+    Part {
+        name: String,
+    },
+    Constant {
+        value: Value,
+    },
+    /// Takes one value.
+    Unary {
+        op: UnaryOp,
+    },
+    /// Takes two values.
+    Binary {
+        op: BinaryOp,
+    },
+    /// Takes a condition and two values; only the chosen one is worked out.
+    If,
+    /// Takes an index and this many options.
+    Choose {
+        options: u32,
+    },
+    /// Takes this many strings and makes a list of them.
+    Texts {
+        items: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum UnaryOp {
+    Negate,
+    Not,
+    Absolute,
+    ToText,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum BinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Least,
+    Greatest,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
+    Equal,
+    NotEqual,
+    And,
+    Or,
+    Concat,
+    Join,
+}
+
+/// Builds the engine's expression from a list of steps. `node` and `part`
+/// say what a node number and a part's name stand for. The engine checks
+/// the types when a node or column is made from the result.
+fn expression(
+    ops: &[Op],
+    node: &dyn Fn(u32) -> Result<Ir>,
+    part: &dyn Fn(&str) -> Result<Ir>,
+) -> Result<Ir> {
+    fn take(stack: &mut Vec<Ir>) -> Result<Arc<Ir>> {
+        match stack.pop() {
+            Some(ir) => Ok(Arc::new(ir)),
+            None => refused("the expression is missing a value"),
+        }
+    }
+    fn take_many(stack: &mut Vec<Ir>, count: u32) -> Result<Vec<Arc<Ir>>> {
+        let mut items = (0..count)
+            .map(|_| take(stack))
+            .collect::<Result<Vec<_>>>()?;
+        items.reverse();
+        Ok(items)
+    }
+    let mut stack: Vec<Ir> = Vec::new();
+    for op in ops {
+        let next = match op {
+            Op::Node { node: number } => node(*number)?,
+            Op::Part { name } => part(name)?,
+            Op::Constant { value } => Ir::Const(value.to_core()?),
+            Op::Unary { op } => {
+                let op = match op {
+                    UnaryOp::Negate => UnOp::Neg,
+                    UnaryOp::Not => UnOp::Not,
+                    UnaryOp::Absolute => UnOp::Abs,
+                    UnaryOp::ToText => UnOp::ToText,
+                };
+                Ir::Unary(op, take(&mut stack)?)
+            }
+            Op::Binary { op } => {
+                let op = match op {
+                    BinaryOp::Add => BinOp::Add,
+                    BinaryOp::Subtract => BinOp::Sub,
+                    BinaryOp::Multiply => BinOp::Mul,
+                    BinaryOp::Divide => BinOp::Div,
+                    BinaryOp::Least => BinOp::Min,
+                    BinaryOp::Greatest => BinOp::Max,
+                    BinaryOp::Less => BinOp::Lt,
+                    BinaryOp::LessOrEqual => BinOp::Le,
+                    BinaryOp::Greater => BinOp::Gt,
+                    BinaryOp::GreaterOrEqual => BinOp::Ge,
+                    BinaryOp::Equal => BinOp::Eq,
+                    BinaryOp::NotEqual => BinOp::Ne,
+                    BinaryOp::And => BinOp::And,
+                    BinaryOp::Or => BinOp::Or,
+                    BinaryOp::Concat => BinOp::Concat,
+                    BinaryOp::Join => BinOp::Join,
+                };
+                let right = take(&mut stack)?;
+                let left = take(&mut stack)?;
+                Ir::Binary(op, left, right)
+            }
+            Op::If => {
+                let otherwise = take(&mut stack)?;
+                let then = take(&mut stack)?;
+                let condition = take(&mut stack)?;
+                Ir::If(condition, then, otherwise)
+            }
+            Op::Choose { options } => {
+                let options = take_many(&mut stack, *options)?;
+                Ir::Choose(take(&mut stack)?, options)
+            }
+            Op::Texts { items } => Ir::List(take_many(&mut stack, *items)?),
+        };
+        stack.push(next);
+    }
+    match (stack.pop(), stack.is_empty()) {
+        (Some(ir), true) => Ok(ir),
+        _ => refused("the expression does not come to one value"),
+    }
 }
 
 /// What one update did.
@@ -203,8 +378,8 @@ impl Graph {
         })
     }
 
-    /// Adds an input with a starting value. Returns the node's id.
-    pub fn input(&self, name: String, value: Value) -> Result<u32> {
+    /// Adds an input with a starting value. Returns the node's number.
+    pub fn input_value(&self, name: String, value: Value) -> Result<u32> {
         let mut g = self.lock();
         let id = g.input_value(&name, value.to_core()?)?;
         Ok(g.number(id))
@@ -213,17 +388,30 @@ impl Graph {
     /// Adds a calculated node from a formula such as `qty * price * 1.2`.
     /// A name in it is the node of that name; a name with spaces or
     /// punctuation goes between backticks.
-    pub fn define(&self, name: String, formula: String) -> Result<u32> {
+    pub fn define_formula(&self, name: String, formula: String) -> Result<u32> {
         let mut g = self.lock();
         let id = g.define_formula(&name, &formula)?;
         Ok(g.number(id))
     }
 
+    /// Adds a calculated node from an expression. Returns the node's number.
+    pub fn define_expression(&self, name: String, ops: Vec<Op>) -> Result<u32> {
+        let mut g = self.lock();
+        let ir = expression(&ops, &|number| Ok(g.reference(g.node(number)?)), &|name| {
+            refused(format!(
+                "{name:?} is part of a collection's rows, and can only be used in its columns"
+            ))
+        })?;
+        let id = g.define_ir(&name, ir)?;
+        Ok(g.number(id))
+    }
+
     /// Records a new value for an input; it counts from the next `stabilize`.
-    pub fn set(&self, node: u32, value: Value) -> Result<()> {
+    pub fn set_value(&self, node: u32, value: Value) -> Result<()> {
         let mut g = self.lock();
         let id = g.node(node)?;
-        Ok(g.set_value(id, value.to_core()?)?)
+        let value = fitted(value.to_core()?, g.node_type(id));
+        Ok(g.set_value(id, value)?)
     }
 
     /// Applies every recorded change and recalculates what depends on them,
@@ -239,7 +427,7 @@ impl Graph {
     }
 
     /// The node's value as of the last update.
-    pub fn get(&self, node: u32) -> Result<Value> {
+    pub fn value(&self, node: u32) -> Result<Value> {
         let g = self.lock();
         let id = g.node(node)?;
         if g.is_removed(id) {
@@ -258,6 +446,12 @@ impl Graph {
     pub fn explain(&self, node: u32) -> Result<String> {
         let g = self.lock();
         Ok(g.explain_node(g.node(node)?))
+    }
+
+    /// What the node holds.
+    pub fn kind(&self, node: u32) -> Result<Kind> {
+        let g = self.lock();
+        Ok(Kind::of(g.node_type(g.node(node)?)))
     }
 
     /// The node with this name, if there is one.
@@ -327,6 +521,7 @@ impl Graph {
         Arc::new(Collection {
             graph: self,
             inner: Mutex::new(inner),
+            fields: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -337,6 +532,8 @@ impl Graph {
 pub struct Collection {
     graph: Arc<Graph>,
     inner: Mutex<CoreCollection>,
+    /// What each field holds, to fit whole numbers to number fields.
+    fields: Mutex<HashMap<String, Type>>,
 }
 
 impl Collection {
@@ -350,7 +547,7 @@ impl Collection {
         let mut g = self.graph.lock();
         let mut c = self.lock();
         let of = match of {
-            Some(part) => Some(c.parse_formula(&g, part)?.0),
+            Some(part) => Some(c.parse_formula(&g, &format!("`{part}`"))?.0),
             None => None,
         };
         let id = c.add_total(&mut g, name, op, of.as_ref())?;
@@ -360,53 +557,87 @@ impl Collection {
 
 #[uniffi::export]
 impl Collection {
+    /// The graph this collection is in.
+    pub fn graph(&self) -> Arc<Graph> {
+        self.graph.clone()
+    }
+
     /// Adds a field. Fields come before the first row.
-    pub fn field(&self, name: String, kind: Kind) -> Result<()> {
+    pub fn add_field(&self, name: String, kind: Kind) -> Result<()> {
         let ty = match kind {
             Kind::Number => Type::F64,
             Kind::Whole => Type::I64,
             Kind::Flag => Type::Bool,
             Kind::Text => Type::Str,
+            Kind::Texts => return refused("a field cannot be a list"),
         };
         self.lock().add_field(&name, ty)?;
+        self.fields
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name, ty);
         Ok(())
     }
 
-    /// Adds a column, worked out in every row by a formula over this
-    /// collection's fields and columns and the graph's nodes.
-    pub fn column(&self, name: String, formula: String) -> Result<()> {
+    /// Adds a column from a formula written as text, over this collection's
+    /// fields and columns and the graph's nodes.
+    pub fn add_formula_column(&self, name: String, formula: String) -> Result<()> {
         let mut g = self.graph.lock();
         self.lock().add_formula_column(&mut g, &name, &formula)?;
         Ok(())
     }
 
+    /// Adds a column, worked out in every row by an expression over this
+    /// collection's fields and columns ([`Op::Part`]) and the graph's nodes.
+    pub fn add_column(&self, name: String, ops: Vec<Op>) -> Result<()> {
+        let mut g = self.graph.lock();
+        let mut c = self.lock();
+        let ir = expression(&ops, &|number| Ok(g.reference(g.node(number)?)), &|part| {
+            Ok(c.parse_formula(&g, &format!("`{part}`"))?.0)
+        })?;
+        c.add_column(&mut g, &name, ir)?;
+        Ok(())
+    }
+
     /// A total: the sum of a field or column over the rows. Returns its node.
-    pub fn sum(&self, name: String, of: String) -> Result<u32> {
+    pub fn add_sum(&self, name: String, of: String) -> Result<u32> {
         self.total(&name, AggregateOp::Sum, Some(&of))
     }
 
     /// The smallest value of a field or column. Returns its node.
-    pub fn min(&self, name: String, of: String) -> Result<u32> {
+    pub fn add_min(&self, name: String, of: String) -> Result<u32> {
         self.total(&name, AggregateOp::Min, Some(&of))
     }
 
     /// The largest value of a field or column. Returns its node.
-    pub fn max(&self, name: String, of: String) -> Result<u32> {
+    pub fn add_max(&self, name: String, of: String) -> Result<u32> {
         self.total(&name, AggregateOp::Max, Some(&of))
     }
 
     /// How many rows there are. Returns its node.
-    pub fn count(&self, name: String) -> Result<u32> {
+    pub fn add_count(&self, name: String) -> Result<u32> {
         self.total(&name, AggregateOp::Count, None)
     }
 
     /// Adds a row, or changes the fields given of one that is there. A new
     /// row needs every field. It counts from the next `stabilize`.
-    pub fn upsert(&self, key: String, fields: HashMap<String, Value>) -> Result<()> {
-        let values: Vec<(&str, watershed_core::Value)> = fields
-            .iter()
-            .map(|(name, value)| Ok((name.as_str(), value.to_core()?)))
-            .collect::<Result<_>>()?;
+    pub fn upsert_values(&self, key: String, fields: HashMap<String, Value>) -> Result<()> {
+        let values: Vec<(&str, watershed_core::Value)> = {
+            let kinds = self.fields.lock().unwrap_or_else(|e| e.into_inner());
+            fields
+                .iter()
+                .map(|(name, value)| {
+                    let value = value.to_core()?;
+                    Ok((
+                        name.as_str(),
+                        match kinds.get(name) {
+                            Some(&ty) => fitted(value, ty),
+                            None => value,
+                        },
+                    ))
+                })
+                .collect::<Result<_>>()?
+        };
         let mut g = self.graph.lock();
         Ok(self.lock().upsert_named(&mut g, &key, &values)?)
     }
@@ -418,10 +649,10 @@ impl Collection {
     }
 
     /// A field or column of a row, as of the last update.
-    pub fn get(&self, key: String, of: String) -> Result<Value> {
+    pub fn value(&self, key: String, of: String) -> Result<Value> {
         let g = self.graph.lock();
         let c = self.lock();
-        let (part, _) = c.parse_formula(&g, &of)?;
+        let (part, _) = c.parse_formula(&g, &format!("`{of}`"))?;
         Ok(Value::from_core(&c.get_value(&g, &key, &part)?))
     }
 

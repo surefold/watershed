@@ -186,12 +186,16 @@ is a small project that builds it and runs:
 
 ```kotlin
 val g = Graph()
-val price = g.input("price", Value.Number(2.5))
-val total = g.define("total", "price * 12")
-g.set(price, Value.Number(3.0))
+val qty = g.input("qty", 10.0)                     // Input<Double>
+val price = g.input("price", 2.5)
+val total = g.define("total", qty * price * 1.2)   // Node<Double>
+g[price] = 3.0
 g.stabilize()
-g.get(total)        // Value.Number(36.0)
+val now: Double = g[total]                         // 36.0
 ```
+
+Expressions are typed there too: a number plus a string does not compile,
+and neither does setting a calculated node.
 
 ```bash
 cd examples/kotlin

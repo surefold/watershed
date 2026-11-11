@@ -1,46 +1,48 @@
-import dev.surefold.watershed.Graph
-import dev.surefold.watershed.Kind
-import dev.surefold.watershed.Value
-import dev.surefold.watershed.WatershedException
-
-fun number(value: Double) = Value.Number(value)
+import dev.surefold.watershed.*
 
 fun main() {
     // ---------------------------------------------------------------- a graph
     val g = Graph()
-    val qty = g.input("qty", number(10.0))
-    val price = g.input("price", number(2.5))
-    g.input("tax rate", number(0.2))
-    val subtotal = g.define("subtotal", "qty * price")
-    val total = g.define("total", "subtotal * (1 + `tax rate`)")
-    val shipping = g.define("shipping", "if(qty > 20, 0, 4.99)")
+    val qty = g.input("qty", 10.0)          // Input<Double>
+    val price = g.input("price", 2.5)
+    val taxRate = g.input("tax rate", 0.2)
+    val region = g.input("region", "EU")    // Input<String>
 
-    println("total = ${g.get(total)}")
+    val subtotal = g.define("subtotal", qty * price)            // Node<Double>
+    val total = g.define("total", subtotal * (1 + taxRate))
+    val shipping = g.define("shipping", whenever(qty gt 20, 0.0, 4.99))
+    val label = g.define("label", region + ": " + text(total))  // Node<String>
+
+    // These do not compile, as they would not in Rust:
+    //   g.define("wrong", qty + region)     a number plus a string
+    //   g[total] = 5.0                      total is calculated, not an input
+    //   g[price] = "three"                  price holds a Double
+
+    val first: Double = g[total]
+    println("total = $first, label = ${g[label]}")
 
     // Change one input: only what depends on it is recalculated.
-    g.set(price, number(3.0))
-    var report = g.stabilize()
+    g[price] = 3.0
+    g.stabilize()
     println("price 2.5 -> 3.0 recalculated ${g.lastRecalculated()}, not shipping")
-    println("total = ${g.get(total)}")
+    println("total = ${g[total]}")
     println()
     println(g.explain(total))
 
     // An update stops where a value comes out the same: qty 10 -> 12 leaves
     // shipping at 4.99, so nothing above shipping would be told.
-    g.set(qty, number(12.0))
-    report = g.stabilize()
+    g[qty] = 12
+    var report = g.stabilize()
     println("qty 10 -> 12: ${report.recalculated} recalculated, ${report.changed} changed")
-    println("shipping = ${g.get(shipping)}, subtotal = ${g.get(subtotal)}")
+    println("shipping = ${g[shipping]}, subtotal = ${g[subtotal]}")
     println()
 
-    // Mistakes are refused with a reason.
+    // A calculation that fails is a value the node holds, with its reason.
+    val none = g.input("none", 0L)
+    val share = g.define("share", 100L / none)
+    println("share = ${g.getOrNull(share)}")
     try {
-        g.define("oops", "qty * nothing")
-    } catch (e: WatershedException) {
-        println("refused: ${e.message}")
-    }
-    try {
-        g.define("mixed", "qty && price")
+        g[share]
     } catch (e: WatershedException) {
         println("refused: ${e.message}")
     }
@@ -49,33 +51,33 @@ fun main() {
     // ------------------------------------------------------------ a collection
     // A keyed table of rows. Every cell is a node, and totals update by only
     // the rows that change.
-    val fx = g.input("fx", number(1.25))
+    val fx = g.input("fx", 1.25)
     val orders = g.collection("orders")
-    orders.field("qty", Kind.NUMBER)
-    orders.field("price", Kind.NUMBER)
-    orders.column("line", "qty * price * fx")
-    val revenue = orders.sum("revenue", "line")
-    val largest = orders.max("largest", "line")
-    val count = orders.count("orders")
+    val units = orders.number("units")              // Field<Double>
+    val unitPrice = orders.number("unit price")
+    val line = orders.column("line", units * unitPrice * fx)
+    val revenue = orders.sum("revenue", line)       // Node<Double>
+    val largest = orders.max("largest", line)
+    val count = orders.count("orders")              // Node<Long>
 
     val rows = 100_000
     for (i in 0 until rows) {
-        orders.upsert("o$i", mapOf("qty" to number((i % 100).toDouble()), "price" to number(1.5)))
+        orders.upsert("o$i", units(i % 100), unitPrice(1.5))
     }
-    report = g.stabilize()
-    println("$rows rows: ${g.size()} nodes, revenue = ${g.get(revenue)}, rows = ${g.get(count)}")
+    g.stabilize()
+    println("$rows rows: ${g.size()} nodes, revenue = ${g[revenue]}, rows = ${g[count]}")
 
-    orders.upsert("o42", mapOf("qty" to number(1000.0)))
+    orders.upsert("o42", units(1000))
     report = g.stabilize()
     println(
         "one row changed: ${report.recalculated} nodes recalculated " +
-            "(its line and two totals), largest = ${g.get(largest)}",
+            "(its line and two totals), largest = ${g[largest]}",
     )
 
-    g.set(fx, number(1.3))
+    g[fx] = 1.3
     report = g.stabilize()
     println("the exchange rate changed: ${report.recalculated} nodes recalculated (every line)")
-    println("row o42's line = ${orders.get("o42", "line")}")
+    println("row o42's line = ${orders["o42", line]}")
 
     g.checkConsistency()
     println("checked: every node matches a calculation from scratch")
