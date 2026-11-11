@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/watershed-core", "crates/watershed-py", "crates/watershed-web", "crates/watershed-parquet", "crates/watershed-grid"]
+# The JVM bindings are a workspace of their own: the tool that writes their
+# Kotlin side needs a newer Rust than this workspace promises to build with.
+exclude = ["crates/watershed-jvm"]
 
 [workspace.package]
 edition = "2024"

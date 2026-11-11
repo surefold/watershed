@@ -178,6 +178,28 @@ cd crates/watershed-py
 uv sync && uv run pytest
 ```
 
+## From Kotlin
+
+`crates/watershed-jvm` wraps the engine for the JVM, with the Kotlin side
+written by [UniFFI](https://mozilla.github.io/uniffi-rs/). `examples/kotlin`
+is a small project that builds it and runs:
+
+```kotlin
+val g = Graph()
+val price = g.input("price", Value.Number(2.5))
+val total = g.define("total", "price * 12")
+g.set(price, Value.Number(3.0))
+g.stabilize()
+g.get(total)        // Value.Number(36.0)
+```
+
+```bash
+cd examples/kotlin
+gradle run
+```
+
+It is a start, not a published library: see `examples/kotlin/README.md`.
+
 ## Formulas as text
 
 For people who type a formula rather than write Rust or Python (a grid's
@@ -481,6 +503,8 @@ crates/watershed-core/
   tests/          behaviour and property tests
   examples/       tour, benchmark, collection and placement
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
+crates/watershed-jvm/   the engine for Kotlin and the JVM (UniFFI); a workspace of its own
+examples/kotlin/        a Kotlin project that uses it
 crates/watershed-web/   the engine as WebAssembly, with three example models
 crates/watershed-parquet/ an update's changes written to Parquet files
 crates/watershed-grid/  a data grid as WebAssembly: rows, formulas, totals, filter, sort, group
@@ -507,5 +531,7 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **More time travel:** restoring an earlier update, a redefined node's
   earlier expressions (so `explain_at` can go back past a `redefine`), a
   collection's groups as of an earlier update, and a sink that writes to S3.
-- **Bindings** for the JVM, publishing the Python package, and the cluster.
+- **Bindings:** the JVM ones are a first cut (no groupings or history, one
+  call per row, nothing packaged as a jar), the Python package is not
+  published, and there is no cluster.
   Formulas as text have no whole-number constants yet.
