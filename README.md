@@ -214,12 +214,10 @@ cd crates/watershed-py
 uv sync && uv run pytest
 ```
 
-## From Kotlin
+## From Kotlin and Scala
 
-`crates/watershed-jvm` is the engine as a C library that the JVM calls
-directly, through its foreign function API (JDK 22 on), with a typed
-Kotlin layer on top. `examples/kotlin` is a small project that builds it
-and runs:
+[surefold/watershed-jvm](https://github.com/surefold/watershed-jvm) is the
+engine for the JVM, with typed layers for Kotlin and Scala 3:
 
 ```kotlin
 val g = Graph()
@@ -231,36 +229,9 @@ g.stabilize()
 val now: Double = g[total]                         // 36.0
 ```
 
-Expressions are typed there too: a number plus a string does not compile,
-and neither does setting a calculated node.
-
-```bash
-cd examples/kotlin
-gradle run
-```
-
-Updating from Kotlin is as fast as from Rust, and a call costs tens to
-hundreds of nanoseconds (`gradle benchmark`). It is not a published
-library yet: see `examples/kotlin/README.md`.
-
-## From Scala 3
-
-The same C library with a typed Scala layer (`examples/scala`, run with
-`sbt run`; it needs only sbt, a JDK and cargo). Scala lets more of an expression be ordinary operators:
-
-```scala
-import watershed.*
-
-val g = Graph()
-val qty = g.input("qty", 10.0)                     // Input[Double]
-val price = g.input("price", 2.5)
-val big = g.define("big", qty * price > 20 && qty < 100)   // Node[Boolean]
-g(price) = 3.0
-g.stabilize()
-```
-
-Its tests check that what does not fit together (a number plus a string, a
-`BigDecimal` times a `Double`, setting a calculated node) fails to compile.
+It is a repository of its own, which takes this one at a pinned commit.
+Updating from Kotlin or Scala is as fast as from Rust, and a call costs
+tens to hundreds of nanoseconds.
 
 ## Formulas as text
 
@@ -568,9 +539,6 @@ crates/watershed-core/
   tests/          behaviour and property tests
   examples/       tour, benchmark, collection and placement
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
-crates/watershed-jvm/   the engine as a C library for the JVM, with typed layers for Kotlin and Scala 3
-examples/kotlin/        a Kotlin project that uses it, and its benchmark
-examples/scala/         a Scala 3 project that uses it
 crates/watershed-web/   the engine as WebAssembly, with three example models
 crates/watershed-parquet/ an update's changes written to Parquet files
 crates/watershed-grid/  a data grid as WebAssembly: rows, formulas, totals, filter, sort, group
@@ -599,7 +567,6 @@ web/grid/               the grid's page, the script that draws it, and the chart
   collection's groups as of an earlier update, and a sink that writes to S3.
 - **Decimals in the grid:** it has no decimal columns yet. Decimals hold
   28 digits; nothing holds more.
-- **Bindings:** the JVM ones have no groupings or history yet and are not
-  packaged as a jar, the Python package is not published, and there is no
-  cluster.
+- **Bindings:** the Python package is not published, and there is no
+  cluster. (The JVM ones are in their own repository, with their own list.)
   Formulas as text have no whole-number constants yet.
