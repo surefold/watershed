@@ -252,7 +252,8 @@ line = orders.column("line", orders.formula("qty * price * fx"))
 It has `+ - * /`, comparisons, `&&`, `||`, `!`, `if(c, a, b)`, `min`, `max`,
 `abs`, `text`, `concat`, `join`, `choose` and lists of strings. A name is a
 node (in a collection, a field or column first); a name with spaces or
-punctuation goes between backticks. Numbers are always `f64`. The grid's
+punctuation goes between backticks. A number is an `f64`, unless it ends in
+`d` (`19.99d`, a decimal) or `i` (`3i`, a whole number, an `i64`). The grid's
 formula box uses the same parser.
 
 Calling from Python adds little: on a 210,000-node graph, changing one price
@@ -569,4 +570,3 @@ web/grid/               the grid's page, the script that draws it, and the chart
   28 digits; nothing holds more.
 - **Bindings:** the Python package is not published, and there is no
   cluster. (The JVM ones are in their own repository, with their own list.)
-  Formulas as text have no whole-number constants yet.
