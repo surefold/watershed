@@ -328,6 +328,14 @@ struct Group {
     plain: Vec<f64>,
 }
 
+/// The most row-and-column pairs the graph is asked to keep group totals for
+/// when rows are first grouped by a column. A group total in the graph costs
+/// a node for each row in each totalled column, for each column ever grouped
+/// by, and the graph cannot give them back: 50,000 rows with six totals took
+/// about 175 MB per grouping column. Past this, the grid adds a group's
+/// totals up itself, over its rows, whenever they may have changed.
+const GROUP_BUDGET: usize = 100_000;
+
 /// The most rows noted as set between updates; past that the view is worked
 /// out from scratch, which is quicker by then anyway.
 const MOST_TRACKED: usize = 1 << 16;
@@ -371,6 +379,10 @@ pub struct Table {
     group_by: Option<usize>,
     /// For each column that has been grouped by, each column's grouping in the collection.
     groupings: HashMap<usize, Vec<[Option<usize>; 3]>>,
+    /// See [`GROUP_BUDGET`].
+    group_budget: usize,
+    /// The groups in view have their totals added up by the grid, not kept by the graph.
+    plain_groups: bool,
     open: HashSet<String>,
 
     /// The rows that pass the filters, sorted, and with each group's rows together.
@@ -437,6 +449,8 @@ impl Table {
             quick: String::new(),
             group_by: None,
             groupings: HashMap::new(),
+            group_budget: GROUP_BUDGET,
+            plain_groups: false,
             open: HashSet::new(),
             sorted: Vec::new(),
             groups: Vec::new(),
@@ -566,7 +580,7 @@ impl Table {
         for per_column in self.groupings.values_mut() {
             per_column.push([None; 3]);
         }
-        if let Some(by) = self.group_by {
+        if let Some(by) = self.group_by.filter(|_| !self.plain_groups) {
             self.ensure_groupings(by)?;
         }
         self.structural = true;
@@ -785,7 +799,7 @@ impl Table {
             self.pending = true;
         }
         self.cols[col].agg = agg;
-        if let Some(by) = self.group_by {
+        if let Some(by) = self.group_by.filter(|_| !self.plain_groups) {
             if agg.op().is_some_and(|op| {
                 self.groupings
                     .get(&by)
@@ -962,11 +976,20 @@ impl Table {
             if c.kind != Kind::Text || c.formula.is_some() {
                 return Err(format!("{}: rows are grouped by a text field", c.name));
             }
-            if !self.groupings.contains_key(&col) {
-                // The groups' totals are made now, so they have no past to show.
-                self.check_now()?;
+            // The graph keeps the groups' totals if it already does for this
+            // column, or if that is cheap enough to start.
+            let totalled = self.cols.iter().filter(|c| c.agg.op().is_some()).count();
+            self.plain_groups = !self.groupings.contains_key(&col)
+                && self.row_count() * totalled > self.group_budget;
+            if !self.plain_groups {
+                if !self.groupings.contains_key(&col) {
+                    // The groups' totals are made now, so they have no past to show.
+                    self.check_now()?;
+                }
+                self.ensure_groupings(col)?;
             }
-            self.ensure_groupings(col)?;
+        } else {
+            self.plain_groups = false;
         }
         self.group_by = col;
         self.structural = true;
@@ -999,6 +1022,13 @@ impl Table {
         }
         self.groupings.insert(by, per_column);
         result
+    }
+
+    /// Sets how many row-and-column pairs the graph may be asked to keep
+    /// group totals for; past it the grid adds them up itself. Takes effect
+    /// the next time rows are grouped by a column not grouped by before.
+    pub fn set_group_budget(&mut self, pairs: usize) {
+        self.group_budget = pairs;
     }
 
     /// Opens a closed group, or closes an open one.
@@ -1097,7 +1127,8 @@ impl Table {
         if !any {
             return false;
         }
-        if self.filter_on {
+        // Totals the grid adds up itself have to be added up again.
+        if self.filter_on || self.plain_groups {
             return true;
         }
         // A calculated column can change when any field or named value does.
@@ -1318,6 +1349,8 @@ impl Table {
                 .agg
                 .fold(rows.iter().map(|&r| self.cell(r, col)))
         };
+        // Whether the grid adds the groups' totals up, rather than reading the graph's.
+        let plain = filter_on || self.plain_groups;
         let mut groups: Vec<Group> = Vec::new();
         let rows = match self.group_by {
             None => buckets.pop().map(|(_, rows)| rows).unwrap_or_default(),
@@ -1334,7 +1367,7 @@ impl Table {
                     .enumerate()
                     .map(|(k, (key, rows))| {
                         let total = match by_total {
-                            Some((col, _)) if filter_on => fold(col, rows),
+                            Some((col, _)) if plain => fold(col, rows),
                             Some((col, _)) => self.cols[col]
                                 .agg
                                 .of_graph(self.group_number(by, key, col), rows.len()),
@@ -1361,7 +1394,7 @@ impl Table {
                         key: key.clone(),
                         start: rows.len(),
                         len: members.len(),
-                        plain: if filter_on {
+                        plain: if plain {
                             (0..n).map(|col| fold(col, members)).collect()
                         } else {
                             Vec::new()
@@ -1560,6 +1593,23 @@ impl Table {
         if c.agg == Agg::Count {
             return Ok("The count is how many of the group's rows show.".into());
         }
+        if self.plain_groups {
+            if c.agg == Agg::None {
+                return Err(format!("{} has no total", c.name));
+            }
+            let rows = self
+                .groups
+                .iter()
+                .find(|g| g.key == key)
+                .map_or(0, |g| g.len);
+            return Ok(format!(
+                "The {} of {} over this group's {rows} rows, added up by the grid.\n\n\
+                 With this many rows the graph is not asked to keep a total for every group:\n\
+                 that takes a node for each row in each totalled column.",
+                c.agg.name(),
+                c.name
+            ));
+        }
         let id = self
             .group_node(by, key, col)
             .ok_or_else(|| format!("{} has no total", c.name))?;
@@ -1594,7 +1644,7 @@ impl Table {
         let agg = self.cols[col].agg;
         if agg == Agg::None {
             f64::NAN
-        } else if self.filter_on {
+        } else if self.filter_on || self.plain_groups {
             group.plain[col]
         } else {
             agg.of_graph(self.group_number(by, &group.key, col), group.len)
@@ -1762,7 +1812,7 @@ impl Table {
                 let group = &self.groups[(entry & !GROUP) as usize];
                 let agg = self.cols[col].agg;
                 self.group_by
-                    .filter(|_| !self.filter_on)
+                    .filter(|_| !self.filter_on && !self.plain_groups)
                     .and_then(|by| self.group_node(by, &group.key, col))
                     .and_then(|id| self.trend(id, points, agg.of_graph(Some(1.0), group.len)))
             };

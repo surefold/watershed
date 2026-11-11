@@ -174,6 +174,14 @@ impl Grid {
             .map_err(js_error)
     }
 
+    /// Sets how many row-and-column pairs the graph may be asked to keep
+    /// group totals for; past it the grid adds group totals up itself. The
+    /// graph's cost a node per row per totalled column and are never given
+    /// back, so a grid that will grow much should set this to 0 first.
+    pub fn set_group_budget(&mut self, pairs: u32) {
+        self.table.set_group_budget(pairs as usize);
+    }
+
     pub fn toggle_group(&mut self, key: &str) {
         self.table.toggle_group(key);
     }

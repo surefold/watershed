@@ -172,3 +172,54 @@ impl Grid {
         tick(&mut self.table, demo, changes).map_err(js_error)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the page reads after every update.
+    fn draw(t: &Table, mark: usize) {
+        let lines = t.view_len().min(40);
+        t.rows_json(0, lines);
+        t.trends_json(0, lines, mark, 32);
+        t.totals_json();
+        t.total_trend_json(mark, 32);
+        t.groups_json();
+        for col in 0..t.columns() {
+            t.total_trend_json(col, 120);
+        }
+    }
+
+    #[test]
+    fn the_example_can_be_grouped_sorted_and_filtered_while_prices_stream() {
+        let mut t = Table::new();
+        let mut d = columns(&mut t).unwrap();
+        fill(&mut t, &mut d, 3000).unwrap();
+        t.update();
+        let stream = |t: &mut Table, d: &mut Demo, frames: usize| {
+            for _ in 0..frames {
+                tick(t, d, 1).unwrap();
+                t.update();
+                draw(t, d.mark);
+            }
+        };
+        stream(&mut t, &mut d, 150);
+        for by in ["desk", "symbol", "trader", "side"] {
+            t.set_group(t.column_named(by)).unwrap();
+            t.update();
+            draw(&t, d.mark);
+            stream(&mut t, &mut d, 150);
+            t.expand_all(true);
+            stream(&mut t, &mut d, 50);
+        }
+        t.set_sort(&[(t.column_named("pnl").unwrap(), true)])
+            .unwrap();
+        stream(&mut t, &mut d, 150);
+        t.set_filter(t.column_named("side").unwrap(), "=buy")
+            .unwrap();
+        stream(&mut t, &mut d, 150);
+        t.set_group(None).unwrap();
+        stream(&mut t, &mut d, 150);
+        assert_eq!(t.check(), Ok(()));
+    }
+}

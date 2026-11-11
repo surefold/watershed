@@ -843,3 +843,79 @@ fn rows_copy_as_tab_separated_text_in_the_views_order() {
     let keys = ["o-2", "o-5", "nobody"].into_iter().collect();
     assert_eq!(t.tsv(&keys, &[REGION, LINE]), "o-5\tUS\t6\no-2\tUS\t5\n");
 }
+
+#[test]
+fn a_big_tables_group_totals_are_added_up_by_the_grid_and_cost_the_graph_nothing() {
+    let regions = ["EU", "US", "APAC"];
+    let mut seed = 0x0BAD_5EED_1234_5678_u64;
+    let mut pick = |n: u64| (next(&mut seed) % n) as usize;
+    // Two tables with the same rows and edits; in one the graph may not keep group totals.
+    let mut tables = [Table::new(), Table::new()];
+    tables[1].set_group_budget(0);
+    for t in &mut tables {
+        t.add_field("region", Kind::Text, Agg::Count).unwrap();
+        t.add_field("qty", Kind::Number, Agg::Sum).unwrap();
+        t.add_field("price", Kind::Number, Agg::Avg).unwrap();
+        t.add_formula("line", "qty * price", Agg::Max).unwrap();
+    }
+    for r in 0..300 {
+        let row = vec![
+            text(regions[pick(3)]),
+            Value::F64(pick(9) as f64),
+            Value::F64(pick(30) as f64),
+        ];
+        for t in &mut tables {
+            t.upsert(&format!("k{r:03}"), row.clone()).unwrap();
+        }
+    }
+    let mut nodes = [0, 0];
+    for (t, nodes) in tables.iter_mut().zip(&mut nodes) {
+        t.update();
+        *nodes = t.nodes();
+        t.set_group(Some(0)).unwrap();
+        t.set_sort(&[(3, true)]).unwrap();
+        t.update();
+    }
+    assert!(
+        tables[0].nodes() > nodes[0] + 300,
+        "the graph keeps group totals"
+    );
+    assert_eq!(
+        tables[1].nodes(),
+        nodes[1],
+        "grouping added nothing to the graph"
+    );
+
+    for step in 0..120 {
+        let key = format!("k{:03}", pick(300));
+        let (col, value) = match pick(8) {
+            0 => (0, regions[pick(3)].to_string()),
+            1..=4 => (1, pick(9).to_string()),
+            _ => (2, pick(30).to_string()),
+        };
+        for t in &mut tables {
+            t.set_cell(&key, col, &value).unwrap();
+            t.update();
+        }
+        assert_eq!(
+            tables[0].groups_json(),
+            tables[1].groups_json(),
+            "step {step}"
+        );
+        assert_eq!(
+            tables[0].totals_json(),
+            tables[1].totals_json(),
+            "step {step}"
+        );
+        assert_eq!(tables[0].view_keys(), tables[1].view_keys(), "step {step}");
+    }
+    assert_eq!(tables[1].nodes(), nodes[1]);
+    assert!(
+        tables[1]
+            .explain_group("EU", 1)
+            .unwrap()
+            .contains("added up by the grid")
+    );
+    // No history of a total the graph does not keep.
+    assert!(tables[1].trends_json(0, 1, 1, 8).starts_with("[null"));
+}

@@ -196,6 +196,15 @@ text, to and from a spreadsheet.
 While a filter is on, totals are of the rows that pass it, added up the
 plain way; the graph's totals are of every row.
 
+Group totals are aggregates in the graph only for small tables. A grouping
+in the graph costs a node for each row in each totalled column, for every
+column ever grouped by, and nodes cannot be removed: 50,000 rows with six
+totals took about 175 MB per grouping column. Past 100,000 row-and-column
+pairs (`set_group_budget`), the grid adds each group's totals up over its
+rows instead, which adds nothing to the graph. Sharing one membership node
+per row between a column's groupings, in the engine, would bring the cost
+down enough to lift this.
+
 ## Seeing what it does
 
 ```bash
