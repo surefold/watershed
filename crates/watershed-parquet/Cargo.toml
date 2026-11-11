@@ -7,10 +7,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Arrow and Parquet 60 need Rust 1.88; 59 is the newest for this workspace's 1.85.
 watershed-core = { path = "../watershed-core" }
-arrow-array = "60.1.0"
-arrow-schema = "60.1.0"
-parquet = { version = "60.1.0", default-features = false, features = ["arrow", "zstd"] }
+arrow-array = "59"
+arrow-schema = "59"
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 
 [lints]
 workspace = true
