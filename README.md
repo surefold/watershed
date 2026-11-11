@@ -175,8 +175,9 @@ keeps the values an update overwrites, so the grid stores nothing extra.
 `web/grid/chart.js` draws each group's total as a bar, straight from the
 group nodes, so it follows a stream of prices without adding anything up.
 
-Columns can be dragged into a new order, pinned to the left, hidden and
-resized, from each header and its menu. Rows can arrive as the person
+Columns can be dragged into a new order (the column moves as it is
+dragged, and dragging it onto the pinned columns pins it), pinned to the
+left, hidden and resized, from each header and its menu. Rows can arrive as the person
 scrolls: give the view a `loadMore` function that adds the next block and
 says whether there may be more. Rows loaded that way are ordinary rows, so
 sorting, filters and totals cover everything loaded so far.
