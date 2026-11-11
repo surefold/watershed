@@ -22,12 +22,12 @@
 use std::sync::Arc;
 
 use pyo3::basic::CompareOp;
-use pyo3::exceptions::{PyException, PyTypeError};
+use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyType};
 use watershed_core::{
-    AggregateOp, BinOp, CalcError as CoreError, Collection as CoreCollection, Graph as CoreGraph,
-    Ir, NodeId, Type, UnOp, Value,
+    AggregateOp, BinOp, CalcError as CoreError, CalcType, Collection as CoreCollection, Decimal,
+    Graph as CoreGraph, Ir, NodeId, Rounding, Type, UnOp, Value,
 };
 
 pyo3::create_exception!(
@@ -49,6 +49,7 @@ fn type_name(ty: Type) -> &'static str {
     match ty {
         Type::F64 => "float",
         Type::I64 => "int",
+        Type::Decimal => "Decimal",
         Type::Bool => "bool",
         Type::Str => "str",
         Type::StrList => "list",
@@ -68,12 +69,26 @@ fn to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         Ok(Value::F64(obj.extract()?))
     } else if obj.is_instance_of::<PyString>() {
         Ok(Value::Str(obj.extract::<String>()?.into()))
+    } else if obj.is_instance(&decimal_class(obj.py())?)? {
+        // Through its digits, so nothing is lost on the way.
+        let digits = obj.str()?.extract::<String>()?;
+        let decimal: Decimal = digits.parse().map_err(|_| {
+            PyValueError::new_err(format!(
+                "{digits} is not a decimal the engine can hold: it keeps 28 significant digits"
+            ))
+        })?;
+        Ok(decimal.into_value())
     } else {
         Err(PyTypeError::new_err(format!(
-            "watershed values are float, int, bool or str, not {}",
+            "watershed values are float, int, Decimal, bool or str, not {}",
             obj.get_type().name()?
         )))
     }
+}
+
+/// Python's `decimal.Decimal`.
+fn decimal_class(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    py.import("decimal")?.getattr("Decimal")
 }
 
 /// An engine value as a Python value; an error value raises.
@@ -81,6 +96,7 @@ fn to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
     Ok(match v {
         Value::F64(x) => x.into_pyobject(py)?.into_any().unbind(),
         Value::I64(x) => x.into_pyobject(py)?.into_any().unbind(),
+        Value::Decimal(x) => decimal_class(py)?.call1((x.to_string(),))?.unbind(),
         Value::Bool(b) => PyBool::new(py, *b).to_owned().into_any().unbind(),
         Value::Str(s) => PyString::new(py, s).into_any().unbind(),
         Value::List(items) => PyList::new(py, items.iter().map(|s| &**s))?
@@ -95,6 +111,7 @@ fn to_py(py: Python<'_>, v: &Value) -> PyResult<Py<PyAny>> {
 fn value_for(ty: Type, obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     match (ty, to_value(obj)?) {
         (Type::F64, Value::I64(i)) => Ok(Value::F64(i as f64)),
+        (Type::Decimal, Value::I64(i)) => Ok(Decimal::from(i).into_value()),
         (_, v) => Ok(v),
     }
 }
@@ -152,17 +169,23 @@ impl Expr {
         Ok(e)
     }
 
-    /// A whole-number literal next to a float becomes a float.
+    /// A whole-number literal next to a float becomes a float, and next to
+    /// a decimal becomes that decimal.
     fn unify(mut a: Expr, mut b: Expr) -> (Expr, Expr) {
-        fn float(e: &mut Expr) {
+        fn fit(e: &mut Expr, to: Type) {
             if let Some(i) = e.literal.take() {
-                *e = Expr::new(Ir::Const(Value::F64(i as f64)), Type::F64);
+                let value = match to {
+                    Type::Decimal => Decimal::from(i).into_value(),
+                    _ => Value::F64(i as f64),
+                };
+                *e = Expr::new(Ir::Const(value), to);
             }
         }
-        if a.ty == Type::F64 && b.ty == Type::I64 {
-            float(&mut b);
-        } else if b.ty == Type::F64 && a.ty == Type::I64 {
-            float(&mut a);
+        let wider = |ty| matches!(ty, Type::F64 | Type::Decimal);
+        if wider(a.ty) && b.ty == Type::I64 {
+            fit(&mut b, a.ty);
+        } else if wider(b.ty) && a.ty == Type::I64 {
+            fit(&mut a, b.ty);
         }
         (a, b)
     }
@@ -210,8 +233,8 @@ impl Expr {
         let ok = match op {
             UnOp::Not => a.ty == Type::Bool,
             UnOp::Neg | UnOp::Abs => a.ty.is_numeric(),
-            // Python has no way to ask for this yet.
-            UnOp::ToText => false,
+            // Python has no way to ask for these yet.
+            UnOp::ToText | UnOp::ToDecimal | UnOp::ToFloat => false,
         };
         if !ok {
             return Err(PyTypeError::new_err(format!(
@@ -247,6 +270,7 @@ fn symbol(op: BinOp) -> &'static str {
         BinOp::Or => "|",
         BinOp::Concat => "+",
         BinOp::Join => "join",
+        BinOp::Round(_) => "round",
     }
 }
 
@@ -312,6 +336,51 @@ impl Expr {
             CompareOp::Ne => BinOp::Ne,
         };
         Expr::compare(op, self.copy(py), Expr::from_any(py, other)?)
+    }
+
+    /// A decimal to this many decimal places (0 to 28). `rounding` is
+    /// "half_even" (a tie goes to the even neighbour), "half_up", "down"
+    /// (toward zero) or "up" (away from zero).
+    #[pyo3(signature = (places, rounding = "half_even"))]
+    fn round(&self, places: i64, rounding: &str) -> PyResult<Expr> {
+        if self.ty != Type::Decimal {
+            return Err(PyTypeError::new_err(format!(
+                "only a Decimal is rounded, not {}",
+                type_name(self.ty)
+            )));
+        }
+        let rounding = match rounding {
+            "half_even" => Rounding::HalfEven,
+            "half_up" => Rounding::HalfUp,
+            "down" => Rounding::Down,
+            "up" => Rounding::Up,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "rounding is \"half_even\", \"half_up\", \"down\" or \"up\", not {other:?}"
+                )));
+            }
+        };
+        Ok(Expr::new(
+            Ir::Binary(
+                BinOp::Round(rounding),
+                self.ir.clone(),
+                Arc::new(Ir::Const(Value::I64(places))),
+            ),
+            Type::Decimal,
+        ))
+    }
+
+    /// A decimal as the nearest float.
+    fn to_float(&self) -> PyResult<Expr> {
+        if self.ty != Type::Decimal {
+            return Err(PyTypeError::new_err(
+                "only a Decimal is turned into a float",
+            ));
+        }
+        Ok(Expr::new(
+            Ir::Unary(UnOp::ToFloat, self.ir.clone()),
+            Type::F64,
+        ))
     }
 
     /// The smaller of this and `other`.
@@ -796,9 +865,11 @@ impl Collection {
             Type::F64
         } else if r#type.is(py.get_type::<PyString>()) {
             Type::Str
+        } else if r#type.is(&decimal_class(py)?) {
+            Type::Decimal
         } else {
             return Err(PyTypeError::new_err(
-                "a field's type is float, int, bool or str",
+                "a field's type is float, int, Decimal, bool or str",
             ));
         };
         let ir = self.inner.add_field(name, ty).map_err(to_py_err)?;
@@ -1009,6 +1080,7 @@ impl Groups {
                 Type::I64 => Value::I64(key.parse().unwrap_or_default()),
                 Type::Bool => Value::Bool(key == "true"),
                 Type::F64 => Value::F64(key.parse().unwrap_or_default()),
+                Type::Decimal => key.parse::<Decimal>().unwrap_or_default().into_value(),
                 // A Python field cannot be a list, so no group has this key.
                 Type::StrList => continue,
             };

@@ -1,4 +1,6 @@
 import dev.surefold.watershed.*
+import java.math.BigDecimal
+import java.math.RoundingMode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -50,6 +52,47 @@ class WatershedTest {
 
         // Each one explains itself as the engine sees it.
         assertEquals("d2 = 14  ← a + (b * 2)", g.explain(g.find("d2")!!).lines().first())
+        g.checkConsistency()
+    }
+
+    @Test
+    fun `decimals are exact and round as asked`() {
+        val g = Graph()
+        val a = g.input("a", BigDecimal("0.1"))
+        val b = g.input("b", BigDecimal("0.2"))
+        val sum = g.define("sum", a + b)
+        assertEquals(BigDecimal("0.3"), g[sum])
+
+        // 1.50 keeps its two places through a calculation.
+        val price = g.input("price", BigDecimal("1.50"))
+        val line = g.define("line", price * 3)
+        assertEquals("4.50", g[line].toPlainString())
+
+        val x = g.input("x", BigDecimal("2.345"))
+        assertEquals(BigDecimal("2.34"), g[g.define("even", x.round(2))])
+        assertEquals(BigDecimal("2.35"), g[g.define("up", x.round(2, RoundingMode.HALF_UP))])
+        assertEquals("0.3333333333333333333333333333", g[g.define("third", 1 / (x - x + 3))].toPlainString())
+        assertEquals(true, g[g.define("more", x gt BigDecimal("2.3"))])
+
+        val count = g.input("count", 3L)
+        val total = g.define("total", count.toDecimal() * price)
+        assertEquals(BigDecimal("4.50"), g[total])
+        assertEquals(9.0, g[g.define("rough", total.toDouble() * 2.0)])
+
+        g[price] = BigDecimal("2.00")
+        g.stabilize()
+        assertEquals(BigDecimal("6.00"), g[total])
+
+        val orders = g.collection("orders")
+        val net = orders.decimal("net")
+        val gross = orders.column("gross", (net * BigDecimal("1.20")).round(2))
+        val revenue = orders.sum("revenue", gross)
+        repeat(1000) { orders.upsert("o$it", net(BigDecimal("0.10"))) }
+        g.stabilize()
+        assertEquals("120.00", g[revenue].toPlainString())
+
+        // More digits than the engine holds is refused, not rounded.
+        assertFailsWith<WatershedException> { g.input("huge", BigDecimal("1e40")) }
         g.checkConsistency()
     }
 

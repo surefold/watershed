@@ -366,3 +366,48 @@ def test_in_pull_mode_only_watched_nodes_are_calculated():
 
     g.calculate_only_watched(False)
     g.check_consistency()
+
+
+def test_decimals_are_exact_and_round_as_asked():
+    from decimal import Decimal
+
+    g = ws.Graph()
+    a = g.input("a", Decimal("0.1"))
+    b = g.input("b", Decimal("0.2"))
+    total = g.define("total", a + b)
+    assert total.value == Decimal("0.3")
+    assert total.type == "Decimal"
+
+    # 1.50 keeps its two places, and a whole number beside it is exact.
+    price = g.input("price", Decimal("1.50"))
+    line = g.define("line", price * 3)
+    assert str(line.value) == "4.50"
+
+    x = g.input("x", Decimal("2.345"))
+    assert g.define("even", x.round(2)).value == Decimal("2.34")
+    assert g.define("up", x.round(2, "half_up")).value == Decimal("2.35")
+    assert g.define("rough", line.to_float() * 2).value == 9.0
+    assert g.define("more", x > Decimal("2.3")).value is True
+
+    g.set(price, 2)
+    g.stabilize()
+    assert str(line.value) == "6"
+
+    # A decimal and a float do not mix by accident.
+    f = g.input("f", 1.5)
+    with pytest.raises(TypeError, match="two numbers of the same kind"):
+        price * f
+    with pytest.raises(ValueError, match="rounding is"):
+        x.round(2, "sideways")
+    with pytest.raises(ValueError, match="28 significant digits"):
+        g.input("huge", Decimal("1e40"))
+
+    orders = g.collection("orders")
+    net = orders.field("net", Decimal)
+    gross = orders.column("gross", (net * Decimal("1.20")).round(2))
+    revenue = orders.sum("revenue", gross)
+    for i in range(1000):
+        orders.upsert(f"o{i}", net=Decimal("0.10"))
+    g.stabilize()
+    assert str(revenue.value) == "120.00"
+    g.check_consistency()

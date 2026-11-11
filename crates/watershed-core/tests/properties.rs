@@ -12,7 +12,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use proptest::prelude::*;
-use watershed_core::{AggregateOp, BinOp, CalcError, Graph, Ir, NodeId, Text, Type, UnOp, Value};
+use watershed_core::{
+    AggregateOp, BinOp, CalcError, CalcType, Decimal, Graph, Ir, NodeId, Rounding, Text, Type,
+    UnOp, Value,
+};
 
 /// A small deterministic random number generator (SplitMix64), seeded by proptest.
 struct Rng(u64);
@@ -36,7 +39,14 @@ impl Rng {
     }
 }
 
-const TYPES: [Type; 5] = [Type::F64, Type::I64, Type::Bool, Type::Str, Type::StrList];
+const TYPES: [Type; 6] = [
+    Type::F64,
+    Type::I64,
+    Type::Decimal,
+    Type::Bool,
+    Type::Str,
+    Type::StrList,
+];
 
 /// A random value. The choices are deliberately small, so that values often
 /// repeat (which exercises cutoff), with awkward ones mixed in: NaN, -0.0,
@@ -55,6 +65,28 @@ fn random_value(rng: &mut Rng, ty: Type) -> Value {
             f64::INFINITY,
         ])),
         Type::I64 => Value::I64(rng.pick(&[-2, -1, 0, 1, 2, 3, i64::MAX, i64::MIN])),
+        // Equal values written differently (1.5 and 1.50), a tie for every
+        // way of rounding, the smallest step, and the edges of what fits.
+        Type::Decimal => rng
+            .pick(&[
+                "0",
+                "1",
+                "-1",
+                "0.5",
+                "1.5",
+                "1.50",
+                "2.5",
+                "-2.5",
+                "0.1",
+                "0.2",
+                "3.14159",
+                "0.0000000000000000000000000001",
+                "79228162514264337593543950335",
+                "-79228162514264337593543950335",
+            ])
+            .parse::<Decimal>()
+            .expect("a decimal")
+            .into_value(),
         Type::Bool => Value::Bool(rng.percent(50)),
         Type::Str => Value::Str(rng.pick(&["", "a", "b", "ab"]).into()),
         Type::StrList => {
@@ -83,7 +115,27 @@ fn random_expr(rng: &mut Rng, g: &Graph, ty: Type, depth: u32) -> Ir {
         return Ir::Choose(sub(rng, Type::I64), options);
     }
     match ty {
-        Type::F64 | Type::I64 => match rng.below(3) {
+        // A float from a decimal, now and then.
+        Type::F64 if rng.percent(15) => Ir::Unary(UnOp::ToFloat, sub(rng, Type::Decimal)),
+        Type::Decimal if rng.percent(40) => match rng.below(2) {
+            // Rounded, often to a number of places that is out of range,
+            // which must be an error.
+            0 => {
+                let rounding = rng.pick(&[
+                    Rounding::HalfEven,
+                    Rounding::HalfUp,
+                    Rounding::Down,
+                    Rounding::Up,
+                ]);
+                Ir::Binary(
+                    BinOp::Round(rounding),
+                    sub(rng, Type::Decimal),
+                    sub(rng, Type::I64),
+                )
+            }
+            _ => Ir::Unary(UnOp::ToDecimal, sub(rng, Type::I64)),
+        },
+        Type::F64 | Type::I64 | Type::Decimal => match rng.below(3) {
             0 => {
                 let op = rng.pick(&[
                     BinOp::Add,
@@ -100,7 +152,7 @@ fn random_expr(rng: &mut Rng, g: &Graph, ty: Type, depth: u32) -> Ir {
         },
         Type::Bool => match rng.below(4) {
             0 => {
-                let operand = rng.pick(&[Type::F64, Type::I64, Type::Str]);
+                let operand = rng.pick(&[Type::F64, Type::I64, Type::Decimal, Type::Str]);
                 if rng.percent(25) {
                     let op = rng.pick(&[BinOp::Eq, BinOp::Ne]);
                     return Ir::Binary(op, sub(rng, Type::StrList), sub(rng, Type::StrList));
@@ -171,7 +223,14 @@ fn random_untyped_expr(rng: &mut Rng, g: &Graph, depth: u32) -> Ir {
             Ir::Choose(sub(rng), options)
         }
         0 => Ir::Unary(
-            rng.pick(&[UnOp::Neg, UnOp::Abs, UnOp::Not, UnOp::ToText]),
+            rng.pick(&[
+                UnOp::Neg,
+                UnOp::Abs,
+                UnOp::Not,
+                UnOp::ToText,
+                UnOp::ToDecimal,
+                UnOp::ToFloat,
+            ]),
             sub(rng),
         ),
         1 => {
@@ -192,6 +251,8 @@ fn random_untyped_expr(rng: &mut Rng, g: &Graph, depth: u32) -> Ir {
                 BinOp::Or,
                 BinOp::Concat,
                 BinOp::Join,
+                BinOp::Round(Rounding::HalfEven),
+                BinOp::Round(Rounding::Up),
             ]);
             Ir::Binary(op, sub(rng), sub(rng))
         }
@@ -237,7 +298,7 @@ fn add_random_aggregate(rng: &mut Rng, g: &mut Graph, n: usize) -> (NodeId, Aggr
     let value_type = if op == AggregateOp::Count {
         Type::I64
     } else {
-        rng.pick(&[Type::F64, Type::I64])
+        rng.pick(&[Type::F64, Type::I64, Type::Decimal])
     };
     let members: Vec<(NodeId, NodeId)> = (0..rng.below(12))
         .filter_map(|_| random_member(rng, g, op, value_type))
@@ -553,6 +614,13 @@ fn run(
                     (Some(Value::I64(a)), Value::I64(b)) if op == AggregateOp::Max => {
                         Value::I64(a.max(b))
                     }
+                    // Of two equal decimals written differently, the first.
+                    (Some(Value::Decimal(a)), Value::Decimal(b)) if op == AggregateOp::Min => {
+                        Value::Decimal(if b < a { b } else { a })
+                    }
+                    (Some(Value::Decimal(a)), Value::Decimal(b)) if op == AggregateOp::Max => {
+                        Value::Decimal(if b > a { b } else { a })
+                    }
                     (Some(Value::I64(a)), Value::I64(b)) if op == AggregateOp::Count => {
                         Value::I64(a + b)
                     }
@@ -566,6 +634,8 @@ fn run(
                 (AggregateOp::Count, _) => Value::I64(0),
                 (AggregateOp::Min, Type::F64) => Value::F64(f64::INFINITY),
                 (AggregateOp::Max, Type::F64) => Value::F64(f64::NEG_INFINITY),
+                (AggregateOp::Min, Type::Decimal) => Decimal::MAX.into_value(),
+                (AggregateOp::Max, Type::Decimal) => Decimal::MIN.into_value(),
                 (AggregateOp::Min, _) => Value::I64(i64::MAX),
                 _ => Value::I64(i64::MIN),
             });

@@ -58,6 +58,7 @@
 pub mod aggregate;
 pub mod collection;
 mod compile;
+pub mod decimal;
 pub mod error;
 pub mod expr;
 pub mod formula;
@@ -70,6 +71,7 @@ pub mod value;
 
 pub use aggregate::AggregateOp;
 pub use collection::{Collection, Column, Field, Groups, Part, Set};
+pub use decimal::{Decimal, Rounding};
 pub use error::CalcError;
 pub use expr::{Expr, IntoExpr, choose, list, text, when};
 pub use graph::{Graph, Report};

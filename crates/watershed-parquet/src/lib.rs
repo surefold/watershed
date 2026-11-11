@@ -410,6 +410,7 @@ fn type_name(ty: Type) -> &'static str {
     match ty {
         Type::F64 => "f64",
         Type::I64 => "i64",
+        Type::Decimal => "decimal",
         Type::Bool => "bool",
         Type::Str => "str",
         Type::StrList => "list",
@@ -431,9 +432,16 @@ fn changes_batch(run_id: &str, rows: &[(u64, u32, Value)]) -> io::Result<RecordB
         run.append_value(run_id);
         epoch.append_value(to_i64(*e)?);
         node.append_value(i64::from(*id));
+        // A decimal is written as its digits, in the text column: exact,
+        // and with the decimal places it had.
+        let digits = match value {
+            Value::Decimal(x) => x.to_string(),
+            _ => String::new(),
+        };
         let (k, fv, iv, bv, tv, lv) = match value {
             Value::F64(x) => ("f64", Some(*x), None, None, None, None),
             Value::I64(x) => ("i64", None, Some(*x), None, None, None),
+            Value::Decimal(_) => ("decimal", None, None, None, Some(digits.as_str()), None),
             Value::Bool(x) => ("bool", None, None, Some(*x), None, None),
             Value::Str(s) => ("str", None, None, None, Some(&**s), None),
             Value::List(items) => ("list", None, None, None, None, Some(items)),

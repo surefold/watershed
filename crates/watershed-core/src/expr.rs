@@ -19,6 +19,7 @@ use std::ops::{Add, BitAnd, BitOr, Div, Mul, Neg, Not, Sub};
 use std::sync::Arc;
 
 use crate::collection::{Column, Field};
+use crate::decimal::{Decimal, Rounding};
 use crate::handle::{Input, Node};
 use crate::ir::{BinOp, Ir, UnOp};
 use crate::value::{CalcType, Numeric, Ordered};
@@ -93,7 +94,7 @@ macro_rules! constants {
         }
     )*};
 }
-constants!(f64, i64, bool, String, Vec<String>);
+constants!(f64, i64, Decimal, bool, String, Vec<String>);
 
 impl IntoExpr<String> for &str {
     fn into_expr(self) -> Expr<String> {
@@ -179,7 +180,7 @@ macro_rules! constant_on_the_left {
         }
     };
 }
-constant_on_the_left!(f64, i64);
+constant_on_the_left!(f64, i64, Decimal);
 
 // ---- Methods: comparisons, min/max/abs ----
 //
@@ -233,6 +234,37 @@ macro_rules! methods {
                     self.into_expr().ir,
                     separator.into_expr().ir,
                 ))
+            }
+        }
+
+        impl $handle<Decimal> {
+            /// To this many decimal places (0 to 28), a tie going to the
+            /// even neighbour.
+            pub fn round(self, places: impl IntoExpr<i64>) -> Expr<Decimal> {
+                self.round_with(places, Rounding::HalfEven)
+            }
+            /// To this many decimal places (0 to 28), rounded as said.
+            pub fn round_with(
+                self,
+                places: impl IntoExpr<i64>,
+                rounding: Rounding,
+            ) -> Expr<Decimal> {
+                Expr::from_ir(Ir::Binary(
+                    BinOp::Round(rounding),
+                    self.into_expr().ir,
+                    places.into_expr().ir,
+                ))
+            }
+            /// The nearest `f64`, for where exactness is not needed.
+            pub fn to_f64(self) -> Expr<f64> {
+                unary(UnOp::ToFloat, self.into_expr())
+            }
+        }
+
+        impl $handle<i64> {
+            /// The same number as a decimal, exactly.
+            pub fn to_decimal(self) -> Expr<Decimal> {
+                unary(UnOp::ToDecimal, self.into_expr())
             }
         }
 

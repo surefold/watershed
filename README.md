@@ -89,6 +89,42 @@ let by_size = orders.group_sum(&mut g, "revenue_by_size", size, line)?;
 Calculations are typed. `qty + region` (a number plus a string) does not
 compile, and neither does setting a calculated node.
 
+### Decimals
+
+`f64` is fast and inexact: `0.1 + 0.2` is `0.30000000000000004`. For money,
+and anything that has to reconcile to the last digit, a node can hold a
+`Decimal` instead: up to 28 significant digits, exact, and keeping the
+decimal places it was written with (`1.50` stays `1.50`).
+
+```rust
+use watershed_core::{Decimal, Rounding};
+
+let net = g.input("net", "19.99".parse::<Decimal>()?)?;
+let vat = g.input("vat", "0.20".parse::<Decimal>()?)?;
+let tax = g.define("tax", (net * vat).round(2_i64))?;      // 4.00
+let gross = g.define("gross", net + tax)?;                  // 23.99
+```
+
+- Adding, subtracting and multiplying are exact while the result fits. A
+  result too large to hold is an error value, not a wrong number.
+- Dividing rounds at the last digit the type holds; dividing by zero is an
+  error value.
+- `round(places)` puts a value on the places you want, a tie going to the
+  even neighbour; `round_with(places, Rounding::HalfUp)` and the others say
+  otherwise.
+- A decimal does not mix with an `f64` or an `i64` by accident: `net * rate`
+  with a float `rate` does not compile. `to_decimal()` and `to_f64()`
+  convert on purpose.
+- `1.5` and `1.50` are equal, but changing one to the other is passed on,
+  because something above may be showing it.
+
+Totals, groups, history, formulas as text (`19.99d`, `round(x, 2)`), Kotlin
+(`BigDecimal`) and Python (`decimal.Decimal`) all take decimals. A decimal
+sits behind a pointer, so every value is still 16 bytes and a graph of
+floats pays nothing for them: the same instructions per recalculated node
+as before. A decimal node costs about four times a float node to
+recalculate (about 83 ns against 21 ns here).
+
 ### Earlier values
 
 With history on, any node, or any row of a collection, can be read as it was
@@ -410,6 +446,8 @@ and the tests failed every time:
 | Count a row that joins a group during an update from the next update instead | ✅ |
 | Leave the links to a removed node in place | ✅ |
 | Remove a node that something still uses | ✅ |
+| Treat a decimal written differently (`1.50` for `1.5`) as no change | ✅ |
+| Round a tie away from zero when the even neighbour was asked for | ✅ |
 | In pull mode, skip a woken node because what it read did not change in this update | ✅ |
 | In pull mode, watch a node without what it uses | ✅ |
 | Explain an earlier update by the branch of an `if` that was not taken then | ✅ |
@@ -492,7 +530,8 @@ How it is fast and small:
 
 ```
 crates/watershed-core/
-  src/value.rs    the value types (f64, i64, bool, string, list, error)
+  src/value.rs    the value types (f64, i64, decimal, bool, string, list, error)
+  src/decimal.rs  exact decimal numbers and how they round
   src/ir.rs       expressions as data, the type checker and the reference evaluator
   src/compile.rs  compiles expressions to fast instructions
   src/expr.rs     the typed Rust front end: + - * /, comparisons, when/then/otherwise
@@ -535,6 +574,8 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **More time travel:** restoring an earlier update, a redefined node's
   earlier expressions (so `explain_at` can go back past a `redefine`), a
   collection's groups as of an earlier update, and a sink that writes to S3.
+- **Decimals in the grid:** it has no decimal columns yet. Decimals hold
+  28 digits; nothing holds more.
 - **Bindings:** the JVM ones are a first cut (no groupings or history, one
   call per row, nothing packaged as a jar), the Python package is not
   published, and there is no cluster.

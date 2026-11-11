@@ -30,7 +30,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use watershed_core::{
-    AggregateOp, BinOp, CalcError, Collection as CoreCollection, Ir, NodeId, Type, UnOp,
+    AggregateOp, BinOp, CalcError, CalcType, Collection as CoreCollection, Decimal, Ir, NodeId,
+    Rounding, Type, UnOp,
 };
 
 uniffi::setup_scaffolding!();
@@ -72,6 +73,10 @@ pub enum Value {
     Whole {
         value: i64,
     },
+    /// An exact decimal, as its digits: `"19.99"`. A `BigDecimal` in Kotlin.
+    Decimal {
+        value: String,
+    },
     Flag {
         value: bool,
     },
@@ -93,6 +98,14 @@ impl Value {
         Ok(match self {
             Value::Number { value } => watershed_core::Value::F64(*value),
             Value::Whole { value } => watershed_core::Value::I64(*value),
+            Value::Decimal { value } => match value.parse::<Decimal>() {
+                Ok(decimal) => decimal.into_value(),
+                Err(_) => {
+                    return refused(format!(
+                        "{value} is not a decimal the engine can hold: it keeps 28 significant digits"
+                    ));
+                }
+            },
             Value::Flag { value } => watershed_core::Value::Bool(*value),
             Value::Text { value } => watershed_core::Value::Str(value.as_str().into()),
             Value::Texts { .. } => return refused("an input cannot be a list"),
@@ -104,6 +117,9 @@ impl Value {
         match value {
             watershed_core::Value::F64(x) => Value::Number { value: *x },
             watershed_core::Value::I64(x) => Value::Whole { value: *x },
+            watershed_core::Value::Decimal(x) => Value::Decimal {
+                value: x.to_string(),
+            },
             watershed_core::Value::Bool(x) => Value::Flag { value: *x },
             watershed_core::Value::Str(s) => Value::Text {
                 value: s.to_string(),
@@ -123,6 +139,8 @@ impl Value {
 pub enum Kind {
     Number,
     Whole,
+    /// An exact decimal of up to 28 digits.
+    Decimal,
     Flag,
     Text,
     /// A list of strings. Calculated nodes only: not an input or a field.
@@ -134,6 +152,7 @@ impl Kind {
         match ty {
             Type::F64 => Kind::Number,
             Type::I64 => Kind::Whole,
+            Type::Decimal => Kind::Decimal,
             Type::Bool => Kind::Flag,
             Type::Str => Kind::Text,
             Type::StrList => Kind::Texts,
@@ -146,6 +165,7 @@ impl Kind {
 fn fitted(value: watershed_core::Value, ty: Type) -> watershed_core::Value {
     match (value, ty) {
         (watershed_core::Value::I64(whole), Type::F64) => watershed_core::Value::F64(whole as f64),
+        (watershed_core::Value::I64(whole), Type::Decimal) => Decimal::from(whole).into_value(),
         (value, _) => value,
     }
 }
@@ -192,6 +212,10 @@ pub enum UnaryOp {
     Not,
     Absolute,
     ToText,
+    /// A whole number as the same decimal.
+    ToDecimal,
+    /// A decimal as the nearest number.
+    ToNumber,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
@@ -212,6 +236,14 @@ pub enum BinaryOp {
     Or,
     Concat,
     Join,
+    /// A decimal to a number of places; a tie goes to the even neighbour.
+    RoundHalfEven,
+    /// A tie goes away from zero.
+    RoundHalfUp,
+    /// Toward zero.
+    RoundDown,
+    /// Away from zero.
+    RoundUp,
 }
 
 /// Builds the engine's expression from a list of steps. `node` and `part`
@@ -247,6 +279,8 @@ fn expression(
                     UnaryOp::Not => UnOp::Not,
                     UnaryOp::Absolute => UnOp::Abs,
                     UnaryOp::ToText => UnOp::ToText,
+                    UnaryOp::ToDecimal => UnOp::ToDecimal,
+                    UnaryOp::ToNumber => UnOp::ToFloat,
                 };
                 Ir::Unary(op, take(&mut stack)?)
             }
@@ -268,6 +302,10 @@ fn expression(
                     BinaryOp::Or => BinOp::Or,
                     BinaryOp::Concat => BinOp::Concat,
                     BinaryOp::Join => BinOp::Join,
+                    BinaryOp::RoundHalfEven => BinOp::Round(Rounding::HalfEven),
+                    BinaryOp::RoundHalfUp => BinOp::Round(Rounding::HalfUp),
+                    BinaryOp::RoundDown => BinOp::Round(Rounding::Down),
+                    BinaryOp::RoundUp => BinOp::Round(Rounding::Up),
                 };
                 let right = take(&mut stack)?;
                 let left = take(&mut stack)?;
@@ -567,6 +605,7 @@ impl Collection {
         let ty = match kind {
             Kind::Number => Type::F64,
             Kind::Whole => Type::I64,
+            Kind::Decimal => Type::Decimal,
             Kind::Flag => Type::Bool,
             Kind::Text => Type::Str,
             Kind::Texts => return refused("a field cannot be a list"),

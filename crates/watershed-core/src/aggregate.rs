@@ -22,6 +22,7 @@ use std::collections::hash_map::Entry;
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
 
+use crate::decimal::{self, Decimal};
 use crate::value::{Type, Value};
 
 /// How an aggregate combines its members.
@@ -69,6 +70,9 @@ fn identity(op: AggregateOp, ty: Type) -> Value {
         (AggregateOp::Max, Type::F64) => Value::F64(f64::NEG_INFINITY),
         (AggregateOp::Min, Type::I64) => Value::I64(i64::MAX),
         (AggregateOp::Max, Type::I64) => Value::I64(i64::MIN),
+        (AggregateOp::Sum, Type::Decimal) => decimal::value(Decimal::ZERO),
+        (AggregateOp::Min, Type::Decimal) => decimal::value(Decimal::MAX),
+        (AggregateOp::Max, Type::Decimal) => decimal::value(Decimal::MIN),
         _ => Value::I64(0),
     }
 }
@@ -107,6 +111,11 @@ fn combine(op: AggregateOp, a: &Value, b: &Value) -> Value {
                 .map_or_else(|| Value::error("integer overflow"), Value::I64),
             AggregateOp::Min => Value::I64(*x.min(y)),
             AggregateOp::Max => Value::I64(*x.max(y)),
+        },
+        (Value::Decimal(x), Value::Decimal(y)) => match op {
+            AggregateOp::Sum | AggregateOp::Count => decimal::add(x, y),
+            AggregateOp::Min => decimal::min(x, y),
+            AggregateOp::Max => decimal::max(x, y),
         },
         (a, b) => Value::error(format!("internal type error: {op} of {a} and {b}")),
     }
