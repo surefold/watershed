@@ -341,7 +341,8 @@ impl Collection {
         });
         // Rows that already exist (including removed ones, which can be reused) get it too.
         for s in 0..self.slots.len() {
-            let node = self.define_column(g, s, index as usize)?;
+            let name = format!("{}[{s}].{name}", self.name);
+            let node = self.define_column(g, s, index as usize, &name)?;
             self.slots[s].columns.push(node);
         }
         Ok((self.placeholder(COLUMN | index), ty))
@@ -1231,27 +1232,53 @@ impl Collection {
         g: &mut Graph,
         slot: usize,
         column: usize,
+        name: &str,
     ) -> Result<NodeId, CalcError> {
         let def = &self.columns[column];
-        let ir = self.instantiate(g, slot, &def.formula);
-        g.define_ir(&format!("{}[{slot}].{}", self.name, def.name), ir)
+        // The first row's node is checked and compiled from the formula.
+        // Every other row copies it, reading its own row's nodes in place
+        // of the first row's.
+        let (first, row) = (&self.slots[0], &self.slots[slot]);
+        if slot == 0 || first.columns.len() <= column {
+            let ir = self.instantiate(g, slot, &def.formula);
+            return g.define_ir(name, ir);
+        }
+        g.define_like(name, first.columns[column], |n| {
+            if let Some(k) = first.fields.iter().position(|&f| f == n) {
+                row.fields[k]
+            } else if let Some(k) = first.columns.iter().position(|&c| c == n) {
+                row.columns[k]
+            } else {
+                n // a node outside the collection, the same for every row
+            }
+        })
     }
 
     /// Makes a new row's nodes, absent until the update; it joins every total.
     fn new_slot(&mut self, g: &mut Graph, values: Vec<Value>) -> Result<usize, CalcError> {
         let s = self.slots.len();
-        let present = g.input_value(&format!("{}[{s}].present", self.name), Value::Bool(false))?;
+        // Every node of the row is named `name[s].part`. The start is
+        // written once, and each part's name put after it in turn.
+        let mut name = format!("{}[{s}].", self.name);
+        let stem = name.len();
+        fn named<'a>(name: &'a mut String, stem: usize, part: &str) -> &'a str {
+            name.truncate(stem);
+            name.push_str(part);
+            name
+        }
+        let present = g.input_value(named(&mut name, stem, "present"), Value::Bool(false))?;
         let mut fields = Vec::with_capacity(values.len());
-        for ((name, _), value) in self.fields.iter().zip(values) {
-            fields.push(g.input_value(&format!("{}[{s}].{name}", self.name), value)?);
+        for ((field, _), value) in self.fields.iter().zip(values) {
+            fields.push(g.input_value(named(&mut name, stem, field), value)?);
         }
         self.slots.push(Slot {
             present,
             fields,
-            columns: Vec::new(),
+            columns: Vec::with_capacity(self.columns.len()),
         });
         for c in 0..self.columns.len() {
-            let node = self.define_column(g, s, c)?;
+            let name = named(&mut name, stem, &self.columns[c].name);
+            let node = self.define_column(g, s, c, name)?;
             self.slots[s].columns.push(node);
         }
         for &(total, target) in &self.totals {

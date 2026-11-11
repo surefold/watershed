@@ -302,6 +302,8 @@ and the tests failed every time:
 | Evaluate the wrong branch of an `if` | ✅ |
 | Forget to recalculate a node given a new formula by `redefine` | ✅ |
 | Skip a redefined node with an `if` because what it read under its old formula did not change | ✅ |
+| Copy a column's node to a new row still reading the first row's fields | ✅ |
+| When many rows change at once, rebuild only the lower half of a total's partial results | ✅ |
 
 ### 4. Ask for a second opinion
 
@@ -403,7 +405,8 @@ web/grid/               the grid's page, the script that draws it, and the chart
   change together near each other would help. Building is about 1 µs per
   node.
 - **Collections:** grouping by a calculated column (groups are by a field
-  today), and building rows faster (about 2.4 µs per node).
+  today). A million rows of four nodes each build and total in under two
+  seconds, about 0.45 µs per node.
 - **Removing nodes** in general (collections reuse rows instead, and build
   files redefine a removed value as a constant), and **pull mode** (only
   calculating what someone is watching).
