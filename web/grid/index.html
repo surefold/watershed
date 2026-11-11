@@ -209,6 +209,12 @@ let grid = null;
 let view = null;
 let layout = null; // how the columns were arranged, kept when the rows are rebuilt
 let columns = [];
+// In the playground's tab the grid is live from the start: prices stream
+// without being asked, unless the person has asked for less motion. A frame
+// that is not showing gets no animation frames, so it rests while the
+// playground's own tab is open.
+const LIVE =
+  new URLSearchParams(location.search).has("embed") && !matchMedia("(prefers-reduced-motion: reduce)").matches;
 let lookingBack = false;
 let streaming = false;
 const chart = new GroupChart($("chart"), { onPick: (key) => view.revealGroup(key) });
@@ -347,6 +353,7 @@ async function build(size) {
     note("");
   }
   building = false;
+  if (LIVE) setStreaming(true);
 }
 
 /** Fills the chart's column list with the columns that have totals, keeping the choice if it can. */
@@ -380,8 +387,19 @@ function setStreaming(on) {
 
 const rate = () => Math.round(10 ** Number($("rate").value));
 
+/** Whether the frame this page is in (if it is in one) is on screen. */
+function showing() {
+  try {
+    return !frameElement || frameElement.getClientRects().length > 0;
+  } catch {
+    return true; // a frame on another site: no way to tell
+  }
+}
+
 function tick() {
   if (!streaming || building) return;
+  // Not showing (its tab is not the one open): rest, and look again shortly.
+  if (!showing()) return void setTimeout(() => requestAnimationFrame(tick), 400);
   grid.demo_tick(rate());
   view.refresh();
   requestAnimationFrame(tick);
