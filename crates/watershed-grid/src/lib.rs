@@ -14,7 +14,7 @@
 use wasm_bindgen::prelude::*;
 
 mod demo;
-pub mod formula;
+pub use watershed_core::formula;
 pub mod table;
 
 pub use table::{Agg, Kind, Table, Update};

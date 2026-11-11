@@ -18,7 +18,9 @@
 //! changes the result either.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
 
 use crate::value::{Type, Value};
 
@@ -124,7 +126,7 @@ pub(crate) struct Aggregate {
     /// Each member's value node and presence node.
     pub(crate) members: Vec<(u32, u32)>,
     /// From a node to the members it is part of.
-    by_node: HashMap<u32, Vec<u32>>,
+    by_node: HashMap<u32, MemberOf, ById>,
     /// `tree[capacity + i]` is member i's contribution; `tree[k]` combines
     /// `tree[2k]` and `tree[2k + 1]`; `tree[1]` is the result.
     tree: Vec<Value>,
@@ -137,13 +139,51 @@ pub(crate) struct Aggregate {
     joined: Vec<(u64, u32)>,
 }
 
+/// Hashes node ids for `by_node`. Ids are small numbers handed out in
+/// order, not keys chosen by anyone outside, so one multiplication spreads
+/// them well, at a fraction of the default hasher's cost.
+#[derive(Debug, Default, Clone, Copy)]
+struct ById;
+
+impl BuildHasher for ById {
+    type Hasher = IdHasher;
+    fn build_hasher(&self) -> IdHasher {
+        IdHasher(0)
+    }
+}
+
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u32(u32::from(byte));
+        }
+    }
+    fn write_u32(&mut self, id: u32) {
+        let mixed = (self.0 ^ u64::from(id)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = mixed ^ (mixed >> 32);
+    }
+}
+
+/// The members a node is part of. It is nearly always one, and that case
+/// holds no list, so a million members do not mean a million small lists.
+#[derive(Debug)]
+enum MemberOf {
+    One(u32),
+    Many(Vec<u32>),
+}
+
 impl Aggregate {
     pub(crate) fn new(op: AggregateOp, value_type: Type) -> Self {
         Aggregate {
             op,
             value_type,
             members: Vec::new(),
-            by_node: HashMap::new(),
+            by_node: HashMap::default(),
             tree: vec![identity(op, value_type); 2],
             changed: Vec::new(),
             joined: Vec::new(),
@@ -170,24 +210,43 @@ impl Aggregate {
         self.tree.len() / 2
     }
 
-    /// Whether `node` is already part of a member (so it already has a link
-    /// to this aggregate).
-    pub(crate) fn has_node(&self, node: u32) -> bool {
-        self.by_node.contains_key(&node)
-    }
-
-    /// Adds a member, to be counted at the next recalculation.
-    pub(crate) fn push(&mut self, value: u32, present: u32) {
+    /// Adds a member, to be counted at the next recalculation. Returns, for
+    /// its value node and its presence node, whether that node is new to
+    /// this aggregate (and so needs a link to it). When they are one node,
+    /// only the first answer can be true.
+    pub(crate) fn push(&mut self, value: u32, present: u32) -> (bool, bool) {
         let index = self.members.len() as u32;
         self.members.push((value, present));
-        self.by_node.entry(value).or_default().push(index);
-        if present != value {
-            self.by_node.entry(present).or_default().push(index);
-        }
+        let new = (
+            self.note(value, index),
+            present != value && self.note(present, index),
+        );
         if self.members.len() > self.capacity() {
             self.grow();
         }
         self.changed.push(value);
+        new
+    }
+
+    /// Records that `node` is part of member `index`. Returns whether the
+    /// node was not part of any member before.
+    fn note(&mut self, node: u32, index: u32) -> bool {
+        match self.by_node.entry(node) {
+            Entry::Vacant(slot) => {
+                slot.insert(MemberOf::One(index));
+                true
+            }
+            Entry::Occupied(mut slot) => {
+                match slot.get_mut() {
+                    MemberOf::One(first) => {
+                        let first = *first;
+                        slot.insert(MemberOf::Many(vec![first, index]));
+                    }
+                    MemberOf::Many(list) => list.push(index),
+                }
+                false
+            }
+        }
     }
 
     /// Doubles the room in the tree. The new right half holds only the
@@ -219,8 +278,10 @@ impl Aggregate {
     pub(crate) fn recalculate(&mut self, values: &[Value]) -> Value {
         let mut indexes: Vec<usize> = Vec::new();
         for node in std::mem::take(&mut self.changed) {
-            if let Some(found) = self.by_node.get(&node) {
-                indexes.extend(found.iter().map(|&i| i as usize));
+            match self.by_node.get(&node) {
+                Some(MemberOf::One(i)) => indexes.push(*i as usize),
+                Some(MemberOf::Many(list)) => indexes.extend(list.iter().map(|&i| i as usize)),
+                None => {}
             }
         }
         indexes.sort_unstable();
@@ -229,11 +290,22 @@ impl Aggregate {
         for &i in &indexes {
             self.tree[capacity + i] = self.leaf(i, values);
         }
-        for &i in &indexes {
-            let mut k = (capacity + i) / 2;
-            while k >= 1 {
+        // Each changed member has `steps` partial results above it. When so
+        // many members changed that those paths add up to more than the
+        // tree holds (a table being filled), working out every partial
+        // result once is less work, and gives the same tree.
+        let steps = capacity.ilog2().max(1) as usize;
+        if indexes.len().saturating_mul(steps) >= capacity {
+            for k in (1..capacity).rev() {
                 self.tree[k] = combine(self.op, &self.tree[2 * k], &self.tree[2 * k + 1]);
-                k /= 2;
+            }
+        } else {
+            for &i in &indexes {
+                let mut k = (capacity + i) / 2;
+                while k >= 1 {
+                    self.tree[k] = combine(self.op, &self.tree[2 * k], &self.tree[2 * k + 1]);
+                    k /= 2;
+                }
             }
         }
         self.tree[1].clone()
@@ -266,5 +338,45 @@ impl Aggregate {
             combine(a.op, &fold(a, values, lo, mid), &fold(a, values, mid, hi))
         }
         fold(self, values, 0, capacity(self.members.len()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every partial result is its two halves combined.
+    fn tree_is_whole(a: &Aggregate) {
+        for k in 1..a.capacity() {
+            let both = combine(a.op, &a.tree[2 * k], &a.tree[2 * k + 1]);
+            assert!(a.tree[k].same_as(&both), "partial result {k}");
+        }
+    }
+
+    #[test]
+    fn many_members_changing_at_once_leave_the_same_tree_as_one_at_a_time() {
+        let mut values: Vec<Value> = (0..100).map(|i| Value::F64(f64::from(i))).collect();
+        values.push(Value::Bool(true));
+        let mut a = Aggregate::new(AggregateOp::Sum, Type::F64);
+        for i in 0..100 {
+            a.push(i, 100);
+        }
+        // All of them are new, which is far more than the tree's depth.
+        assert!(a.recalculate(&values).same_as(&Value::F64(4950.0)));
+        tree_is_whole(&a);
+
+        // One member changing takes the path from it to the top.
+        values[7] = Value::F64(1007.0);
+        a.changed.push(7);
+        assert!(a.recalculate(&values).same_as(&Value::F64(5950.0)));
+        tree_is_whole(&a);
+        assert!(a.folded_from_scratch(&values).same_as(&Value::F64(5950.0)));
+
+        // The presence node is part of every member.
+        values[100] = Value::Bool(false);
+        a.changed.push(100);
+        let none = a.recalculate(&values);
+        assert!(none.same_as(&a.folded_from_scratch(&values)));
+        tree_is_whole(&a);
     }
 }

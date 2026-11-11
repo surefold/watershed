@@ -149,6 +149,23 @@ impl GeneralProgram {
         }));
     }
 
+    /// The same program reading `swap(n)` wherever this one reads node `n`.
+    pub(crate) fn with_loads(&self, swap: &mut dyn FnMut(u32) -> u32) -> GeneralProgram {
+        GeneralProgram {
+            ops: self
+                .ops
+                .iter()
+                .map(|op| match op {
+                    Op::Load(n) => Op::Load(swap(*n)),
+                    other => *other,
+                })
+                .collect(),
+            constants: self.constants.clone(),
+            tables: self.tables.clone(),
+            dynamic: self.dynamic,
+        }
+    }
+
     /// Rebuilds the expression this program was compiled from.
     pub(crate) fn decompile(&self, graph: GraphId) -> Ir {
         decompile_general(&self.ops, &self.constants, &self.tables, graph)

@@ -567,6 +567,19 @@ impl Graph {
         Ok(Graph::node(slf, id))
     }
 
+    /// A formula written as text, such as `"qty * price * (1 + tax)"`, as an
+    /// expression. Each name is the node of that name; a name with spaces or
+    /// punctuation goes between backticks. Use it wherever an expression goes:
+    /// `g.define("total", g.formula("qty * price"))`.
+    fn formula(slf: &Bound<'_, Self>, source: &str) -> PyResult<Expr> {
+        let (ir, ty) = slf
+            .borrow()
+            .inner
+            .parse_formula(source)
+            .map_err(to_py_err)?;
+        Ok(Expr::new(ir, ty))
+    }
+
     /// Records a new value for an input; it takes effect at the next `stabilize()`.
     fn set(
         slf: &Bound<'_, Self>,
@@ -762,6 +775,18 @@ impl Collection {
         Ok(Expr::new(ir, ty))
     }
 
+    /// A formula written as text, such as `"qty * price * fx"`, as an
+    /// expression for `column`. A name is one of this collection's fields
+    /// or columns, or else the graph's node of that name.
+    fn formula(&self, py: Python<'_>, source: &str) -> PyResult<Expr> {
+        let graph = self.graph.bind(py);
+        let (ir, ty) = self
+            .inner
+            .parse_formula(&graph.borrow().inner, source)
+            .map_err(to_py_err)?;
+        Ok(Expr::new(ir, ty))
+    }
+
     /// A total: the sum of a field or column over the present rows.
     fn sum(&mut self, py: Python<'_>, name: &str, of: &Bound<'_, Expr>) -> PyResult<Expr> {
         self.total(py, name, AggregateOp::Sum, Some(of.get()))
@@ -899,10 +924,11 @@ impl Groups {
     fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Option<Expr>> {
         let key = value_for(self.key_type, key)?;
         let c = self.collection.borrow(py);
-        let Some(id) = c.inner.group_node(self.index, &key) else {
+        let graph = c.graph.bind(py);
+        let Some(id) = c.inner.group_node(&graph.borrow().inner, self.index, &key) else {
             return Ok(None);
         };
-        Ok(Some(Graph::node(c.graph.bind(py), id)))
+        Ok(Some(Graph::node(graph, id)))
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Expr> {
@@ -912,7 +938,9 @@ impl Groups {
 
     /// The keys of the groups that have rows, sorted.
     fn keys(&self, py: Python<'_>) -> Vec<String> {
-        self.collection.borrow(py).inner.group_keys_of(self.index)
+        let c = self.collection.borrow(py);
+        c.inner
+            .group_keys_of(&c.graph.bind(py).borrow().inner, self.index)
     }
 
     fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -933,7 +961,7 @@ impl Groups {
         let dict = PyDict::new(py);
         let c = self.collection.borrow(py);
         let graph = c.graph.bind(py).borrow();
-        for key in c.inner.group_keys_of(self.index) {
+        for key in c.inner.group_keys_of(&graph.inner, self.index) {
             let value = match self.key_type {
                 Type::Str => Value::Str(key.clone().into()),
                 Type::I64 => Value::I64(key.parse().unwrap_or_default()),
@@ -942,7 +970,7 @@ impl Groups {
                 // A Python field cannot be a list, so no group has this key.
                 Type::StrList => continue,
             };
-            if let Some(id) = c.inner.group_node(self.index, &value) {
+            if let Some(id) = c.inner.group_node(&graph.inner, self.index, &value) {
                 dict.set_item(to_py(py, &value)?, to_py(py, graph.inner.value(id))?)?;
             }
         }

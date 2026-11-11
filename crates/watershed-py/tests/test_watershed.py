@@ -271,3 +271,61 @@ def test_groups_by_an_int_field():
         c.upsert(f"p{i}", team=i % 3, points=i)
     g.stabilize()
     assert best.to_dict() == {0: 27, 1: 28, 2: 29}
+
+
+def test_a_formula_written_as_text_is_an_expression():
+    g, qty, *_ = order_graph()
+    g.input("discount rate", 0.1)
+    net = g.define("net", g.formula("qty * price * (1 - `discount rate`)"))
+    assert net.value == pytest.approx(22.5)
+    assert net.type == "float"
+
+    g.set(qty, 20.0)
+    assert g.stabilize().recalculated == 3  # subtotal, total and net
+    assert net.value == pytest.approx(45.0)
+
+    # It mixes with expressions built in Python.
+    assert g.define("double", g.formula("net") * 2).value == pytest.approx(90.0)
+
+    with pytest.raises(ws.CalcError, match='no column or value called "nothing"'):
+        g.formula("nothing + 1")
+    with pytest.raises(TypeError, match="cannot be applied to f64"):
+        g.formula("qty && price")
+    g.check_consistency()
+
+
+def test_a_collections_formula_reads_its_fields_and_columns():
+    g = ws.Graph()
+    g.input("fx", 2.0)
+    orders = g.collection("orders")
+    orders.field("qty", float)
+    orders.field("price", float)
+    line = orders.column("line", orders.formula("qty * price * fx"))
+    big = orders.column("big", orders.formula("line > 10"))
+    revenue = orders.sum("revenue", line)
+    orders.upsert("a", qty=1.0, price=1.5)
+    orders.upsert("b", qty=4.0, price=1.5)
+    g.stabilize()
+    assert revenue.value == 15.0
+    assert orders.get("a", big) is False
+    assert orders.get("b", big) is True
+    g.check_consistency()
+
+
+def test_groups_by_a_calculated_column_follow_it_within_the_update():
+    g = ws.Graph()
+    limit = g.input("limit", 100.0)
+    trades = g.collection("trades")
+    notional = trades.field("notional", float)
+    size = trades.column("size", ws.when(notional > limit).then("large").otherwise("small"))
+    by_size = trades.group_sum("by_size", size, notional)
+    trades.upsert("t1", notional=50.0)
+    trades.upsert("t2", notional=150.0)
+    g.stabilize()
+    assert by_size.to_dict() == {"large": 150.0, "small": 50.0}
+
+    g.set(limit, 10.0)
+    g.stabilize()
+    assert by_size.to_dict() == {"large": 200.0}
+    assert by_size.keys() == ["large"]
+    g.check_consistency()

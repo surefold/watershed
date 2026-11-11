@@ -646,6 +646,59 @@ fn a_column_can_use_other_columns_and_any_node_in_the_graph() -> Result {
 }
 
 #[test]
+fn every_row_of_a_column_reads_its_own_rows_nodes() -> Result {
+    // The first row's column nodes are compiled from the formula and the
+    // other rows copy them, so each copy must read its own row.
+    let mut g = Graph::new();
+    let fx = g.input("fx", 2.0)?;
+    let mut trades = Collection::new(&g, "trades");
+    let notional = trades.field::<f64>("notional")?;
+    let side = trades.field::<String>("side")?;
+    let signed = trades.column(
+        &mut g,
+        "signed",
+        when(side.equals("sell"))
+            .then(-notional)
+            .otherwise(notional),
+    )?;
+    let converted = trades.column(&mut g, "converted", signed * fx)?;
+    for i in 0..20 {
+        let side_of = if i % 3 == 0 { "sell" } else { "buy" };
+        trades.upsert(
+            &mut g,
+            &format!("t{i}"),
+            &[notional.is(10.0 + i as f64), side.is(side_of.to_string())],
+        )?;
+    }
+    // A column added once there are rows is copied to them the same way.
+    let doubled = trades.column(&mut g, "doubled", converted + converted)?;
+    g.stabilize();
+    for i in 0..20 {
+        let sign = if i % 3 == 0 { -1.0 } else { 1.0 };
+        let key = format!("t{i}");
+        assert_eq!(trades.get(&g, &key, signed)?, sign * (10.0 + i as f64));
+        assert_eq!(
+            trades.get(&g, &key, doubled)?,
+            sign * (10.0 + i as f64) * 4.0
+        );
+    }
+    let seventh = trades.node(&g, "t7", converted).expect("row t7");
+    assert_eq!(
+        g.dependencies(seventh.id()),
+        vec![fx.id(), trades.node(&g, "t7", signed).expect("row t7").id()]
+    );
+
+    // One row changing side recalculates that row's three columns only.
+    trades.upsert(&mut g, "t7", &[side.is("sell".to_string())])?;
+    let report = g.stabilize();
+    assert_eq!(report.recalculated, 3);
+    assert_eq!(trades.get(&g, "t7", doubled)?, -68.0);
+    assert_eq!(trades.get(&g, "t8", doubled)?, 72.0);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
 fn totals_and_columns_added_after_rows_include_them() -> Result {
     let mut g = Graph::new();
     let mut c = Collection::new(&g, "c");
@@ -772,7 +825,7 @@ fn groups_total_their_rows_and_follow_rows_that_move() -> Result {
     let eu = sales.group(&g, by_region, "EU".to_string()).unwrap();
     let us = sales.group(&g, by_region, "US".to_string()).unwrap();
     assert_eq!((g.get(eu)?, g.get(us)?), (15.0, 7.0));
-    assert_eq!(sales.group_keys(by_region), ["EU", "US"]);
+    assert_eq!(sales.group_keys(&g, by_region), ["EU", "US"]);
 
     // s2 moves to the US: both groups update by that one row.
     sales.upsert(&mut g, "s2", &[region.is("US".into())])?;
@@ -792,7 +845,101 @@ fn groups_total_their_rows_and_follow_rows_that_move() -> Result {
     sales.remove(&mut g, "s1")?;
     g.stabilize();
     assert_eq!(g.get(eu)?, 0.0);
-    assert_eq!(sales.group_keys(by_region), ["APAC", "US"]);
+    assert_eq!(sales.group_keys(&g, by_region), ["APAC", "US"]);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn rows_grouped_by_a_column_move_in_the_update_that_changes_it() -> Result {
+    let mut g = Graph::new();
+    let limit = g.input("limit", 100.0)?;
+    let mut trades = Collection::new(&g, "trades");
+    let notional = trades.field::<f64>("notional")?;
+    let size = trades.column(
+        &mut g,
+        "size",
+        when(notional.gt(limit))
+            .then("large".to_string())
+            .otherwise("small".to_string()),
+    )?;
+    let by_size = trades.group_sum(&mut g, "by_size", size, notional)?;
+    let counts = trades.group_count(&mut g, "count_by_size", size)?;
+    trades.upsert(&mut g, "t1", &[notional.is(50.0)])?;
+    trades.upsert(&mut g, "t2", &[notional.is(150.0)])?;
+    trades.upsert(&mut g, "t3", &[notional.is(250.0)])?;
+    g.stabilize();
+    let total = |g: &Graph, trades: &Collection, key: &str| {
+        trades
+            .group(g, by_size, key.to_string())
+            .map(|node| g.get(node).unwrap())
+    };
+    assert_eq!(total(&g, &trades, "small"), Some(50.0));
+    assert_eq!(total(&g, &trades, "large"), Some(400.0));
+    assert_eq!(trades.group_keys(&g, by_size), ["large", "small"]);
+
+    // One row's own field changes its group: one update, and both totals
+    // are right at the end of it.
+    trades.upsert(&mut g, "t1", &[notional.is(120.0)])?;
+    g.stabilize();
+    assert_eq!(total(&g, &trades, "small"), Some(0.0));
+    assert_eq!(total(&g, &trades, "large"), Some(520.0));
+    assert_eq!(trades.group_keys(&g, by_size), ["large"]);
+
+    // A node outside the collection moves several rows at once, to a group
+    // they have never been in.
+    g.set(limit, 200.0)?;
+    g.stabilize();
+    assert_eq!(total(&g, &trades, "small"), Some(270.0));
+    assert_eq!(total(&g, &trades, "large"), Some(250.0));
+    let small_count = trades.group(&g, counts, "small".to_string()).unwrap();
+    assert_eq!(g.get(small_count)?, 2);
+
+    // Moving back to a group a row has been in before adds no nodes.
+    let nodes = g.len();
+    g.set(limit, 100.0)?;
+    g.stabilize();
+    assert_eq!(g.len(), nodes);
+    assert_eq!(total(&g, &trades, "large"), Some(520.0));
+
+    // A removed row leaves its group, and the row that reuses its nodes
+    // joins the group its own value names.
+    trades.remove(&mut g, "t3")?;
+    trades.upsert(&mut g, "t4", &[notional.is(10.0)])?;
+    g.stabilize();
+    assert_eq!(total(&g, &trades, "large"), Some(270.0));
+    assert_eq!(total(&g, &trades, "small"), Some(10.0));
+    assert_eq!(trades.group_keys(&g, by_size), ["large", "small"]);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn a_grouping_by_a_column_added_after_rows_includes_them() -> Result {
+    let mut g = Graph::new();
+    let mut trades = Collection::new(&g, "trades");
+    let qty = trades.field::<i64>("qty")?;
+    let lots = trades.column(&mut g, "lots", qty / 100)?;
+    trades.upsert(&mut g, "a", &[qty.is(250)])?;
+    trades.upsert(&mut g, "b", &[qty.is(280)])?;
+    trades.upsert(&mut g, "c", &[qty.is(20)])?;
+    g.stabilize();
+    let by_lots = trades.group_sum(&mut g, "qty_by_lots", lots, qty)?;
+    g.stabilize();
+    let two = trades.group(&g, by_lots, 2).unwrap();
+    assert_eq!(g.get(two)?, 530);
+    assert_eq!(trades.group_keys(&g, by_lots), ["0", "2"]);
+
+    // A row whose key cannot be worked out is in no group.
+    let rate = trades.column(&mut g, "rate", 1000 / qty)?;
+    let by_rate = trades.group_count(&mut g, "count_by_rate", rate)?;
+    trades.upsert(&mut g, "c", &[qty.is(0)])?;
+    g.stabilize();
+    assert_eq!(trades.group_keys(&g, by_rate), ["3", "4"]);
+    trades.upsert(&mut g, "c", &[qty.is(250)])?;
+    g.stabilize();
+    let four = trades.group(&g, by_rate, 4).unwrap();
+    assert_eq!(g.get(four)?, 2);
     g.check_consistency().map_err(CalcError::Invalid)?;
     Ok(())
 }
