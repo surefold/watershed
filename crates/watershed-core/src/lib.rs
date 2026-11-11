@@ -60,6 +60,7 @@ pub mod collection;
 mod compile;
 pub mod error;
 pub mod expr;
+pub mod formula;
 pub mod graph;
 pub mod handle;
 mod history;

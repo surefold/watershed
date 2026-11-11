@@ -1,35 +1,70 @@
-//! Column formulas as text: `qty * (mark - price)`, `if(side == "Buy", 1, -1)`.
+//! Formulas as text: `qty * (mark - price)`, `if(side == "Buy", 1, -1)`.
 //!
-//! A formula becomes a watershed expression ([`Ir`]); the engine type-checks
-//! it when the column is added. Names are the grid's columns and its named
-//! values. Numbers are always `f64`.
+//! This is the front end for people who type a formula rather than write
+//! Rust or Python: a grid's column, a rule in a settings file. A formula
+//! becomes an expression ([`Ir`]), which the engine type-checks when a node
+//! or column is made from it, exactly as it checks any other expression.
+//!
+//! ```
+//! use watershed_core::prelude::*;
+//!
+//! # fn main() -> Result<(), CalcError> {
+//! let mut g = Graph::new();
+//! let qty = g.input("qty", 3.0)?;
+//! g.input("price", 2.5)?;
+//! let total = g.define_formula("total", "qty * price")?;
+//! assert_eq!(g.value(total).to_string(), "7.5");
+//!
+//! g.set(qty, 4.0)?;
+//! g.stabilize();
+//! assert_eq!(g.value(total).to_string(), "10");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`Graph::parse_formula`](crate::Graph::parse_formula) reads names as the graph's
+//! nodes, and [`Collection::parse_formula`](crate::Collection::parse_formula) as the
+//! collection's fields and columns first. [`parse`] takes any way of
+//! turning a name into an expression.
 //!
 //! ```text
 //! formula := or
 //! or      := and ( "||" and )*
 //! and     := compare ( "&&" compare )*
-//! compare := sum ( ( "<" | "<=" | ">" | ">=" | "==" | "!=" ) sum )?
+//! compare := sum ( ( "<" | "<=" | ">" | ">=" | "==" | "=" | "!=" ) sum )?
 //! sum     := product ( ( "+" | "-" ) product )*
 //! product := unary ( ( "*" | "/" ) unary )*
 //! unary   := ( "-" | "!" ) unary | primary
-//! primary := number | "text" | true | false | name | "(" formula ")"
+//! primary := number | "text" | 'text' | true | false | name | `any name`
+//!          | "(" formula ")" | "[" formula, ... "]"
 //!          | if(c, a, b) | min(a, b) | max(a, b) | abs(a)
+//!          | text(a) | concat(a, b) | join(list, separator)
+//!          | choose(index, a, b, ...)
 //! ```
+//!
+//! Numbers are always `f64`. A name is letters, digits and `_`; any other
+//! name, such as `orders[3].qty` or `tax rate`, goes between backticks. A
+//! list holds strings. `choose` takes the option at position `index`, an
+//! `i64` counting from 0.
 
 use std::sync::Arc;
 
-use watershed_core::{BinOp, Ir, UnOp, Value};
+use crate::ir::{BinOp, Ir, UnOp};
+use crate::value::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Number(f64),
     Text(String),
     Name(String),
+    /// A name between backticks: always a node, never a function or `true`.
+    Quoted(String),
     Symbol(&'static str),
 }
 
-const SYMBOLS: [&str; 17] = [
-    "||", "&&", "<=", ">=", "==", "!=", "<", ">", "+", "-", "*", "/", "!", "(", ")", ",", "=",
+const SYMBOLS: [&str; 19] = [
+    "||", "&&", "<=", ">=", "==", "!=", "<", ">", "+", "-", "*", "/", "!", "(", ")", ",", "=", "[",
+    "]",
 ];
 
 fn tokens(src: &str) -> Result<Vec<Token>, String> {
@@ -80,6 +115,17 @@ fn tokens(src: &str) -> Result<Vec<Token>, String> {
             }
             i += 1;
             out.push(Token::Text(text));
+        } else if c == '`' {
+            let start = i + 1;
+            i = start;
+            while i < chars.len() && chars[i] != '`' {
+                i += 1;
+            }
+            if i == chars.len() {
+                return Err("a name is missing its closing backtick".into());
+            }
+            out.push(Token::Quoted(chars[start..i].iter().collect()));
+            i += 1;
         } else if c.is_alphabetic() || c == '_' {
             let start = i;
             while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
@@ -216,18 +262,24 @@ impl Parser<'_> {
         })
     }
 
-    fn arguments(&mut self, name: &str, count: usize) -> Result<Vec<Ir>, String> {
-        self.expect("(")?;
-        let mut args = Vec::new();
-        if self.symbol(&[")"]).is_none() {
+    /// Formulas separated by commas, up to the closing symbol.
+    fn items(&mut self, close: &'static str) -> Result<Vec<Ir>, String> {
+        let mut items = Vec::new();
+        if self.symbol(&[close]).is_none() {
             loop {
-                args.push(self.nested()?);
+                items.push(self.nested()?);
                 if self.symbol(&[","]).is_none() {
                     break;
                 }
             }
-            self.expect(")")?;
+            self.expect(close)?;
         }
+        Ok(items)
+    }
+
+    fn arguments(&mut self, name: &str, count: usize) -> Result<Vec<Ir>, String> {
+        self.expect("(")?;
+        let args = self.items(")")?;
         if args.len() != count {
             return Err(format!(
                 "{name} takes {count} value{}, not {}",
@@ -261,7 +313,11 @@ impl Parser<'_> {
                 self.expect(")")?;
                 Ok(inner)
             }
+            Token::Symbol("[") => Ok(Ir::List(
+                self.items("]")?.into_iter().map(Arc::new).collect(),
+            )),
             Token::Symbol(_) => Err(format!("unexpected {}", describe(&token))),
+            Token::Quoted(name) => self.named(&name),
             Token::Name(name) => {
                 let call = matches!(self.peek(), Some(Token::Symbol("(")));
                 match (name.as_str(), call) {
@@ -285,14 +341,41 @@ impl Parser<'_> {
                         let mut args = self.arguments("abs", 1)?.into_iter();
                         Ok(Ir::Unary(UnOp::Abs, Arc::new(args.next().unwrap())))
                     }
+                    ("text", true) => {
+                        let mut args = self.arguments("text", 1)?.into_iter();
+                        Ok(Ir::Unary(UnOp::ToText, Arc::new(args.next().unwrap())))
+                    }
+                    ("concat" | "join", true) => {
+                        let mut args = self.arguments(&name, 2)?.into_iter();
+                        let op = if name == "concat" {
+                            BinOp::Concat
+                        } else {
+                            BinOp::Join
+                        };
+                        Ok(binary(op, args.next().unwrap(), args.next().unwrap()))
+                    }
+                    ("choose", true) => {
+                        self.expect("(")?;
+                        let mut args = self.items(")")?.into_iter().map(Arc::new);
+                        let index = args.next();
+                        let options: Vec<Arc<Ir>> = args.collect();
+                        match index {
+                            Some(index) if !options.is_empty() => Ok(Ir::Choose(index, options)),
+                            _ => Err("choose takes an index and at least one option".into()),
+                        }
+                    }
                     (_, true) => Err(format!(
-                        "there is no function {name:?} (there are if, min, max and abs)"
+                        "there is no function {name:?} (there are if, min, max, abs, text, \
+                         concat, join and choose)"
                     )),
-                    (_, false) => (self.resolve)(&name)
-                        .ok_or_else(|| format!("there is no column or value called {name:?}")),
+                    (_, false) => self.named(&name),
                 }
             }
         }
+    }
+
+    fn named(&self, name: &str) -> Result<Ir, String> {
+        (self.resolve)(name).ok_or_else(|| format!("there is no column or value called {name:?}"))
     }
 }
 
@@ -301,11 +384,15 @@ fn describe(token: &Token) -> String {
         Token::Number(x) => x.to_string(),
         Token::Text(s) => format!("{s:?}"),
         Token::Name(s) => s.clone(),
+        Token::Quoted(s) => format!("`{s}`"),
         Token::Symbol(s) => format!("{s:?}"),
     }
 }
 
-/// Parses a formula. `resolve` gives the expression for a column or named value.
+/// Parses a formula. `resolve` gives the expression a name stands for (a
+/// node, a column's placeholder), or `None` if there is nothing by that
+/// name. The result has not been type-checked: making a node or column from
+/// it does that.
 pub fn parse(src: &str, resolve: &dyn Fn(&str) -> Option<Ir>) -> Result<Ir, String> {
     let tokens = tokens(src)?;
     if tokens.is_empty() {
@@ -327,7 +414,7 @@ pub fn parse(src: &str, resolve: &dyn Fn(&str) -> Option<Ir>) -> Result<Ir, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use watershed_core::Graph;
+    use crate::Graph;
 
     /// Parses a formula over `a = 6`, `b = 4` and `side = "Buy"`, and gives its value as text.
     fn value(src: &str) -> String {
@@ -378,6 +465,110 @@ mod tests {
         assert_eq!(value("abs(b - a)"), "2");
         assert_eq!(value("a > 5 && b > 5 || a == 6"), "true");
         assert_eq!(value("1e3 + 1_000 + .5"), "2000.5");
+    }
+
+    #[test]
+    fn text_lists_and_choices() {
+        assert_eq!(value("concat(side, '!')"), "\"Buy!\"");
+        assert_eq!(value("concat(text(a), text(a > b))"), "\"6.0true\"");
+        assert_eq!(value("join([side, 'x', text(b)], '-')"), "\"Buy-x-4.0\"");
+        assert_eq!(value("join([], ',')"), "\"\"");
+        assert_eq!(value("if(side == 'Buy', [side], [])"), "[\"Buy\"]");
+        assert_eq!(
+            value("choose(a, 1, 2)"),
+            "define: type error: a choice's index must be i64, got f64"
+        );
+        assert_eq!(
+            value("choose(a)"),
+            "parse: choose takes an index and at least one option"
+        );
+    }
+
+    #[test]
+    fn a_name_between_backticks_can_be_any_name() {
+        let mut g = Graph::new();
+        g.input("tax rate", 0.2).unwrap();
+        g.input("orders[3].qty", 5.0).unwrap();
+        g.input("true", 7.0).unwrap();
+        g.input("pick", 1_i64).unwrap();
+        let total = g
+            .define_formula("total", "`orders[3].qty` * (1 + `tax rate`) + `true`")
+            .unwrap();
+        assert_eq!(g.value(total).to_string(), "13");
+        let chosen = g
+            .define_formula("chosen", "choose(pick, 'a', 'b')")
+            .unwrap();
+        assert_eq!(g.value(chosen).to_string(), "\"b\"");
+        assert_eq!(
+            g.define_formula("bad", "`tax rate")
+                .unwrap_err()
+                .to_string(),
+            "a name is missing its closing backtick"
+        );
+        assert_eq!(
+            g.define_formula("bad", "`nothing` + 1")
+                .unwrap_err()
+                .to_string(),
+            "there is no column or value called \"nothing\""
+        );
+    }
+
+    #[test]
+    fn a_graphs_formula_reads_names_as_its_nodes_and_follows_them() {
+        let mut g = Graph::new();
+        let qty = g.input("qty", 3.0).unwrap();
+        g.input("price", 2.5).unwrap();
+        let (_, ty) = g.parse_formula("qty * price > 5").unwrap();
+        assert_eq!(ty, crate::Type::Bool);
+        let total = g.define_formula("total", "qty * price").unwrap();
+        g.set(qty, 4.0).unwrap();
+        assert_eq!(g.stabilize().recalculated, 1);
+        assert_eq!(g.value(total).to_string(), "10");
+        assert!(matches!(
+            g.parse_formula("qty && price"),
+            Err(crate::CalcError::Type(_))
+        ));
+        g.check_consistency().unwrap();
+    }
+
+    #[test]
+    fn a_collections_formula_reads_names_as_its_fields_and_columns_first() {
+        use crate::{AggregateOp, Collection, Type};
+        let mut g = Graph::new();
+        g.input("fx", 2.0).unwrap();
+        // A node with a field's name: inside the collection the field wins.
+        g.input("qty", 1000.0).unwrap();
+        let mut orders = Collection::new(&g, "orders");
+        orders.add_field("qty", Type::F64).unwrap();
+        orders.add_field("price", Type::F64).unwrap();
+        let (line, ty) = orders
+            .add_formula_column(&mut g, "line", "qty * price * fx")
+            .unwrap();
+        assert_eq!(ty, Type::F64);
+        orders
+            .add_formula_column(&mut g, "big", "line > 10")
+            .unwrap();
+        let revenue = orders
+            .add_total(&mut g, "revenue", AggregateOp::Sum, Some(&line))
+            .unwrap();
+        for (key, qty) in [("a", 1.0), ("b", 4.0)] {
+            orders
+                .upsert_named(
+                    &mut g,
+                    key,
+                    &[("qty", Value::F64(qty)), ("price", Value::F64(1.5))],
+                )
+                .unwrap();
+        }
+        g.stabilize();
+        assert_eq!(g.value(revenue).to_string(), "15");
+        let (big, _) = orders.parse_formula(&g, "big").unwrap();
+        assert_eq!(
+            orders.get_value(&g, "a", &big).unwrap().to_string(),
+            "false"
+        );
+        assert_eq!(orders.get_value(&g, "b", &big).unwrap().to_string(), "true");
+        g.check_consistency().unwrap();
     }
 
     #[test]

@@ -414,6 +414,30 @@ impl Graph {
         Ok(self.push(name, hot, ty, &deps, value))
     }
 
+    /// Parses a formula written as text, such as `qty * price * (1 + tax)`,
+    /// reading each name as the node of that name. Returns the expression
+    /// and its type. See the [`formula`](crate::formula) module for what a
+    /// formula can say.
+    pub fn parse_formula(&self, source: &str) -> Result<(Ir, Type), CalcError> {
+        let ir =
+            crate::formula::parse(source, &|name| self.find(name).map(|id| self.reference(id)))
+                .map_err(CalcError::Invalid)?;
+        let ty = ir.type_check(&|r| {
+            self.types
+                .get(r.node.index())
+                .copied()
+                .ok_or_else(|| TypeError(format!("there is no node {}", r.node)))
+        })?;
+        Ok((ir, ty))
+    }
+
+    /// Adds a calculated node from a formula written as text. See
+    /// [`parse_formula`](Self::parse_formula).
+    pub fn define_formula(&mut self, name: &str, source: &str) -> Result<NodeId, CalcError> {
+        let (ir, _) = self.parse_formula(source)?;
+        self.define_ir(name, ir)
+    }
+
     /// Gives a calculated node a new expression, of the same type as before.
     ///
     /// Like [`set`](Self::set), it counts from the next update: reads return

@@ -124,6 +124,28 @@ cd crates/watershed-py
 uv sync && uv run pytest
 ```
 
+## Formulas as text
+
+For people who type a formula rather than write Rust or Python (a grid's
+column, a rule in a settings file), `watershed_core::formula` turns text into
+the same checked expression:
+
+```rust
+let total = g.define_formula("total", "qty * price * (1 + `tax rate`)")?;
+let (line, _) = orders.add_formula_column(&mut g, "line", "qty * price * fx")?;
+```
+
+```python
+net = g.define("net", g.formula("qty * price * (1 - discount)"))
+line = orders.column("line", orders.formula("qty * price * fx"))
+```
+
+It has `+ - * /`, comparisons, `&&`, `||`, `!`, `if(c, a, b)`, `min`, `max`,
+`abs`, `text`, `concat`, `join`, `choose` and lists of strings. A name is a
+node (in a collection, a field or column first); a name with spaces or
+punctuation goes between backticks. Numbers are always `f64`. The grid's
+formula box uses the same parser.
+
 Calling from Python adds little: on a 210,000-node graph, changing one price
 and updating takes about 29 µs from Python.
 
@@ -379,6 +401,7 @@ crates/watershed-core/
   src/ir.rs       expressions as data, the type checker and the reference evaluator
   src/compile.rs  compiles expressions to fast instructions
   src/expr.rs     the typed Rust front end: + - * /, comparisons, when/then/otherwise
+  src/formula.rs  formulas written as text, parsed into expressions
   src/handle.rs   typed handles to nodes (Input<T>, Node<T>)
   src/graph.rs    the graph and the incremental update (stabilize)
   src/aggregate.rs  totals over many nodes, kept as a tree of partial results
@@ -410,5 +433,5 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **More time travel:** restoring an earlier update, `explain` and formulas
   as of an earlier update (full lineage), a collection's groups as of an
   earlier update, and a sink that writes to S3.
-- **Bindings** for the JVM, a formula parser for end users, publishing the
-  Python package, and the cluster.
+- **Bindings** for the JVM, publishing the Python package, and the cluster.
+  Formulas as text have no whole-number constants yet.
