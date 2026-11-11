@@ -69,12 +69,22 @@ Totals per group follow rows as they move between groups:
 ```rust
 let by_region = orders.group_sum(&mut g, "revenue_by_region", region, line)?;
 let eu = orders.group(&g, by_region, "EU".to_string());   // a node, like any other
-orders.group_keys(by_region);                              // groups that have rows
+orders.group_keys(&g, by_region);                          // groups that have rows
 ```
 
 Each group's total is a node, made when the first row with that key arrives.
 When a row changes group, its old and new groups update by just that row:
 on 1,000 rows in 10 groups, a move recalculates 4 nodes.
+
+Rows can be grouped by a calculated column too. Its value is only known
+during an update, so the graph watches it: as soon as a row's column has
+been recalculated to a new value, the row joins that group, in the same
+update. A row whose column is an error is in no group.
+
+```rust
+let size = orders.column(&mut g, "size", when(line.gt(limit)).then("large".to_string()).otherwise("small".to_string()))?;
+let by_size = orders.group_sum(&mut g, "revenue_by_size", size, line)?;
+```
 
 Calculations are typed. `qty + region` (a number plus a string) does not
 compile, and neither does setting a calculated node.
@@ -326,6 +336,8 @@ and the tests failed every time:
 | Skip a redefined node with an `if` because what it read under its old formula did not change | ✅ |
 | Copy a column's node to a new row still reading the first row's fields | ✅ |
 | When many rows change at once, rebuild only the lower half of a total's partial results | ✅ |
+| Never move a row whose calculated group changed during an update | ✅ |
+| Count a row that joins a group during an update from the next update instead | ✅ |
 
 ### 4. Ask for a second opinion
 
@@ -427,9 +439,9 @@ web/grid/               the grid's page, the script that draws it, and the chart
   they jump between nodes scattered across the graph; placing nodes that
   change together near each other would help. Building is about 1 µs per
   node.
-- **Collections:** grouping by a calculated column (groups are by a field
-  today). A million rows of four nodes each build and total in under two
-  seconds, about 0.45 µs per node.
+- **Collections:** the grid grouping its rows by a formula column (the
+  engine can; the grid's view cannot yet). A million rows of four nodes
+  each build and total in under two seconds, about 0.45 µs per node.
 - **Removing nodes** in general (collections reuse rows instead, and build
   files redefine a removed value as a constant), and **pull mode** (only
   calculating what someone is watching).

@@ -399,7 +399,7 @@ impl Edits {
         let g = &self.graph;
         let mut wikis: Vec<(String, i64, f64)> = self
             .edits
-            .group_keys(self.per_wiki)
+            .group_keys(g, self.per_wiki)
             .into_iter()
             .filter_map(|w| {
                 let n = self.edits.group(g, self.per_wiki, w.clone())?;

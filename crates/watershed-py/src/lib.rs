@@ -924,10 +924,11 @@ impl Groups {
     fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Option<Expr>> {
         let key = value_for(self.key_type, key)?;
         let c = self.collection.borrow(py);
-        let Some(id) = c.inner.group_node(self.index, &key) else {
+        let graph = c.graph.bind(py);
+        let Some(id) = c.inner.group_node(&graph.borrow().inner, self.index, &key) else {
             return Ok(None);
         };
-        Ok(Some(Graph::node(c.graph.bind(py), id)))
+        Ok(Some(Graph::node(graph, id)))
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Expr> {
@@ -937,7 +938,9 @@ impl Groups {
 
     /// The keys of the groups that have rows, sorted.
     fn keys(&self, py: Python<'_>) -> Vec<String> {
-        self.collection.borrow(py).inner.group_keys_of(self.index)
+        let c = self.collection.borrow(py);
+        c.inner
+            .group_keys_of(&c.graph.bind(py).borrow().inner, self.index)
     }
 
     fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -958,7 +961,7 @@ impl Groups {
         let dict = PyDict::new(py);
         let c = self.collection.borrow(py);
         let graph = c.graph.bind(py).borrow();
-        for key in c.inner.group_keys_of(self.index) {
+        for key in c.inner.group_keys_of(&graph.inner, self.index) {
             let value = match self.key_type {
                 Type::Str => Value::Str(key.clone().into()),
                 Type::I64 => Value::I64(key.parse().unwrap_or_default()),
@@ -967,7 +970,7 @@ impl Groups {
                 // A Python field cannot be a list, so no group has this key.
                 Type::StrList => continue,
             };
-            if let Some(id) = c.inner.group_node(self.index, &value) {
+            if let Some(id) = c.inner.group_node(&graph.inner, self.index, &value) {
                 dict.set_item(to_py(py, &value)?, to_py(py, graph.inner.value(id))?)?;
             }
         }

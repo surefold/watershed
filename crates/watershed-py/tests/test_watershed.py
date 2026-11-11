@@ -309,4 +309,22 @@ def test_a_collections_formula_reads_its_fields_and_columns():
     assert revenue.value == 15.0
     assert orders.get("a", big) is False
     assert orders.get("b", big) is True
+
+
+def test_groups_by_a_calculated_column_follow_it_within_the_update():
+    g = ws.Graph()
+    limit = g.input("limit", 100.0)
+    trades = g.collection("trades")
+    notional = trades.field("notional", float)
+    size = trades.column("size", ws.when(notional > limit).then("large").otherwise("small"))
+    by_size = trades.group_sum("by_size", size, notional)
+    trades.upsert("t1", notional=50.0)
+    trades.upsert("t2", notional=150.0)
+    g.stabilize()
+    assert by_size.to_dict() == {"large": 150.0, "small": 50.0}
+
+    g.set(limit, 10.0)
+    g.stabilize()
+    assert by_size.to_dict() == {"large": 200.0}
+    assert by_size.keys() == ["large"]
     g.check_consistency()
