@@ -1536,6 +1536,9 @@ impl Graph {
     pub fn get_at<T: CalcType>(&self, node: impl Handle<T>, epoch: u64) -> Result<T, CalcError> {
         let at = node.node_ref();
         self.check_ref(at)?;
+        // What it held at an earlier update is no better than what it holds
+        // now, if it is not being kept up to date.
+        self.check_calculated(at.node)?;
         self.typed(at.node, self.value_at(at.node, epoch)?)
     }
 
@@ -1545,13 +1548,19 @@ impl Graph {
     pub fn get<T: CalcType>(&self, node: impl Handle<T>) -> Result<T, CalcError> {
         let at = node.node_ref();
         self.check_ref(at)?;
-        if !self.is_calculated(at.node) && !self.is_input(at.node) {
-            return Err(CalcError::Invalid(format!(
-                "{:?} is not being calculated: nothing that is watched uses it",
-                self.name(at.node)
-            )));
-        }
+        self.check_calculated(at.node)?;
         self.typed(at.node, &self.values[at.node.index()])
+    }
+
+    /// Refuses a calculated node that pull mode is not keeping up to date.
+    fn check_calculated(&self, id: NodeId) -> Result<(), CalcError> {
+        if self.is_calculated(id) || self.is_input(id) {
+            return Ok(());
+        }
+        Err(CalcError::Invalid(format!(
+            "{:?} is not being calculated: nothing that is watched uses it",
+            self.name(id)
+        )))
     }
 
     fn typed<T: CalcType>(&self, id: NodeId, value: &Value) -> Result<T, CalcError> {
@@ -1568,7 +1577,10 @@ impl Graph {
         }
     }
 
-    /// The node's value, untyped.
+    /// The node's value as it is stored, untyped. In pull mode, a node
+    /// that is not being calculated holds an old value here; ask
+    /// [`is_calculated`](Self::is_calculated) first, or use
+    /// [`get`](Self::get), which refuses.
     pub fn value(&self, id: NodeId) -> &Value {
         &self.values[id.index()]
     }
