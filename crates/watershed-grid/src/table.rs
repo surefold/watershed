@@ -1859,11 +1859,13 @@ impl Table {
                 c.name
             ));
         }
-        if let Some(group) = self.groups.iter().find(|g| g.key == key)
-            && !self.filter_on
-            && c.agg != Agg::None
-            && self.failed_group(by, &self.sorted[group.start..group.start + group.len])
-        {
+        let failed = self.groups.iter().find(|g| {
+            g.key == key
+                && !self.filter_on
+                && c.agg != Agg::None
+                && self.failed_group(by, &self.sorted[g.start..g.start + g.len])
+        });
+        if let Some(group) = failed {
             return Ok(format!(
                 "The {} of {} over this group's {} rows, added up by the grid.\n\n\
                  These are the rows where {} could not be worked out, and the graph\n\
