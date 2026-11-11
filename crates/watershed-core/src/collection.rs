@@ -35,13 +35,19 @@
 //!
 //! Each row is a set of ordinary nodes: an input per field, a node per
 //! column, and a `bool` input saying whether the row is present. A removed
-//! row is marked absent and its nodes are reused by the next new row, so a
-//! collection's graph grows only to its largest size. Totals are aggregates
+//! row is marked absent and its nodes are reused by the next new row, so a collection's graph grows only to its
+//! largest size. Totals are aggregates
 //! (see [`Graph::aggregate`]), which update by only the rows that changed and
 //! give exactly the result of adding everything up from scratch.
 //!
 //! Like [`Graph::set`], changes to rows take effect at the next
 //! [`Graph::stabilize`].
+//!
+//! With the graph's history on ([`Graph::keep_history`]), a row can be read
+//! as it was at an earlier update: [`Collection::get_at`],
+//! [`Collection::contains_at`] and [`Collection::keys_at`]. While history is
+//! on, the collection notes which key each reused row's nodes held, so a
+//! key is followed from one row's nodes to another's.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -156,6 +162,14 @@ struct Slot {
     columns: Vec<NodeId>,
 }
 
+/// A change of the key in a slot.
+struct KeyChange {
+    /// The update from which the slot has its next key.
+    from: u64,
+    /// The key before that.
+    before: String,
+}
+
 /// What a total adds up: a field, a column, or (for a count) presence.
 #[derive(Clone, Copy)]
 enum Target {
@@ -172,6 +186,16 @@ pub struct Collection {
     columns: Vec<ColumnDef>,
     slots: Vec<Slot>,
     keys: HashMap<String, usize>,
+    /// For each key, the slots it held before the one it holds now (if
+    /// any), so it can be found at earlier updates.
+    past_slots: HashMap<String, Vec<usize>>,
+    /// For each slot whose key has changed, the changes still within
+    /// history, oldest first.
+    key_changes: HashMap<usize, Vec<KeyChange>>,
+    /// The update before which `past_slots` and `key_changes` were last
+    /// written. While history is off they hold only changes since then, in
+    /// case history starts before the next update.
+    recorded_at: u64,
     free: Vec<usize>,
     totals: Vec<(NodeId, Target)>,
     groupings: Vec<Grouping>,
@@ -234,6 +258,9 @@ impl Collection {
             columns: Vec::new(),
             slots: Vec::new(),
             keys: HashMap::new(),
+            past_slots: HashMap::new(),
+            key_changes: HashMap::new(),
+            recorded_at: 0,
             free: Vec::new(),
             totals: Vec::new(),
             groupings: Vec::new(),
@@ -487,6 +514,12 @@ impl Collection {
         let Some(slot) = self.keys.remove(key) else {
             return Ok(false);
         };
+        self.start_recording(g);
+        self.past_slots
+            .entry(key.to_string())
+            .or_default()
+            .push(slot);
+        self.key_changed(g, slot, key.to_string());
         g.set_value(self.slots[slot].present, Value::Bool(false))?;
         self.free.push(slot);
         for grouping in &mut self.groupings {
@@ -875,6 +908,148 @@ impl Collection {
             .get(key)
             .ok_or_else(|| CalcError::Invalid(format!("{} has no row {key:?}", self.name)))?;
         Ok(g.value(self.member(slot, Target::Placeholder(*r))).clone())
+    }
+
+    // ---------------------------------------------------------------- history
+
+    /// A row's field or column as of the end of update `epoch`, read from the
+    /// graph's history (see [`Graph::keep_history`]).
+    pub fn get_at<T: CalcType>(
+        &self,
+        g: &Graph,
+        key: &str,
+        of: impl Part<T>,
+        epoch: u64,
+    ) -> Result<T, CalcError> {
+        self.check_graph(g)?;
+        g.history_covering(epoch)?;
+        let slot = self.slot_at(g, key, epoch)?;
+        let id = self.member(slot, Target::Placeholder(of.placeholder()));
+        g.get_at(Node::<T>::new(g.node_ref(id)), epoch)
+    }
+
+    /// [`get_at`](Self::get_at) through the untyped API.
+    pub fn get_value_at(
+        &self,
+        g: &Graph,
+        key: &str,
+        of: &Ir,
+        epoch: u64,
+    ) -> Result<Value, CalcError> {
+        self.check_graph(g)?;
+        g.history_covering(epoch)?;
+        let (Ir::Ref(r), Some(_)) = (of, self.part_type(of)) else {
+            return Err(CalcError::Invalid(format!(
+                "not a field or column of {}",
+                self.name
+            )));
+        };
+        let slot = self.slot_at(g, key, epoch)?;
+        Ok(
+            g.value_at(self.member(slot, Target::Placeholder(*r)), epoch)?
+                .clone(),
+        )
+    }
+
+    /// Whether the collection had a row with this key at the end of update
+    /// `epoch`.
+    pub fn contains_at(&self, g: &Graph, key: &str, epoch: u64) -> Result<bool, CalcError> {
+        self.check_graph(g)?;
+        g.history_covering(epoch)?;
+        match self.slot_at(g, key, epoch) {
+            Ok(_) => Ok(true),
+            Err(CalcError::Invalid(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The keys of the rows at the end of update `epoch`, in order.
+    pub fn keys_at(&self, g: &Graph, epoch: u64) -> Result<Vec<String>, CalcError> {
+        self.check_graph(g)?;
+        g.history_covering(epoch)?;
+        let mut now: Vec<Option<&str>> = vec![None; self.slots.len()];
+        for (key, &slot) in &self.keys {
+            now[slot] = Some(key);
+        }
+        let mut keys = Vec::new();
+        for (slot, key) in now.into_iter().enumerate() {
+            if self.present_at(g, slot, epoch)? {
+                if let Some(key) = self.key_at(slot, epoch, key) {
+                    keys.push(key.to_string());
+                }
+            }
+        }
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// Whether the row in `slot` was present at update `epoch` (false if the
+    /// slot was made later).
+    fn present_at(&self, g: &Graph, slot: usize, epoch: u64) -> Result<bool, CalcError> {
+        match g.value_at(self.slots[slot].present, epoch) {
+            Ok(v) => Ok(matches!(v, Value::Bool(true))),
+            Err(CalcError::NotCreatedYet { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The key `slot` had at update `epoch`, given the key it has now: the
+    /// key before its first change after that update, or the key it has now.
+    fn key_at<'a>(&'a self, slot: usize, epoch: u64, now: Option<&'a str>) -> Option<&'a str> {
+        match self
+            .key_changes
+            .get(&slot)
+            .and_then(|changes| changes.iter().find(|c| c.from > epoch))
+        {
+            Some(change) => Some(&change.before),
+            None => now,
+        }
+    }
+
+    /// Records that `slot` is about to stop having the key `before`, from the
+    /// next update. (Reusing a free slot needs no record: it is absent until
+    /// then, and an absent slot's key never matters.)
+    fn key_changed(&mut self, g: &Graph, slot: usize, before: String) {
+        self.start_recording(g);
+        let latest = g.epoch();
+        let oldest = g.history_range().map_or(latest, |(oldest, _)| oldest);
+        let changes = self.key_changes.entry(slot).or_default();
+        // Changes no update in history can be before are not needed.
+        let forgotten = changes.iter().take_while(|c| c.from <= oldest).count();
+        changes.drain(..forgotten);
+        let from = latest + 1;
+        // Several changes before one update: what counts is the key before the first.
+        if changes.last().is_none_or(|c| c.from != from) {
+            changes.push(KeyChange { from, before });
+        }
+    }
+
+    /// Before recording a change: while history is off, only changes since
+    /// the last update can ever be asked about (if history starts before the
+    /// next one), so older ones are dropped.
+    fn start_recording(&mut self, g: &Graph) {
+        if g.history_range().is_none() && self.recorded_at < g.epoch() {
+            self.past_slots.clear();
+            self.key_changes.clear();
+        }
+        self.recorded_at = g.epoch();
+    }
+
+    /// The slot that held `key` at update `epoch`: the one it holds now, or
+    /// one it held before.
+    fn slot_at(&self, g: &Graph, key: &str, epoch: u64) -> Result<usize, CalcError> {
+        let now = self.keys.get(key).copied();
+        let before = self.past_slots.get(key).map_or(&[][..], Vec::as_slice);
+        for slot in now.into_iter().chain(before.iter().rev().copied()) {
+            let current = (now == Some(slot)).then_some(key);
+            if self.present_at(g, slot, epoch)? && self.key_at(slot, epoch, current) == Some(key) {
+                return Ok(slot);
+            }
+        }
+        Err(CalcError::Invalid(format!(
+            "{} had no row {key:?} at update {epoch}",
+            self.name
+        )))
     }
 
     /// The node for a row's field or column (given by its placeholder);

@@ -1277,17 +1277,10 @@ impl Graph {
     /// A node made between updates does not exist until the next update
     /// finishes. Changes recorded by `set` and not yet applied are not seen.
     pub fn value_at(&self, id: NodeId, epoch: u64) -> Result<&Value, CalcError> {
-        let history = self.history.as_ref().ok_or(CalcError::HistoryOff)?;
+        let history = self.history_covering(epoch)?;
         let i = id.index();
         if i >= self.hot.len() {
             return Err(CalcError::UnknownNode(id));
-        }
-        if epoch < history.oldest() || epoch > self.epoch {
-            return Err(CalcError::EpochUnavailable {
-                epoch,
-                oldest: history.oldest(),
-                latest: self.epoch,
-            });
         }
         if !history.existed(i, epoch) {
             return Err(CalcError::NotCreatedYet {
@@ -1299,6 +1292,19 @@ impl Graph {
             return Ok(&self.values[i]);
         }
         Ok(history.value(i, epoch))
+    }
+
+    /// The history, if it is on and covers update `epoch`; otherwise why not.
+    pub(crate) fn history_covering(&self, epoch: u64) -> Result<&History, CalcError> {
+        let history = self.history.as_ref().ok_or(CalcError::HistoryOff)?;
+        if epoch < history.oldest() || epoch > self.epoch {
+            return Err(CalcError::EpochUnavailable {
+                epoch,
+                oldest: history.oldest(),
+                latest: self.epoch,
+            });
+        }
+        Ok(history)
     }
 
     /// The node's value as of the end of update `epoch`, or why it has none.

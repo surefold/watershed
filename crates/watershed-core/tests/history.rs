@@ -272,3 +272,98 @@ fn a_collection_total_reads_as_it_was_before_rows_changed() -> Result {
     );
     Ok(())
 }
+
+#[test]
+fn a_row_reads_as_it_was_before_it_changed_or_was_removed() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    let doubled = orders.column(&mut g, "doubled", qty * 2.0)?;
+    g.keep_history(u64::MAX);
+
+    orders.upsert(&mut g, "a", &[qty.is(1.0)])?;
+    g.stabilize();
+    orders.upsert(&mut g, "a", &[qty.is(5.0)])?;
+    g.stabilize();
+    orders.remove(&mut g, "a")?;
+    g.stabilize();
+
+    assert!(!orders.contains_at(&g, "a", 0)?);
+    assert_eq!(orders.get_at(&g, "a", qty, 1)?, 1.0);
+    assert_eq!(orders.get_at(&g, "a", doubled, 2)?, 10.0);
+    assert!(!orders.contains_at(&g, "a", 3)?);
+    assert!(matches!(
+        orders.get_at(&g, "a", qty, 3),
+        Err(CalcError::Invalid(_))
+    ));
+    assert_eq!(orders.keys_at(&g, 2)?, ["a"].map(String::from).to_vec());
+    Ok(())
+}
+
+#[test]
+fn a_reused_row_belongs_to_its_new_key_from_the_update_that_reused_it() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    g.keep_history(u64::MAX);
+
+    orders.upsert(&mut g, "old", &[qty.is(1.0)])?;
+    g.stabilize();
+    orders.remove(&mut g, "old")?;
+    orders.upsert(&mut g, "new", &[qty.is(2.0)])?; // takes the same row's nodes
+    g.stabilize();
+    orders.upsert(&mut g, "old", &[qty.is(3.0)])?; // back, in a row of its own
+    g.stabilize();
+
+    assert_eq!(orders.keys_at(&g, 1)?, ["old"].map(String::from).to_vec());
+    assert_eq!(orders.keys_at(&g, 2)?, ["new"].map(String::from).to_vec());
+    assert_eq!(orders.get_at(&g, "old", qty, 1)?, 1.0);
+    assert_eq!(orders.get_at(&g, "new", qty, 2)?, 2.0);
+    assert_eq!(orders.get_at(&g, "old", qty, 3)?, 3.0);
+    assert!(!orders.contains_at(&g, "old", 2)?);
+    Ok(())
+}
+
+#[test]
+fn rows_changed_just_before_history_starts_read_as_they_were() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    orders.upsert(&mut g, "old", &[qty.is(1.0)])?;
+    g.stabilize();
+
+    // Made while history is off, counting from the next update.
+    orders.remove(&mut g, "old")?;
+    orders.upsert(&mut g, "new", &[qty.is(2.0)])?; // the same row's nodes
+    g.keep_history(u64::MAX);
+    g.stabilize();
+
+    assert_eq!(orders.keys_at(&g, 1)?, ["old"].map(String::from).to_vec());
+    assert_eq!(orders.get_at(&g, "old", qty, 1)?, 1.0);
+    assert_eq!(orders.keys_at(&g, 2)?, ["new"].map(String::from).to_vec());
+    Ok(())
+}
+
+#[test]
+fn an_empty_collection_still_says_when_an_update_cannot_be_read() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    assert_eq!(orders.keys_at(&g, 0), Err(CalcError::HistoryOff));
+    assert_eq!(orders.contains_at(&g, "a", 0), Err(CalcError::HistoryOff));
+
+    g.keep_history(0);
+    g.stabilize();
+    let forgotten = |r: std::result::Result<_, CalcError>| {
+        matches!(r, Err(CalcError::EpochUnavailable { epoch: 0, .. }))
+    };
+    assert!(forgotten(orders.keys_at(&g, 0).map(|_| ())));
+    assert!(forgotten(orders.contains_at(&g, "a", 0).map(|_| ())));
+    assert!(forgotten(orders.get_at(&g, "a", qty, 0).map(|_| ())));
+    assert!(matches!(
+        orders.keys_at(&g, 2),
+        Err(CalcError::EpochUnavailable { .. })
+    ));
+    assert_eq!(orders.keys_at(&g, 1)?, Vec::<String>::new());
+    Ok(())
+}

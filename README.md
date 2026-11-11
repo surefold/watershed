@@ -79,6 +79,29 @@ on 1,000 rows in 10 groups, a move recalculates 4 nodes.
 Calculations are typed. `qty + region` (a number plus a string) does not
 compile, and neither does setting a calculated node.
 
+### Earlier values
+
+With history on, any node, or any row of a collection, can be read as it was
+at the end of an earlier update:
+
+```rust
+g.keep_history(1_000);                      // the latest update and the 1,000 before it
+g.get_at(total, 41)?;                       // `total` after update 41
+orders.get_at(&g, "o-1042", line, 41)?;     // a row's column then
+orders.keys_at(&g, 41)?;                    // the rows there were
+```
+
+An update moves each value it overwrites into a chain for that node, 32
+bytes each, and a value that comes out the same is never recorded. On a
+million nodes with one price changing per update, that is about 1,300
+values and 43 KB per update. A collection also notes which key each
+reused row held, so history follows a key as removed rows are reused.
+
+To keep changes beyond the process, `g.attach_sink(...)` hands each
+update's changes to a `ChangeSink`. `crates/watershed-parquet` is one that
+writes them to Parquet files on a background thread, about 10 bytes per
+change.
+
 ## From Python
 
 `crates/watershed-py` is a Python package with the same engine, built with
@@ -360,11 +383,14 @@ crates/watershed-core/
   src/graph.rs    the graph and the incremental update (stabilize)
   src/aggregate.rs  totals over many nodes, kept as a tree of partial results
   src/collection.rs keyed tables of rows with columns and totals
+  src/history.rs  values overwritten by updates, for reading earlier ones
+  src/sink.rs     passing each update's changes outside the graph
   src/error.rs    errors
   tests/          behaviour and property tests
   examples/       tour and benchmark
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
 crates/watershed-web/   the engine as WebAssembly, with three example models
+crates/watershed-parquet/ an update's changes written to Parquet files
 crates/watershed-grid/  a data grid as WebAssembly: rows, formulas, totals, filter, sort, group
 web/                    the interactive page and its build script
 web/grid/               the grid's page, the script that draws it, and the chart of group totals
@@ -381,6 +407,8 @@ web/grid/               the grid's page, the script that draws it, and the chart
 - **Removing nodes** in general (collections reuse rows instead, and build
   files redefine a removed value as a constant), and **pull mode** (only
   calculating what someone is watching).
-- **Time travel and full lineage** (values as of an earlier update).
+- **More time travel:** restoring an earlier update, `explain` and formulas
+  as of an earlier update (full lineage), a collection's groups as of an
+  earlier update, and a sink that writes to S3.
 - **Bindings** for the JVM, a formula parser for end users, publishing the
   Python package, and the cluster.
