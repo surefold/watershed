@@ -22,6 +22,10 @@
 //! (`input_value`, `define_expression`...) so that the typed layer can have
 //! the good ones.
 //!
+//! Numbers that cross are signed (`i32`, `i64`) even where they are never
+//! negative: Kotlin's unsigned types have names on the JVM that Scala and
+//! Java cannot call comfortably.
+//!
 //! `examples/kotlin` is a project that builds this library, generates the
 //! Kotlin and runs it.
 
@@ -177,7 +181,7 @@ fn fitted(value: watershed_core::Value, ty: Type) -> watershed_core::Value {
 pub enum Op {
     /// A node of the graph.
     Node {
-        node: u32,
+        node: i32,
     },
     /// A field or column of the collection the expression is for.
     Part {
@@ -198,11 +202,11 @@ pub enum Op {
     If,
     /// Takes an index and this many options.
     Choose {
-        options: u32,
+        options: i32,
     },
     /// Takes this many strings and makes a list of them.
     Texts {
-        items: u32,
+        items: i32,
     },
 }
 
@@ -251,7 +255,7 @@ pub enum BinaryOp {
 /// the types when a node or column is made from the result.
 fn expression(
     ops: &[Op],
-    node: &dyn Fn(u32) -> Result<Ir>,
+    node: &dyn Fn(i32) -> Result<Ir>,
     part: &dyn Fn(&str) -> Result<Ir>,
 ) -> Result<Ir> {
     fn take(stack: &mut Vec<Ir>) -> Result<Arc<Ir>> {
@@ -260,7 +264,7 @@ fn expression(
             None => refused("the expression is missing a value"),
         }
     }
-    fn take_many(stack: &mut Vec<Ir>, count: u32) -> Result<Vec<Arc<Ir>>> {
+    fn take_many(stack: &mut Vec<Ir>, count: i32) -> Result<Vec<Arc<Ir>>> {
         let mut items = (0..count)
             .map(|_| take(stack))
             .collect::<Result<Vec<_>>>()?;
@@ -335,13 +339,13 @@ fn expression(
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Report {
     /// This update's number; the first is 1.
-    pub update: u64,
+    pub update: i64,
     /// Inputs whose value actually changed.
-    pub inputs_changed: u64,
+    pub inputs_changed: i64,
     /// Calculated nodes that were recalculated.
-    pub recalculated: u64,
+    pub recalculated: i64,
     /// Of those, how many came out with a different value.
-    pub changed: u64,
+    pub changed: i64,
 }
 
 /// The engine's graph, and the nodes that have been handed to the JVM.
@@ -352,24 +356,27 @@ pub struct Report {
 struct State {
     graph: watershed_core::Graph,
     handed_out: Vec<NodeId>,
-    numbers: HashMap<NodeId, u32>,
+    numbers: HashMap<NodeId, i32>,
 }
 
 impl State {
     /// The number the JVM knows this node by.
-    fn number(&mut self, id: NodeId) -> u32 {
+    fn number(&mut self, id: NodeId) -> i32 {
         if let Some(&number) = self.numbers.get(&id) {
             return number;
         }
-        let number = u32::try_from(self.handed_out.len()).expect("too many nodes handed out");
+        let number = i32::try_from(self.handed_out.len()).expect("too many nodes handed out");
         self.handed_out.push(id);
         self.numbers.insert(id, number);
         number
     }
 
     /// The node the JVM means by this number.
-    fn node(&self, number: u32) -> Result<NodeId> {
-        match self.handed_out.get(number as usize) {
+    fn node(&self, number: i32) -> Result<NodeId> {
+        let found = usize::try_from(number)
+            .ok()
+            .and_then(|at| self.handed_out.get(at));
+        match found {
             Some(&id) => Ok(id),
             None => refused(format!("there is no node {number}")),
         }
@@ -417,7 +424,7 @@ impl Graph {
     }
 
     /// Adds an input with a starting value. Returns the node's number.
-    pub fn input_value(&self, name: String, value: Value) -> Result<u32> {
+    pub fn input_value(&self, name: String, value: Value) -> Result<i32> {
         let mut g = self.lock();
         let id = g.input_value(&name, value.to_core()?)?;
         Ok(g.number(id))
@@ -426,14 +433,14 @@ impl Graph {
     /// Adds a calculated node from a formula such as `qty * price * 1.2`.
     /// A name in it is the node of that name; a name with spaces or
     /// punctuation goes between backticks.
-    pub fn define_formula(&self, name: String, formula: String) -> Result<u32> {
+    pub fn define_formula(&self, name: String, formula: String) -> Result<i32> {
         let mut g = self.lock();
         let id = g.define_formula(&name, &formula)?;
         Ok(g.number(id))
     }
 
     /// Adds a calculated node from an expression. Returns the node's number.
-    pub fn define_expression(&self, name: String, ops: Vec<Op>) -> Result<u32> {
+    pub fn define_expression(&self, name: String, ops: Vec<Op>) -> Result<i32> {
         let mut g = self.lock();
         let ir = expression(&ops, &|number| Ok(g.reference(g.node(number)?)), &|name| {
             refused(format!(
@@ -445,7 +452,7 @@ impl Graph {
     }
 
     /// Records a new value for an input; it counts from the next `stabilize`.
-    pub fn set_value(&self, node: u32, value: Value) -> Result<()> {
+    pub fn set_value(&self, node: i32, value: Value) -> Result<()> {
         let mut g = self.lock();
         let id = g.node(node)?;
         let value = fitted(value.to_core()?, g.node_type(id));
@@ -457,15 +464,15 @@ impl Graph {
     pub fn stabilize(&self) -> Report {
         let report = self.lock().stabilize();
         Report {
-            update: report.epoch,
-            inputs_changed: report.inputs_changed as u64,
-            recalculated: report.recalculated as u64,
-            changed: report.changed as u64,
+            update: report.epoch as i64,
+            inputs_changed: report.inputs_changed as i64,
+            recalculated: report.recalculated as i64,
+            changed: report.changed as i64,
         }
     }
 
     /// The node's value as of the last update.
-    pub fn value(&self, node: u32) -> Result<Value> {
+    pub fn value(&self, node: i32) -> Result<Value> {
         let g = self.lock();
         let id = g.node(node)?;
         if g.is_removed(id) {
@@ -480,26 +487,104 @@ impl Graph {
         Ok(Value::from_core(g.value(id)))
     }
 
+    /// Records a new value for a number input. The same as `set_value`,
+    /// but a plain number crosses into the engine far faster than a
+    /// [`Value`] does, and this is the call a feed of prices makes.
+    pub fn set_number(&self, node: i32, value: f64) -> Result<()> {
+        let mut g = self.lock();
+        let id = g.node(node)?;
+        Ok(g.set_value(id, watershed_core::Value::F64(value))?)
+    }
+
+    /// Records new values for many number inputs in one call.
+    pub fn set_numbers(&self, nodes: Vec<i32>, values: Vec<f64>) -> Result<()> {
+        if nodes.len() != values.len() {
+            return refused(format!(
+                "{} nodes were given {} values",
+                nodes.len(),
+                values.len()
+            ));
+        }
+        let mut g = self.lock();
+        for (node, value) in nodes.into_iter().zip(values) {
+            let id = g.node(node)?;
+            g.set_value(id, watershed_core::Value::F64(value))?;
+        }
+        Ok(())
+    }
+
+    /// A number node's value as of the last update. The fast way to read a
+    /// number; a node that could not be calculated is refused with why.
+    pub fn number(&self, node: i32) -> Result<f64> {
+        let g = self.lock();
+        let id = g.node(node)?;
+        if g.is_removed(id) {
+            return refused(format!("{:?} has been removed", g.name(id)));
+        }
+        if !g.is_calculated(id) && !g.is_input(id) {
+            return refused(format!(
+                "{:?} is not being calculated: nothing that is watched uses it",
+                g.name(id)
+            ));
+        }
+        match g.value(id) {
+            watershed_core::Value::F64(x) => Ok(*x),
+            watershed_core::Value::Error(why) => {
+                refused(format!("{} could not be calculated: {why}", g.name(id)))
+            }
+            other => refused(format!("{:?} holds {other}, not a number", g.name(id))),
+        }
+    }
+
+    /// Adds many calculated nodes in one call, in order (a later one can
+    /// use an earlier one). Returns their numbers. If one is refused, those
+    /// before it stay.
+    pub fn define_expressions(
+        &self,
+        names: Vec<String>,
+        expressions: Vec<Vec<Op>>,
+    ) -> Result<Vec<i32>> {
+        if names.len() != expressions.len() {
+            return refused(format!(
+                "{} names were given {} expressions",
+                names.len(),
+                expressions.len()
+            ));
+        }
+        let mut g = self.lock();
+        let mut numbers = Vec::with_capacity(names.len());
+        for (name, ops) in names.iter().zip(&expressions) {
+            let ir = expression(ops, &|number| Ok(g.reference(g.node(number)?)), &|part| {
+                refused(format!(
+                    "{part:?} is part of a collection's rows, and can only be used in its columns"
+                ))
+            })?;
+            let id = g.define_ir(name, ir)?;
+            numbers.push(g.number(id));
+        }
+        Ok(numbers)
+    }
+
     /// Why the node has its value, as a tree of what it was worked out from.
-    pub fn explain(&self, node: u32) -> Result<String> {
+    pub fn explain(&self, node: i32) -> Result<String> {
         let g = self.lock();
         Ok(g.explain_node(g.node(node)?))
     }
 
     /// What the node holds.
-    pub fn kind(&self, node: u32) -> Result<Kind> {
+    pub fn kind(&self, node: i32) -> Result<Kind> {
         let g = self.lock();
         Ok(Kind::of(g.node_type(g.node(node)?)))
     }
 
     /// The node with this name, if there is one.
-    pub fn find(&self, name: String) -> Option<u32> {
+    pub fn find(&self, name: String) -> Option<i32> {
         let mut g = self.lock();
         g.find(&name).map(|id| g.number(id))
     }
 
     /// The node's name.
-    pub fn name(&self, node: u32) -> Result<String> {
+    pub fn name(&self, node: i32) -> Result<String> {
         let g = self.lock();
         Ok(g.name(g.node(node)?).to_string())
     }
@@ -514,26 +599,26 @@ impl Graph {
     }
 
     /// How many nodes the graph has had.
-    pub fn size(&self) -> u64 {
-        self.lock().len() as u64
+    pub fn size(&self) -> i64 {
+        self.lock().len() as i64
     }
 
     /// Removes a node that nothing uses; its name is then free.
-    pub fn remove(&self, node: u32) -> Result<()> {
+    pub fn remove(&self, node: i32) -> Result<()> {
         let mut g = self.lock();
         let id = g.node(node)?;
         Ok(g.remove_node(id)?)
     }
 
     /// Watches a node: in pull mode, it and what it uses are kept up to date.
-    pub fn watch(&self, node: u32) -> Result<()> {
+    pub fn watch(&self, node: i32) -> Result<()> {
         let mut g = self.lock();
         let id = g.node(node)?;
         Ok(g.watch_node(id)?)
     }
 
     /// Stops watching a node.
-    pub fn unwatch(&self, node: u32) -> Result<()> {
+    pub fn unwatch(&self, node: i32) -> Result<()> {
         let mut g = self.lock();
         let id = g.node(node)?;
         g.unwatch_node(id);
@@ -579,7 +664,7 @@ impl Collection {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn total(&self, name: &str, op: AggregateOp, of: Option<&str>) -> Result<u32> {
+    fn total(&self, name: &str, op: AggregateOp, of: Option<&str>) -> Result<i32> {
         // The graph first, then the collection, everywhere: one order, so
         // two threads can never each hold what the other is waiting for.
         let mut g = self.graph.lock();
@@ -639,22 +724,22 @@ impl Collection {
     }
 
     /// A total: the sum of a field or column over the rows. Returns its node.
-    pub fn add_sum(&self, name: String, of: String) -> Result<u32> {
+    pub fn add_sum(&self, name: String, of: String) -> Result<i32> {
         self.total(&name, AggregateOp::Sum, Some(&of))
     }
 
     /// The smallest value of a field or column. Returns its node.
-    pub fn add_min(&self, name: String, of: String) -> Result<u32> {
+    pub fn add_min(&self, name: String, of: String) -> Result<i32> {
         self.total(&name, AggregateOp::Min, Some(&of))
     }
 
     /// The largest value of a field or column. Returns its node.
-    pub fn add_max(&self, name: String, of: String) -> Result<u32> {
+    pub fn add_max(&self, name: String, of: String) -> Result<i32> {
         self.total(&name, AggregateOp::Max, Some(&of))
     }
 
     /// How many rows there are. Returns its node.
-    pub fn add_count(&self, name: String) -> Result<u32> {
+    pub fn add_count(&self, name: String) -> Result<i32> {
         self.total(&name, AggregateOp::Count, None)
     }
 
@@ -696,7 +781,7 @@ impl Collection {
     }
 
     /// How many rows there are, counting changes since the last update.
-    pub fn size(&self) -> u64 {
-        self.lock().len() as u64
+    pub fn size(&self) -> i64 {
+        self.lock().len() as i64
     }
 }
