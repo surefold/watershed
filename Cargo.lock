@@ -916,6 +916,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "watershed-grid"
+version = "0.1.0"
+dependencies = [
+ "wasm-bindgen",
+ "watershed-core",
+]
+
+[[package]]
 name = "watershed-parquet"
 version = "0.1.0"
 dependencies = [

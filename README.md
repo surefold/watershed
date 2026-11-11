@@ -129,6 +129,65 @@ web/build.sh
 python3 -m http.server -d web/dist 8000             # then open http://localhost:8000
 ```
 
+## A data grid
+
+`crates/watershed-grid` is a data grid on the engine, compiled to
+WebAssembly: `web/build.sh` also builds it. It is the "Data grid" tab of
+the page above (http://localhost:8000/#grid), and a page of its own at
+http://localhost:8000/grid/.
+
+Rows are a collection, so every cell is a node. Calculated columns are
+formulas typed as text (`qty * (mark - price)`, `if(side == "Buy", 1, -1)`),
+and the totals in the bottom row and in each group's row are aggregates.
+Editing a cell recalculates that row's formulas and the totals they feed: on
+100,000 rows, a handful of nodes out of 1.1 million. Filtering (`>100`, `5..10`, `=Rates`),
+sorting by several columns and grouping happen in Rust too; the page asks
+only for the lines in view and draws those, so 100,000 rows scroll like 50.
+A stream of 100 price changes per frame takes about 1 ms to apply and
+redraw, and the view is filtered and sorted again only when a change
+touches a column it reads.
+
+```js
+import init, { Grid } from "./pkg/watershed_grid.js";
+import { WatershedGrid } from "./grid.js";
+
+await init();
+const grid = new Grid();
+grid.add_field("region", "text", "none");
+grid.add_field("qty", "number", "sum");
+grid.add_field("price", "number", "none");
+grid.add_formula("line", "qty * price", "sum");
+grid.upsert("o-1", ["EU", "2", "10"]);
+
+const view = new WatershedGrid(document.querySelector("#grid"), grid);
+grid.set_cell("o-1", 1, "5");
+view.refresh();                 // recalculates o-1's line and two totals
+grid.explain("o-1", 3);         // why line is 50
+```
+
+Totals are a sum, average, minimum, maximum or count. With
+`grid.keep_history(120)`, a column can draw how each cell, group total and
+total moved over the last updates beside its number: the engine already
+keeps the values an update overwrites, so the grid stores nothing extra.
+`web/grid/chart.js` draws each group's total as a bar, straight from the
+group nodes, so it follows a stream of prices without adding anything up.
+
+Columns can be dragged into a new order, pinned to the left, hidden and
+resized, from each header and its menu. Rows can arrive as the person
+scrolls: give the view a `loadMore` function that adds the next block and
+says whether there may be more. Rows loaded that way are ordinary rows, so
+sorting, filters and totals cover everything loaded so far.
+
+With history kept, `grid.set_as_of(update)` shows the whole grid as it was
+after an earlier update: cells, totals, which rows pass the filters and
+their order. Nothing can be changed until it is back at now.
+
+A text column's filter can name several values (`=Rates|FX`); the column's
+menu lists its values to tick.
+
+While a filter is on, totals are of the rows that pass it, added up the
+plain way; the graph's totals are of every row.
+
 ## Seeing what it does
 
 ```bash
@@ -285,7 +344,9 @@ crates/watershed-core/
   examples/       tour and benchmark
 crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
 crates/watershed-web/   the engine as WebAssembly, with three example models
+crates/watershed-grid/  a data grid as WebAssembly: rows, formulas, totals, filter, sort, group
 web/                    the interactive page and its build script
+web/grid/               the grid's page, the script that draws it, and the chart of group totals
 ```
 
 ## Not done yet
