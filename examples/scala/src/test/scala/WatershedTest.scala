@@ -153,6 +153,31 @@ class WatershedTest extends munit.FunSuite:
     assertEquals(g(total), 9940.0)
     g.checkConsistency()
 
+  test("the direct calls and the generated ones give the same answers"):
+    val g = Graph()
+    val a = g.input("a", 1.0)
+    val b = g.input("b", 0L)
+    val half = g.define("half", a / 2.0)
+    val broken = g.define("broken", (1L / b).toDecimal)
+    val nan = g.define("nan", a - a + Double.NaN)
+
+    g(a) = 5.0
+    val report = g.stabilize()
+    assertEquals(report.inputsChanged, 1L)
+    assertEquals(report.recalculated, 2L)
+    assertEquals(g(half), 2.5)
+
+    // What the direct call cannot answer, the generated one does.
+    assert(g(nan).isNaN)
+    assert(intercept[WatershedException](g(broken)).getMessage.contains("division by zero"))
+
+    // A node of another graph is refused rather than read as this one's.
+    val other = Graph()
+    val theirs = other.input("theirs", 9.0)
+    intercept[WatershedException](g(theirs))
+    intercept[WatershedException](g(theirs) = 1.0)
+    g.checkConsistency()
+
   test("in pull mode only what is watched is calculated"):
     val g = Graph()
     val a = g.input("a", 1.0)

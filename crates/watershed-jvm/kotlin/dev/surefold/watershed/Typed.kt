@@ -29,14 +29,14 @@ import java.math.RoundingMode
 open class Expr<T> internal constructor(internal val ops: List<Op>)
 
 /** A node of a graph holding a [T]. */
-open class Node<T> internal constructor(val id: Int) : Expr<T>(listOf(Op.Node(id))) {
-    override fun equals(other: Any?) = other is Node<*> && other.id == id
+open class Node<T> internal constructor(internal val graph: Graph, val id: Int) : Expr<T>(listOf(Op.Node(id))) {
+    override fun equals(other: Any?) = other is Node<*> && other.graph === graph && other.id == id
     override fun hashCode() = id.hashCode()
     override fun toString() = "Node($id)"
 }
 
 /** An input: a node that can be set. */
-class Input<T> internal constructor(id: Int) : Node<T>(id)
+class Input<T> internal constructor(graph: Graph, id: Int) : Node<T>(graph, id)
 
 /** A field or calculated column of a collection's rows, holding a [T] in each row. */
 open class Part<T> internal constructor(val name: String) : Expr<T>(listOf(Op.Part(name)))
@@ -81,79 +81,145 @@ fun <T : Any> value(value: T): Expr<T> = constant(value)
 
 // ------------------------------------------------------------------- graph
 
-fun Graph.input(name: String, value: Double): Input<Double> = Input(inputValue(name, Value.Number(value)))
-fun Graph.input(name: String, value: Long): Input<Long> = Input(inputValue(name, Value.Whole(value)))
-fun Graph.input(name: String, value: BigDecimal): Input<BigDecimal> = Input(inputValue(name, valueOf(value)))
-fun Graph.input(name: String, value: Boolean): Input<Boolean> = Input(inputValue(name, Value.Flag(value)))
-fun Graph.input(name: String, value: String): Input<String> = Input(inputValue(name, Value.Text(value)))
+/** A graph of inputs and calculated nodes. */
+class Graph {
+    internal val raw = RawGraph()
 
-/** Adds a calculated node. */
-fun <T> Graph.define(name: String, expression: Expr<T>): Node<T> = Node(defineExpression(name, expression.ops))
+    // Where the graph is, for the direct calls in Fast. Good while `raw` is alive, which this object sees to.
+    private val address: Long = raw.address()
 
-/** Records a new value for an input; it counts from the next `stabilize()`. */
-operator fun <T : Any> Graph.set(input: Input<T>, value: T) = setValue(input.id, valueOf(value))
+    private fun <N : Node<*>> mine(node: N): N {
+        if (node.graph !== this) throw WatershedException.Refused("that node belongs to another graph")
+        return node
+    }
 
-@JvmName("setNumberToWhole")
-operator fun Graph.set(input: Input<Double>, value: Int) = setNumber(input.id, value.toDouble())
+    fun input(name: String, value: Double): Input<Double> = Input(this, raw.inputValue(name, Value.Number(value)))
+    fun input(name: String, value: Long): Input<Long> = Input(this, raw.inputValue(name, Value.Whole(value)))
+    fun input(name: String, value: BigDecimal): Input<BigDecimal> = Input(this, raw.inputValue(name, valueOf(value)))
+    fun input(name: String, value: Boolean): Input<Boolean> = Input(this, raw.inputValue(name, Value.Flag(value)))
+    fun input(name: String, value: String): Input<String> = Input(this, raw.inputValue(name, Value.Text(value)))
 
-@JvmName("setDecimalToWhole")
-operator fun Graph.set(input: Input<BigDecimal>, value: Int) = setValue(input.id, valueOf(value.toBigDecimal()))
+    /** Adds a calculated node. */
+    fun <T> define(name: String, expression: Expr<T>): Node<T> = Node(this, raw.defineExpression(name, expression.ops))
 
-/** The node's value as of the last update. A node that could not be calculated throws, with why. */
-operator fun <T> Graph.get(node: Node<T>): T = when (val held = value(node.id)) {
-    is Value.Failed -> throw WatershedException.Refused("${name(node.id)} could not be calculated: ${held.message}")
-    else -> read(held, "")
+    /** Adds many calculated nodes in one call, in order. Far faster than one call each when there are thousands. */
+    fun <T> defineAll(definitions: List<Pair<String, Expr<T>>>): List<Node<T>> =
+        raw.defineExpressions(definitions.map { it.first }, definitions.map { it.second.ops }).map { Node(this, it) }
+
+    /** Records a new value for an input; it counts from the next `stabilize()`. */
+    operator fun <T : Any> set(input: Input<T>, value: T) = raw.setValue(mine(input).id, valueOf(value))
+
+    /** A Double is set and read by a direct call, far faster than other values. */
+    @JvmName("setNumber")
+    operator fun set(input: Input<Double>, value: Double) {
+        if (!Fast.setNumber(address, mine(input).id, value)) raw.setNumber(input.id, value)
+    }
+
+    @JvmName("setNumberToWhole")
+    operator fun set(input: Input<Double>, value: Int) = set(input, value.toDouble())
+
+    @JvmName("setDecimalToWhole")
+    operator fun set(input: Input<BigDecimal>, value: Int) = raw.setValue(mine(input).id, valueOf(value.toBigDecimal()))
+
+    /** Sets many Double inputs in one call: the way to apply a batch of prices. */
+    fun setAll(values: Map<Input<Double>, Double>) {
+        val nodes = IntArray(values.size)
+        val numbers = DoubleArray(values.size)
+        var at = 0
+        for ((input, value) in values) {
+            nodes[at] = mine(input).id
+            numbers[at] = value
+            at += 1
+        }
+        if (!Fast.setNumbers(address, nodes, numbers)) raw.setNumbers(nodes.toList(), numbers.toList())
+    }
+
+    /** The node's value as of the last update. A node that could not be calculated throws, with why. */
+    operator fun <T> get(node: Node<T>): T = when (val held = raw.value(mine(node).id)) {
+        is Value.Failed -> throw WatershedException.Refused("${raw.name(node.id)} could not be calculated: ${held.message}")
+        else -> read(held, "")
+    }
+
+    @JvmName("getNumber")
+    operator fun get(node: Node<Double>): Double {
+        val held = Fast.number(address, mine(node).id)
+        // NaN is also how the direct call says it could not answer.
+        return if (held.isNaN()) raw.number(node.id) else held
+    }
+
+    /** The node's value, or null if it could not be calculated. */
+    fun <T> getOrNull(node: Node<T>): T? = when (val held = raw.value(mine(node).id)) {
+        is Value.Failed -> null
+        else -> read(held, "")
+    }
+
+    /** Applies every recorded change and recalculates what depends on them, and nothing else. */
+    fun stabilize(): Report = Fast.stabilize(address) ?: raw.stabilize()
+
+    /** Why the node has its value, as a tree of what it was worked out from. */
+    fun explain(node: Node<*>): String = raw.explain(mine(node).id)
+
+    /** The names of the nodes the last update recalculated, in order. */
+    fun lastRecalculated(): List<String> = raw.lastRecalculated()
+
+    /** How many nodes the graph has had. */
+    fun size(): Long = raw.size()
+
+    /** Removes a node that nothing uses; its name is then free. */
+    fun remove(node: Node<*>) = raw.remove(mine(node).id)
+
+    /** Watches a node: in pull mode, it and what it uses are kept up to date. */
+    fun watch(node: Node<*>) = raw.watch(mine(node).id)
+    fun unwatch(node: Node<*>) = raw.unwatch(mine(node).id)
+
+    /** Pull mode: while on, an update calculates only the watched nodes and what they use. */
+    fun calculateOnlyWatched(on: Boolean) = raw.calculateOnlyWatched(on)
+
+    /** Checks every node against a calculation from scratch. */
+    fun checkConsistency() = raw.checkConsistency()
+
+    /** A new, empty keyed table of rows in this graph. */
+    fun collection(name: String): Collection = Collection(this, raw.collection(name))
 }
-
-/** A Double is read and set as a plain number, which crosses into the engine far faster than other values. */
-@JvmName("getNumber")
-operator fun Graph.get(node: Node<Double>): Double = number(node.id)
-
-@JvmName("setNumber")
-operator fun Graph.set(input: Input<Double>, value: Double) = setNumber(input.id, value)
-
-/** Sets many Double inputs in one call: the way to apply a batch of prices. */
-fun Graph.setAll(values: Map<Input<Double>, Double>) =
-    setNumbers(values.keys.map { it.id }, values.values.toList())
-
-/** Adds many calculated nodes in one call, in order. Far faster than one call each when there are thousands. */
-fun <T> Graph.defineAll(definitions: List<Pair<String, Expr<T>>>): List<Node<T>> =
-    defineExpressions(definitions.map { it.first }, definitions.map { it.second.ops }).map { Node(it) }
-
-/** The node's value, or null if it could not be calculated. */
-fun <T> Graph.getOrNull(node: Node<T>): T? = when (val held = value(node.id)) {
-    is Value.Failed -> null
-    else -> read(held, "")
-}
-
-fun Graph.explain(node: Node<*>): String = explain(node.id)
-fun Graph.watch(node: Node<*>) = watch(node.id)
-fun Graph.unwatch(node: Node<*>) = unwatch(node.id)
-fun Graph.remove(node: Node<*>) = remove(node.id)
 
 // -------------------------------------------------------------- collection
 
-@JvmName("numberField") fun Collection.number(name: String): Field<Double> = field(name, Kind.NUMBER)
-@JvmName("wholeField") fun Collection.whole(name: String): Field<Long> = field(name, Kind.WHOLE)
-@JvmName("decimalField") fun Collection.decimal(name: String): Field<BigDecimal> = field(name, Kind.DECIMAL)
-@JvmName("flagField") fun Collection.flag(name: String): Field<Boolean> = field(name, Kind.FLAG)
-@JvmName("textField") fun Collection.text(name: String): Field<String> = field(name, Kind.TEXT)
+/** A keyed table of rows, with fields, calculated columns and totals that update by only the rows that change. */
+class Collection internal constructor(private val graph: Graph, private val raw: RawCollection) {
+    private fun <T> field(name: String, kind: Kind): Field<T> {
+        raw.addField(name, kind)
+        return Field(name)
+    }
 
-private fun <T> Collection.field(name: String, kind: Kind): Field<T> {
-    addField(name, kind)
-    return Field(name)
+    fun number(name: String): Field<Double> = field(name, Kind.NUMBER)
+    fun whole(name: String): Field<Long> = field(name, Kind.WHOLE)
+    fun decimal(name: String): Field<BigDecimal> = field(name, Kind.DECIMAL)
+    fun flag(name: String): Field<Boolean> = field(name, Kind.FLAG)
+    fun text(name: String): Field<String> = field(name, Kind.TEXT)
+
+    /** Adds a column, worked out in every row from its fields, other columns and any node. */
+    fun <T> column(name: String, expression: Expr<T>): Part<T> {
+        raw.addColumn(name, expression.ops)
+        return Part(name)
+    }
+
+    fun <T : Number> sum(name: String, of: Part<T>): Node<T> = Node(graph, raw.addSum(name, of.name))
+    fun <T : Number> min(name: String, of: Part<T>): Node<T> = Node(graph, raw.addMin(name, of.name))
+    fun <T : Number> max(name: String, of: Part<T>): Node<T> = Node(graph, raw.addMax(name, of.name))
+    fun count(name: String): Node<Long> = Node(graph, raw.addCount(name))
+
+    /** Adds a row, or changes the fields given of one that is there: `orders.upsert("o-1", qty(2.0), price(9.99))`. */
+    fun upsert(key: String, vararg fields: FieldValue) = raw.upsertValues(key, fields.associate { it.name to it.value })
+
+    /** Removes a row. Says whether there was one. */
+    fun remove(key: String): Boolean = raw.remove(key)
+
+    /** A field or column of a row, as of the last update: `orders["o-1", line]`. */
+    operator fun <T> get(key: String, part: Part<T>): T = read(raw.value(key, part.name), "$key.${part.name}")
+
+    /** How many rows there are, counting changes since the last update. */
+    fun size(): Long = raw.size()
 }
-
-/** Adds a column, worked out in every row from its fields, other columns and any node. */
-fun <T> Collection.column(name: String, expression: Expr<T>): Part<T> {
-    addColumn(name, expression.ops)
-    return Part(name)
-}
-
-fun <T : Number> Collection.sum(name: String, of: Part<T>): Node<T> = Node(addSum(name, of.name))
-fun <T : Number> Collection.min(name: String, of: Part<T>): Node<T> = Node(addMin(name, of.name))
-fun <T : Number> Collection.max(name: String, of: Part<T>): Node<T> = Node(addMax(name, of.name))
-fun Collection.count(name: String): Node<Long> = Node(addCount(name))
 
 /** A field's value for `upsert`: `qty(2.0)`. */
 operator fun <T : Any> Field<T>.invoke(value: T) = FieldValue(name, valueOf(value))
@@ -163,13 +229,6 @@ operator fun Field<Double>.invoke(value: Int) = FieldValue(name, Value.Number(va
 
 @JvmName("decimalFieldToWhole")
 operator fun Field<BigDecimal>.invoke(value: Int) = FieldValue(name, valueOf(value.toBigDecimal()))
-
-/** Adds a row, or changes the fields given of one that is there: `orders.upsert("o-1", qty(2.0), price(9.99))`. */
-fun Collection.upsert(key: String, vararg fields: FieldValue) =
-    upsertValues(key, fields.associate { it.name to it.value })
-
-/** A field or column of a row, as of the last update: `orders["o-1", line]`. */
-operator fun <T> Collection.get(key: String, part: Part<T>): T = read(value(key, part.name), "$key.${part.name}")
 
 // ------------------------------------------------------------- expressions
 

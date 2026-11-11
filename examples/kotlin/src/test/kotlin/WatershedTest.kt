@@ -36,7 +36,8 @@ class WatershedTest {
         val side = g.input("side", "Buy")
 
         assertEquals(-2.0, g[g.define("d1", -a + b)])
-        assertEquals(14.0, g[g.define("d2", a + b * 2)])
+        val d2 = g.define("d2", a + b * 2)
+        assertEquals(14.0, g[d2])
         assertEquals(0.75, g[g.define("d3", a / b / 2.0)])
         assertEquals(2.0, g[g.define("d4", (a greatest b) - (a least b))])
         assertEquals(2.0, g[g.define("d5", abs(b - a))])
@@ -51,7 +52,7 @@ class WatershedTest {
         assertEquals(4.0, g[g.define("c1", choose(n - 6, a, b))])
 
         // Each one explains itself as the engine sees it.
-        assertEquals("d2 = 14  ← a + (b * 2)", g.explain(g.find("d2")!!).lines().first())
+        assertEquals("d2 = 14  ← a + (b * 2)", g.explain(d2).lines().first())
         g.checkConsistency()
     }
 
@@ -153,6 +154,35 @@ class WatershedTest {
         g.setAll(mapOf(prices[0] to 10.0, prices[1] to 11.0))
         assertEquals(1, g.stabilize().inputsChanged.toInt() - 1)
         assertEquals(9940.0, g[total])
+        g.checkConsistency()
+    }
+
+    @Test
+    fun `the direct calls and the generated ones give the same answers`() {
+        val g = Graph()
+        val a = g.input("a", 1.0)
+        val b = g.input("b", 0L)
+        val half = g.define("half", a / 2.0)
+        val broken = g.define("broken", (1L / b).toDecimal())
+        val nan = g.define("nan", a - a + Double.NaN)
+
+        // A Double is set, updated and read directly.
+        g[a] = 5.0
+        val report = g.stabilize()
+        assertEquals(1L, report.inputsChanged)
+        assertEquals(2L, report.recalculated)
+        assertEquals(2.5, g[half])
+
+        // What the direct call cannot answer, the generated one does: a
+        // node that really holds NaN, and one that failed, with its reason.
+        assertTrue(g[nan].isNaN())
+        assertTrue(assertFailsWith<WatershedException> { g[broken] }.message!!.contains("division by zero"))
+
+        // A node of another graph is refused rather than read as this one's.
+        val other = Graph()
+        val theirs = other.input("theirs", 9.0)
+        assertFailsWith<WatershedException> { g[theirs] }
+        assertFailsWith<WatershedException> { g[theirs] = 1.0 }
         g.checkConsistency()
     }
 

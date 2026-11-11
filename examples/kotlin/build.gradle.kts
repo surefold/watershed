@@ -3,7 +3,7 @@
 //     gradle run     builds the Rust library, writes its Kotlin side, runs Main.kt
 //     gradle test    the same, then runs the tests
 //
-// It needs Rust (cargo, 1.88 or later) and a JDK (21 or later). Nothing is
+// It needs Rust (cargo, 1.88 or later) and a JDK (22 or later). Nothing is
 // published anywhere: the Rust library is built from this repository into
 // crates/watershed-jvm/target/release, and the JVM is told to look there.
 
@@ -58,15 +58,16 @@ kotlin {
         kotlin.srcDir(generateBindings)
         kotlin.srcDir(bindingsCrate.resolve("kotlin"))
     }
-    // Any JDK from 21 up runs this; both compilers aim at 21 so they agree.
+    // The direct calls use the JDK's foreign function API, which is in
+    // JDK 22 and later; both compilers aim at 22 so they agree.
     compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_22
     }
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    sourceCompatibility = JavaVersion.VERSION_22
+    targetCompatibility = JavaVersion.VERSION_22
 }
 
 // Where the JVM finds the native library, and leave to call into it.

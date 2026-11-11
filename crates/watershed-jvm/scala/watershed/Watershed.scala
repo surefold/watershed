@@ -39,9 +39,9 @@ final case class Report(update: Long, inputsChanged: Long, recalculated: Long, c
 sealed trait Holds[T]:
   private[watershed] def toValue(value: T): raw.Value
   private[watershed] def fromValue(value: raw.Value): T
-  private[watershed] def set(graph: raw.Graph, node: Int, value: T): Unit =
+  private[watershed] def set(graph: raw.RawGraph, address: Long, node: Int, value: T): Unit =
     graph.setValue(node, toValue(value))
-  private[watershed] def get(graph: raw.Graph, node: Int): T =
+  private[watershed] def get(graph: raw.RawGraph, address: Long, node: Int): T =
     graph.value(node) match
       case failed: raw.Value.Failed =>
         throw raw.WatershedException.Refused(s"${graph.name(node)} could not be calculated: ${failed.getMessage}")
@@ -56,9 +56,14 @@ object Holds:
     def fromValue(value: raw.Value) = value match
       case n: raw.Value.Number => n.getValue
       case other               => unexpected(other)
-    // A Double crosses as a plain number, far faster than any other value.
-    override def set(graph: raw.Graph, node: Int, value: Double) = graph.setNumber(node, value)
-    override def get(graph: raw.Graph, node: Int) = graph.number(node)
+    // A Double is set and read by a direct call, far faster than other
+    // values. When that cannot answer (NaN is also how it says so), the
+    // generated call does, with the reason if there is an error.
+    override def set(graph: raw.RawGraph, address: Long, node: Int, value: Double) =
+      if !raw.Fast.setNumber(address, node, value) then graph.setNumber(node, value)
+    override def get(graph: raw.RawGraph, address: Long, node: Int) =
+      val held = raw.Fast.number(address, node)
+      if held.isNaN then graph.number(node) else held
 
   given Holds[Long] with
     def toValue(value: Long) = raw.Value.Whole(value)
@@ -118,15 +123,16 @@ object Ordered:
 open class Expr[T] private[watershed] (private[watershed] val ops: List[raw.Op])
 
 /** A node of a graph holding a `T`. */
-open class Node[T] private[watershed] (val id: Int) extends Expr[T](List(raw.Op.Node(id))):
+open class Node[T] private[watershed] (private[watershed] val graph: Graph, val id: Int)
+    extends Expr[T](List(raw.Op.Node(id))):
   override def equals(other: Any) = other match
-    case node: Node[?] => node.id == id
+    case node: Node[?] => (node.graph eq graph) && node.id == id
     case _             => false
   override def hashCode = id.hashCode
   override def toString = s"Node($id)"
 
 /** An input: a node that can be set. */
-final class Input[T] private[watershed] (id: Int) extends Node[T](id)
+final class Input[T] private[watershed] (graph: Graph, id: Int) extends Node[T](graph, id)
 
 /** A field or calculated column of a collection's rows, holding a `T` in each row. */
 open class Part[T] private[watershed] (val name: String) extends Expr[T](List(raw.Op.Part(name)))
@@ -274,51 +280,60 @@ def texts(items: Expr[String]*): Expr[List[String]] =
 
 /** A graph of inputs and calculated nodes. */
 final class Graph:
-  private val graph = raw.Graph()
+  private val graph = raw.RawGraph()
+
+  // Where the graph is, for the direct calls. Good while `graph` is alive, which this object sees to.
+  private val address: Long = graph.address()
+
+  private def mine[N <: Node[?]](node: N): N =
+    if node.graph ne this then throw raw.WatershedException.Refused("that node belongs to another graph")
+    node
 
   /** Adds an input with a starting value. */
   def input[T](name: String, value: T)(using holds: Holds[T]): Input[T] =
-    Input(graph.inputValue(name, holds.toValue(value)))
+    Input(this, graph.inputValue(name, holds.toValue(value)))
 
   /** Adds a calculated node. */
   def define[T](name: String, expression: Expr[T]): Node[T] =
-    Node(graph.defineExpression(name, expression.ops.asJava))
+    Node(this, graph.defineExpression(name, expression.ops.asJava))
 
   /** Adds many calculated nodes in one call, in order. Far faster than one call each when there are thousands. */
   def defineAll[T](definitions: Seq[(String, Expr[T])]): Seq[Node[T]] =
     graph
       .defineExpressions(definitions.map(_._1).asJava, definitions.map(_._2.ops.asJava).asJava)
       .asScala
-      .map(id => Node[T](id))
+      .map(id => Node[T](this, id))
       .toSeq
 
   /** Records a new value for an input, `g(price) = 3.0`; it counts from the next `stabilize()`. */
   def update[T](input: Input[T], value: T)(using holds: Holds[T]): Unit =
-    holds.set(graph, input.id, value)
+    holds.set(graph, address, mine(input).id, value)
 
   /** Sets many Double inputs in one call: the way to apply a batch of prices. */
   def setAll(values: Iterable[(Input[Double], Double)]): Unit =
-    graph.setNumbers(
-      values.map(v => Int.box(v._1.id)).toSeq.asJava,
-      values.map(v => Double.box(v._2)).toSeq.asJava,
-    )
+    val nodes = values.iterator.map(v => mine(v._1).id).toArray
+    val numbers = values.iterator.map(_._2).toArray
+    if !raw.Fast.setNumbers(address, nodes, numbers) then
+      graph.setNumbers(nodes.map(Int.box).toSeq.asJava, numbers.map(Double.box).toSeq.asJava)
 
   /** The node's value as of the last update, `g(total)`. A node that could not be calculated throws, with why. */
-  def apply[T](node: Node[T])(using holds: Holds[T]): T = holds.get(graph, node.id)
+  def apply[T](node: Node[T])(using holds: Holds[T]): T = holds.get(graph, address, mine(node).id)
 
   /** The node's value, or None if it could not be calculated. */
   def get[T](node: Node[T])(using holds: Holds[T]): Option[T] =
-    graph.value(node.id) match
+    graph.value(mine(node).id) match
       case _: raw.Value.Failed => None
       case held                => Some(holds.fromValue(held))
 
   /** Applies every recorded change and recalculates what depends on them, and nothing else. */
   def stabilize(): Report =
-    val report = graph.stabilize()
+    val report = raw.Fast.stabilize(address) match
+      case null   => graph.stabilize()
+      case direct => direct
     Report(report.getUpdate, report.getInputsChanged, report.getRecalculated, report.getChanged)
 
   /** Why the node has its value, as a tree of what it was worked out from. */
-  def explain(node: Node[?]): String = graph.explain(node.id)
+  def explain(node: Node[?]): String = graph.explain(mine(node).id)
 
   /** The names of the nodes the last update recalculated, in order. */
   def lastRecalculated: List[String] = graph.lastRecalculated().asScala.toList
@@ -327,11 +342,11 @@ final class Graph:
   def size: Long = graph.size()
 
   /** Removes a node that nothing uses; its name is then free. */
-  def remove(node: Node[?]): Unit = graph.remove(node.id)
+  def remove(node: Node[?]): Unit = graph.remove(mine(node).id)
 
   /** Watches a node: in pull mode, it and what it uses are kept up to date. */
-  def watch(node: Node[?]): Unit = graph.watch(node.id)
-  def unwatch(node: Node[?]): Unit = graph.unwatch(node.id)
+  def watch(node: Node[?]): Unit = graph.watch(mine(node).id)
+  def unwatch(node: Node[?]): Unit = graph.unwatch(mine(node).id)
 
   /** Pull mode: while on, an update calculates only the watched nodes and what they use. */
   def calculateOnlyWatched(on: Boolean): Unit = graph.calculateOnlyWatched(on)
@@ -340,12 +355,12 @@ final class Graph:
   def checkConsistency(): Unit = graph.checkConsistency()
 
   /** A new, empty keyed table of rows in this graph. */
-  def collection(name: String): Collection = Collection(graph.collection(name))
+  def collection(name: String): Collection = Collection(this, graph.collection(name))
 
 // -------------------------------------------------------------- collection
 
 /** A keyed table of rows, with fields, calculated columns and totals that update by only the rows that change. */
-final class Collection private[watershed] (collection: raw.Collection):
+final class Collection private[watershed] (graph: Graph, collection: raw.RawCollection):
   private def field[T: Holds](name: String, kind: raw.Kind): Field[T] =
     collection.addField(name, kind)
     Field(name)
@@ -361,10 +376,10 @@ final class Collection private[watershed] (collection: raw.Collection):
     collection.addColumn(name, expression.ops.asJava)
     Part(name)
 
-  def sum[T: Number](name: String, of: Part[T]): Node[T] = Node(collection.addSum(name, of.name))
-  def min[T: Number](name: String, of: Part[T]): Node[T] = Node(collection.addMin(name, of.name))
-  def max[T: Number](name: String, of: Part[T]): Node[T] = Node(collection.addMax(name, of.name))
-  def count(name: String): Node[Long] = Node(collection.addCount(name))
+  def sum[T: Number](name: String, of: Part[T]): Node[T] = Node(graph, collection.addSum(name, of.name))
+  def min[T: Number](name: String, of: Part[T]): Node[T] = Node(graph, collection.addMin(name, of.name))
+  def max[T: Number](name: String, of: Part[T]): Node[T] = Node(graph, collection.addMax(name, of.name))
+  def count(name: String): Node[Long] = Node(graph, collection.addCount(name))
 
   /** Adds a row, or changes the fields given of one that is there: `orders.upsert("o-1", qty := 2.0)`. */
   def upsert(key: String, fields: FieldValue*): Unit =
