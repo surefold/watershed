@@ -463,10 +463,7 @@ async function build(size) {
   });
   if (layout) view.setState(layout);
   columns = JSON.parse(grid.columns());
-  $("group").replaceChildren(
-    new Option("nothing", "-1"),
-    ...columns.flatMap((c, k) => (c.groupable ? [new Option(c.name, String(k))] : [])),
-  );
+  listGroupColumns("-1"); // a grid built again starts with its rows not grouped
   listChartColumns("net");
   $("expand").disabled = $("collapse").disabled = true;
   $("search").value = "";
@@ -489,6 +486,16 @@ async function build(size) {
   }
   building = false;
   if (LIVE) setStreaming(true);
+}
+
+/** Fills the Group by list with the columns rows can be grouped by, keeping the choice. */
+function listGroupColumns(chosen = $("group").value || "-1") {
+  $("group").replaceChildren(
+    new Option("nothing", "-1"),
+    ...columns.flatMap((c, k) => (c.groupable ? [new Option(c.name, String(k))] : [])),
+  );
+  $("group").value = chosen;
+  if ($("group").value !== chosen) $("group").value = "-1";
 }
 
 /** Fills the chart's column list with the columns that have totals, keeping the choice if it can. */
@@ -619,6 +626,7 @@ function addColumn() {
     grid.add_formula(name, formula, $("formula-agg").value);
     view.columnsChanged();
     columns = JSON.parse(grid.columns());
+    listGroupColumns();
     listChartColumns();
     $("formula-name").value = $("formula").value = "";
     note(`Added ${name}.`, "good");
