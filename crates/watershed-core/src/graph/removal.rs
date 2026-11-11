@@ -84,6 +84,15 @@ impl Graph {
             kind: Kind::Input,
         };
         self.pending.remove(&id);
+        self.watching.remove(&id);
+        if self.pull {
+            // What only it needed is no longer needed.
+            let was_needed = self.needed[i] == super::pull::NEEDED;
+            self.needed[i] = super::pull::IDLE;
+            if was_needed {
+                self.work_out_what_is_needed();
+            }
+        }
         self.redefined.remove(&id);
         self.redefined_from.remove(&id);
         self.names.forget(id);

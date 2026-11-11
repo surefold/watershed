@@ -589,6 +589,32 @@ impl Graph {
         Ok(Expr::new(ir, ty))
     }
 
+    /// Watches a node: in pull mode, it and everything it uses are kept up
+    /// to date.
+    fn watch(slf: &Bound<'_, Self>, node: &Bound<'_, Expr>) -> PyResult<()> {
+        let id = Graph::own(slf, node.get())?;
+        slf.borrow_mut().inner.watch_node(id).map_err(to_py_err)
+    }
+
+    /// Stops watching a node.
+    fn unwatch(slf: &Bound<'_, Self>, node: &Bound<'_, Expr>) -> PyResult<()> {
+        let id = Graph::own(slf, node.get())?;
+        slf.borrow_mut().inner.unwatch_node(id);
+        Ok(())
+    }
+
+    /// Turns pull mode on or off: while on, an update calculates only the
+    /// watched nodes and what they use.
+    fn calculate_only_watched(&mut self, on: bool) {
+        self.inner.calculate_only_watched(on);
+    }
+
+    /// Whether an update keeps this node up to date.
+    fn is_calculated(slf: &Bound<'_, Self>, node: &Bound<'_, Expr>) -> PyResult<bool> {
+        let id = Graph::own(slf, node.get())?;
+        Ok(slf.borrow().inner.is_calculated(id))
+    }
+
     /// Removes a node that nothing uses. It is no longer calculated or
     /// found, its name is free for a new node, and using it is an error.
     fn remove(slf: &Bound<'_, Self>, node: &Bound<'_, Expr>) -> PyResult<()> {

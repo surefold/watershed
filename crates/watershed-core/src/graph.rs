@@ -47,6 +47,7 @@ pub(crate) fn next_graph_id() -> GraphId {
 }
 
 mod keyed;
+mod pull;
 mod removal;
 pub(crate) use keyed::{KeyedRow, key_text};
 
@@ -283,6 +284,16 @@ pub struct Graph {
     keyed_nodes: HashSet<u32>,
     /// Nodes that have been removed, and the last update each was part of.
     removed: HashMap<NodeId, u64>,
+    /// Whether only watched nodes and what they use are calculated (see
+    /// the `pull` module).
+    pull: bool,
+    /// The watched nodes.
+    watching: HashSet<NodeId>,
+    /// In pull mode, each node's state: idle, needed or parked.
+    needed: Vec<u8>,
+    /// Parked nodes that have become needed: the next update recalculates
+    /// them whatever their reads say.
+    wake: Vec<NodeId>,
     /// For each node given a new expression by `redefine`, the update from
     /// which it has had its current one. Earlier expressions are not kept,
     /// so this is how far back the node can be explained.
@@ -341,6 +352,10 @@ impl Graph {
             updating: false,
             keyed_nodes: HashSet::new(),
             removed: HashMap::new(),
+            pull: false,
+            watching: HashSet::new(),
+            needed: Vec::new(),
+            wake: Vec::new(),
             redefined_from: HashMap::new(),
         }
     }
@@ -686,6 +701,11 @@ impl Graph {
             self.add_user(d, id);
         }
         self.raise_users(id);
+        if self.pull && self.needed[id.index()] == pull::NEEDED {
+            // What it used before may no longer be needed, and what it
+            // uses now is.
+            self.work_out_what_is_needed();
+        }
         self.redefined.insert(id);
         self.redefined_from.insert(id, self.epoch + 1);
         self.relink_pending = true;
@@ -826,6 +846,9 @@ impl Graph {
         self.names.push(name, hash, id);
         self.first_user.push(NONE);
         self.last_user.push(NONE);
+        if self.pull {
+            self.needed.push(pull::IDLE);
+        }
         for d in deps {
             self.add_user(*d, id);
         }
@@ -1058,6 +1081,10 @@ impl Graph {
         self.aggregates[code].joining_from(from);
         // One link per node, even when the value and presence are the same
         // node (as in a count) or the node is already part of a member.
+        if self.pull && self.needed[aggregate.index()] == pull::NEEDED {
+            self.need(value);
+            self.need(present);
+        }
         let (new_value, new_present) = self.aggregates[code].push(value.0, present.0);
         if new_value {
             self.add_user(value, aggregate);
@@ -1117,6 +1144,13 @@ impl Graph {
             self.join_aggregate(aggregate, value, present, epoch);
             self.redefined.insert(aggregate);
         }
+        // Parked nodes that have become needed are recalculated whatever
+        // their reads say: what they read changed in earlier updates.
+        for id in std::mem::take(&mut self.wake) {
+            if !self.is_removed(id) {
+                self.redefined.insert(id);
+            }
+        }
         // Queued now, not when they were redefined, because a later
         // redefinition can still have raised their height.
         for &id in &self.redefined {
@@ -1150,6 +1184,9 @@ impl Graph {
             // same order however it was filled, and kinder to memory.
             level.sort_unstable();
             level.dedup();
+            if self.pull {
+                self.park_what_is_not_needed(&mut level);
+            }
             if self.recalculate_in_parallel(&level) {
                 // Nodes on one level never use each other, so they were all
                 // worked out at once. Store the changed values, then pass the
@@ -1499,6 +1536,9 @@ impl Graph {
     pub fn get_at<T: CalcType>(&self, node: impl Handle<T>, epoch: u64) -> Result<T, CalcError> {
         let at = node.node_ref();
         self.check_ref(at)?;
+        // What it held at an earlier update is no better than what it holds
+        // now, if it is not being kept up to date.
+        self.check_calculated(at.node)?;
         self.typed(at.node, self.value_at(at.node, epoch)?)
     }
 
@@ -1508,7 +1548,19 @@ impl Graph {
     pub fn get<T: CalcType>(&self, node: impl Handle<T>) -> Result<T, CalcError> {
         let at = node.node_ref();
         self.check_ref(at)?;
+        self.check_calculated(at.node)?;
         self.typed(at.node, &self.values[at.node.index()])
+    }
+
+    /// Refuses a calculated node that pull mode is not keeping up to date.
+    fn check_calculated(&self, id: NodeId) -> Result<(), CalcError> {
+        if self.is_calculated(id) || self.is_input(id) {
+            return Ok(());
+        }
+        Err(CalcError::Invalid(format!(
+            "{:?} is not being calculated: nothing that is watched uses it",
+            self.name(id)
+        )))
     }
 
     fn typed<T: CalcType>(&self, id: NodeId, value: &Value) -> Result<T, CalcError> {
@@ -1525,7 +1577,10 @@ impl Graph {
         }
     }
 
-    /// The node's value, untyped.
+    /// The node's value as it is stored, untyped. In pull mode, a node
+    /// that is not being calculated holds an old value here; ask
+    /// [`is_calculated`](Self::is_calculated) first, or use
+    /// [`get`](Self::get), which refuses.
     pub fn value(&self, id: NodeId) -> &Value {
         &self.values[id.index()]
     }
@@ -1667,6 +1722,32 @@ impl Graph {
         for id in order {
             let i = id.index();
             let hot = self.hot[i];
+            if !self.is_calculated(id) {
+                // Not kept up to date in pull mode. Unless it is parked, it
+                // must still be what its expression gives for the values
+                // its dependencies hold, so that waking what is parked
+                // below it is enough to bring it up to date.
+                let held = match hot.kind {
+                    _ if self.is_parked(id) => None,
+                    Kind::Input => None,
+                    Kind::Aggregate => {
+                        Some(self.aggregates[hot.code as usize].folded_from_scratch(&self.values))
+                    }
+                    Kind::Float | Kind::General => self
+                        .expression(id)
+                        .map(|expression| expression.eval(&self.values)),
+                };
+                if let Some(held) = held.filter(|held| !held.same_as(&self.values[i])) {
+                    return Err(format!(
+                        "{:?} is not being calculated and is not parked, but holds {} where \
+                         its dependencies give {held}",
+                        self.name(id),
+                        self.values[i]
+                    ));
+                }
+                fresh[i] = self.values[i].clone();
+                continue;
+            }
             let value = match hot.kind {
                 Kind::Input => self.values[i].clone(),
                 // Folded from scratch, without the aggregate's stored tree.

@@ -98,11 +98,15 @@ impl Graph {
         let index = u32::try_from(k.rows.len()).expect("too many rows");
         k.rows.push(row);
         k.row_key.push(None);
-        self.keyed_nodes.extend(
-            [row.present.0, row.key.0]
-                .into_iter()
-                .chain(row.value.map(|v| v.0)),
-        );
+        let nodes = [row.present, row.key].into_iter().chain(row.value);
+        for node in nodes {
+            self.keyed_nodes.insert(node.0);
+            // A row can change group during an update, so what a grouping
+            // is built on is always calculated.
+            if self.pull {
+                self.need(node);
+            }
+        }
         if self.hot[row.key.index()].kind != Kind::Input {
             self.watched
                 .entry(row.key.0)

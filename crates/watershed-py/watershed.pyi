@@ -80,6 +80,12 @@ class Graph:
     def define(self, name: str, expr: ExprLike) -> Expr: ...
     def formula(self, source: str) -> Expr:
         """A formula written as text, such as "qty * price", as an expression."""
+    def watch(self, node: Expr) -> None:
+        """In pull mode, keeps this node and everything it uses up to date."""
+    def unwatch(self, node: Expr) -> None: ...
+    def calculate_only_watched(self, on: bool) -> None:
+        """Pull mode: an update calculates only watched nodes and what they use."""
+    def is_calculated(self, node: Expr) -> bool: ...
     def remove(self, node: Expr) -> None:
         """Removes a node that nothing uses; its name is then free."""
     def set(self, node: Expr, value: Scalar) -> None:

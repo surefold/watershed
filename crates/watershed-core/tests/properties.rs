@@ -957,6 +957,141 @@ proptest! {
     }
 }
 
+/// A random graph in pull mode: nodes are watched and unwatched at random,
+/// pull mode is turned off and on, and the graph keeps changing shape. After
+/// every update, everything watched (and what it uses) must match a full
+/// recalculation, nothing else may have been recalculated, and whatever was
+/// left must still be recoverable.
+fn run_pull(seed: u64, updates: usize, parallel: bool) -> Result<(), String> {
+    let mut rng = Rng(seed);
+    let mut g = Graph::new();
+    if parallel {
+        g.set_parallel_threshold(1);
+    }
+    for i in 0..2 + rng.below(6) {
+        let ty = rng.pick(&TYPES);
+        g.input_value(&format!("in{i}"), random_value(&mut rng, ty))
+            .unwrap();
+    }
+    let mut n = 0;
+    for _ in 0..rng.below(40) {
+        add_random_node(&mut rng, &mut g, n, false);
+        n += 1;
+    }
+    let mut aggregates: Vec<(NodeId, AggregateOp, Type)> = (0..rng.below(4))
+        .map(|k| add_random_aggregate(&mut rng, &mut g, k))
+        .collect();
+    let mut watched: Vec<NodeId> = Vec::new();
+    g.calculate_only_watched(rng.percent(80));
+
+    for step in 0..updates {
+        let live: Vec<NodeId> = g.node_ids().collect();
+        for _ in 0..rng.below(3) {
+            if live.is_empty() {
+                break;
+            }
+            let id = rng.pick(&live);
+            if rng.percent(60) {
+                g.watch_node(id).map_err(|e| e.to_string())?;
+                watched.push(id);
+            } else if !watched.is_empty() {
+                let id = watched.swap_remove(rng.below(watched.len()));
+                g.unwatch_node(id);
+                watched.retain(|&w| w != id);
+            }
+        }
+        if rng.percent(10) {
+            g.calculate_only_watched(!g.calculates_only_watched());
+        }
+        let inputs: Vec<NodeId> = g.node_ids().filter(|&id| g.is_input(id)).collect();
+        for _ in 0..1 + rng.below(3) {
+            if inputs.is_empty() {
+                break;
+            }
+            let id = rng.pick(&inputs);
+            g.set_value(id, random_value(&mut rng, g.node_type(id)))
+                .unwrap();
+        }
+        if rng.percent(30) {
+            add_random_node(&mut rng, &mut g, n, false);
+            n += 1;
+        }
+        if !aggregates.is_empty() && rng.percent(30) {
+            let (aggregate, op, value_type) = rng.pick(&aggregates);
+            if let Some((value, present)) = random_member(&mut rng, &g, op, value_type) {
+                let _ = g.extend_aggregate(aggregate, value, present);
+            }
+        }
+        if rng.percent(20) {
+            let calculated: Vec<NodeId> = g
+                .node_ids()
+                .filter(|&id| !g.is_input(id) && g.aggregate_members(id).is_none())
+                .collect();
+            if !calculated.is_empty() {
+                let id = rng.pick(&calculated);
+                let ir = random_expr(&mut rng, &g, g.node_type(id), 3);
+                let _ = g.redefine_ir(id, ir);
+            }
+        }
+        if !live.is_empty() && rng.percent(10) {
+            let id = rng.pick(&live);
+            if g.remove_node(id).is_ok() {
+                watched.retain(|&w| w != id);
+                aggregates.retain(|a| a.0 != id);
+            }
+        }
+
+        g.stabilize();
+        g.check_consistency()
+            .map_err(|e| format!("step {step}: {e}"))?;
+        // Everything watched, and everything it uses, is calculated.
+        if g.calculates_only_watched() {
+            let mut stack = watched.clone();
+            let mut seen = std::collections::HashSet::new();
+            while let Some(id) = stack.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                if !g.is_calculated(id) {
+                    return Err(format!(
+                        "step {step}: {} is watched or used by something watched, but is not calculated",
+                        g.name(id)
+                    ));
+                }
+                stack.extend(g.dependencies(id));
+            }
+            // And nothing else was recalculated.
+            for &id in g.last_recalculated() {
+                if !seen.contains(&id) {
+                    return Err(format!(
+                        "step {step}: {} was recalculated, but nothing watched uses it",
+                        g.name(id)
+                    ));
+                }
+            }
+        }
+    }
+    // Whatever was left behind can still be caught up.
+    g.calculate_only_watched(false);
+    g.stabilize();
+    g.check_consistency()
+        .map_err(|e| format!("after turning pull mode off: {e}"))?;
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    #[test]
+    fn in_pull_mode_what_is_watched_matches_a_full_recalculation_and_nothing_else_runs(
+        seed in any::<u64>(),
+        updates in 1usize..30,
+        parallel in any::<bool>(),
+    ) {
+        run_pull(seed, updates, parallel).map_err(TestCaseError::fail)?;
+    }
+}
+
 /// Random inserts, updates and removals on a collection, checked after every
 /// update against a plain map added up from scratch.
 fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Result<(), String> {

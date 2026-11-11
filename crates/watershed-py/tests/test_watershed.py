@@ -347,3 +347,22 @@ def test_a_node_nothing_uses_can_be_removed():
     again = g.define("total", subtotal * 2)
     assert again.value == pytest.approx(100.0)
     g.check_consistency()
+
+
+def test_in_pull_mode_only_watched_nodes_are_calculated():
+    g, qty, price, tax, subtotal, total = order_graph()
+    other = g.define("other", qty + 1)
+    g.watch(total)
+    g.calculate_only_watched(True)
+
+    g.set(qty, 20.0)
+    assert g.stabilize().recalculated == 2  # subtotal and total, not other
+    assert total.value == pytest.approx(60.0)
+    assert not g.is_calculated(other)
+
+    g.watch(other)
+    assert g.stabilize().recalculated == 1
+    assert other.value == 21.0
+
+    g.calculate_only_watched(False)
+    g.check_consistency()
