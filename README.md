@@ -546,7 +546,10 @@ the same machine, with the same answers:
 | After everything changes | 3.6 s | 4.7 s |
 | After one policy changes | 2.3 s | 54 µs |
 
-About 570 of the graph's 19.9 million nodes are worked out again. The
+About 570 of the graph's 19.9 million nodes are worked out again. That is
+the one kind of problem a graph is for, a big model of which a little
+changes at a time; valuing the book from nothing, it loses, and code
+written by hand for one model would beat it at either. The
 `amendments` example in [`crates/watershed-gpu`](crates/watershed-gpu/README.md)
 has both sides.
 

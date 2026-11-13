@@ -141,6 +141,17 @@ amendments is 5.4 s against about 64 hours. Valuing the whole book from
 nothing, lifelib is seven times faster, and a version of it written for
 speed would be faster still.
 
+This is one kind of problem, chosen because it is the one a graph is for:
+a large model of which a little changes at a time. It says nothing about
+valuing a book from nothing, where the graph loses, and it is a comparison
+with one tool. Nor is the graph the fastest thing that could do it. Code
+written for this model, valuing the one changed policy in a loop and
+adjusting a running total, would be quicker: on the loan example such a
+loop takes about 3 µs for a loan on a path, against 54 µs here. And other
+engines are built on the same idea (Jane Street's Incremental, Salsa,
+differential dataflow, a spreadsheet's own recalculation) and should be in
+the same range; none of them was measured.
+
 On the GPU the comparison goes the other way. The Actuarial Open Source
 benchmarks run lifelib's term-life model for 100 million policies in 3.4 s
 on an A100 with JAX, which is something like 5 to 7 billion policy-months a
