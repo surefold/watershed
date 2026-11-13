@@ -201,6 +201,44 @@ million policies in 3.4 s on an A100 with JAX. That has not been run here:
 it needs a table looked up by a varied input, and the plan cannot do that
 yet.
 
+### Bringing a run up to date after a change
+
+EXPERIMENTAL. A plan has the graph's other inputs built into it, so when one
+of them changes the plan is made again and all of it run again. `Kept` avoids
+that for a change that reaches little:
+
+```rust,ignore
+// Keep the sums over groups of policies, as well as the outputs.
+let mut kept = Kept::new(&g, &vary, &shared, &outputs, &group_sums)?;
+let results = gpu.run(kept.plan(), &inputs)?;
+kept.hold(inputs, results);
+
+// Later: one policy's promised amount changes on the graph.
+g.set(promised, 1.1 * was)?;
+g.stabilize();
+kept.refresh_cpu(&g, &[promised.id()])?;   // or `refresh`, to run it yourself
+let now = kept.outputs();                  // every scenario's outputs, up to date
+```
+
+`refresh` finds the kept nodes the change can reach, following every branch
+of a condition, and makes a small plan of those alone, cut at the kept nodes
+that are still right. The `rerun` example does this on the `liabilities`
+book, 20,000 kinds of policy on 10,000 market paths, keeping 11,436 values a
+path (915 MB). Medians of five runs:
+
+| | |
+|---|---|
+| Bringing the run up to date after one policy changes (five policies) | 0.14 to 0.22 s, working out 5,771 to 9,327 nodes |
+| Running the whole book again on the GPU | 11.2 s |
+| Making the whole plan again, then running it | 17.8 s + 11.2 s |
+
+Every kept value on every path is the same to the last bit as making and
+running the whole plan again; the example checks that twice a run. Which
+nodes to keep is yours to choose: more of them means less to work out after
+a change and more memory. A change that reaches most of the book, like a new
+mortality table, gains nothing. The small plan ran on the CPU; on the GPU it
+took 32 to 248 ms.
+
 ### What the models found
 
 The books, the economies and the rules in these examples are made up, apart
