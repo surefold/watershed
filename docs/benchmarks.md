@@ -114,13 +114,13 @@ path, in lifelib and as a graph. All figures measured, on the machine above.
 
 | | lifelib | Watershed graph |
 |---|---|---|
-| First valuation | 3.6 s | 27.7 s, of which 22.5 s is graph construction |
-| Every input changes | 3.6 s | 5.2 s |
-| One model point changes | 2.3 s (median of 5) | 56 µs (mean of 1,000; 570 of 19,887,781 nodes) |
+| First valuation | 3.6 s | 26.4 s, of which 21.2 s is graph construction |
+| Every input changes | 3.6 s | 5.3 s |
+| One model point changes | 2.3 s (median of 5) | 58 µs (mean of 1,000, median of five runs, 56 to 94 µs; 570 of 19,887,781 nodes) |
 | One model point valued alone, by hand | 0.29 s (median of 5) | |
 
-The values agree to a relative 3.7×10⁻¹⁵. An earlier run of the example gave
-26.9 s, 4.7 s and 54 µs. The
+The values agree to a relative 3.7×10⁻¹⁵. The graph's figures are medians of five runs;
+single earlier runs gave 27.7 s, 5.2 s and 56 µs, and 26.9 s, 4.7 s and 54 µs. The
 [watershed-gpu README](../crates/watershed-gpu/README.md#against-a-model-that-works-a-column-at-a-time)
 discusses what this comparison does and does not show.
 
@@ -132,11 +132,11 @@ market scenarios.
 
 | Stage | Time | Basis |
 |---|---|---|
-| Graph construction | 22.6 s | measured, once per model |
-| Plan compilation | 18.0 s | measured, once per model |
-| GPU run, end to end | 10.0 s | measured; eight further runs under stressed assumptions took 9.4 to 9.9 s |
+| Graph construction | 22.7 s | measured, once per model |
+| Plan compilation | 17.7 s | measured, once per model |
+| GPU run, end to end | 10.2 s | measured; median of five runs, 10.1 to 10.3 s |
 | of which upload / compute / download | 0.87 s / 9.07 s / 5 ms | measured |
-| Same plan, 32 CPU threads | about 7 minutes | extrapolated: 44 ms per scenario over 128 scenarios |
+| Same plan, 32 CPU threads | about 7.5 minutes | extrapolated: 45 ms per scenario over 128 scenarios |
 | JAX, model points sorted by remaining term, same GPU | 6.2 s | measured; five runs, 6.10 to 6.32 s |
 | JAX, every model point stepped for all 241 months, same GPU | 13.1 s | measured; five runs |
 | lifelib, one core | about 4.9 hours | extrapolated: 17.6 s for 200 model points × 1,000 scenarios |

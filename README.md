@@ -203,16 +203,17 @@ savings policies with guarantees, projected month by month.
   other.
 
 Machine: Ryzen 9 5950X (16 cores, 32 threads), RTX 3090 (24 GB), double
-precision throughout. Runs of 13 November 2026.
+precision throughout. Runs of 13 November 2026; Watershed figures are
+medians of five runs of each example.
 
 **Incremental recomputation** (no GPU, one scenario), against lifelib
 running the same model on the same machine. All figures measured:
 
 | | lifelib | Watershed graph |
 |---|---|---|
-| First valuation | 3.6 s | 27.7 s, of which 22.5 s is graph construction |
-| Every input changes | 3.6 s | 5.2 s |
-| One model point changes | 2.3 s | 56 µs |
+| First valuation | 3.6 s | 26.4 s, of which 21.2 s is graph construction |
+| Every input changes | 3.6 s | 5.3 s |
+| One model point changes | 2.3 s | 58 µs |
 
 After one model point changes, the graph recalculates about 570 of its 19.9
 million nodes (mean of 1,000 amendments). The two implementations agree on
@@ -233,14 +234,14 @@ the result to a relative 3.7×10⁻¹⁵. Reading this table fairly:
 
 | | Time | Basis |
 |---|---|---|
-| Watershed plan, GPU | 10.0 s | measured; nine runs, 9.4 to 10.0 s |
-| Watershed plan, 32 CPU threads | about 7 minutes | extrapolated from 128 scenarios at 44 ms each |
+| Watershed plan, GPU | 10.2 s | measured; median of five runs, 10.1 to 10.3 s |
+| Watershed plan, 32 CPU threads | about 7.5 minutes | extrapolated from 128 scenarios at 45 ms each |
 | Hand-written JAX program, same GPU, model points sorted by remaining term | 6.2 s | measured; five runs |
 | Hand-written JAX program, same GPU, unsorted | 13.1 s | measured; five runs |
 | lifelib, one CPU core | about 4.9 hours | extrapolated from 200 model points × 1,000 scenarios |
 
-The Watershed times exclude one-off setup: 22.6 s to construct the graph and
-18.0 s to compile the plan. The plan agrees with lifelib to a relative
+The Watershed times exclude one-off setup: 22.7 s to construct the graph and
+17.7 s to compile the plan. The plan agrees with lifelib to a relative
 3.1×10⁻¹³ over about 3 million outputs, checked on smaller configurations
 than the timed run. A JAX program written for this model with straightforward
 tuning is about 1.6 times faster than the plan.
