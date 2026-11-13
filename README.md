@@ -19,9 +19,12 @@ the values be under each of these ten thousand input sets?" using every core
 or a GPU. The engine is written in Rust, with Python
 bindings, a WebAssembly build and a separately maintained JVM API.
 
-Scenario evaluation covers a subset of what the graph supports: `f64` and
-`bool` nodes with arithmetic, comparisons, logic, conditionals and a few
-maths functions. See [Limitations](#limitations).
+The two share a model as far as the model stays within what both can run:
+`f64` and `bool` nodes with arithmetic, comparisons, logic, conditionals and
+a few maths functions. Collections' totals, decimals, integers, text and
+`choose` are incremental only for now.
+[What both patterns can run](#what-both-patterns-can-run) says what each
+needs in its place.
 
 ## Why Watershed?
 
@@ -109,6 +112,23 @@ assert_eq!(g.get(total)?, 36.0); // the graph is untouched
 `cargo run --example tour` prints a small graph before and after an update,
 with what was recalculated and why.
 
+For both patterns on one model of realistic size, read and run the
+[`loans`](crates/watershed-gpu/examples/loans.rs) example. It needs no data
+files:
+
+```bash
+cargo run --release -p watershed-gpu --example loans -- 2000 1000     # 2,000 loans, 1,000 scenarios, on CPU threads
+cargo run --release -p watershed-gpu --features cuda --example loans  # 20,000 × 10,000 on an NVIDIA GPU
+```
+
+It builds a graph of a mortgage book (`Book::new`), compiles a scenario plan
+from it (`Book::plan`), checks the plan against the same calculation written
+as an ordinary loop, runs thousands of economic scenarios on CPU threads and
+optionally on a GPU, reruns them under changed assumptions with
+`set_shared`, and then changes single inputs on the graph and reports how
+many nodes `stabilize` recalculated. Its output puts the strategies' timings
+side by side.
+
 ## How it works
 
 **The graph.** Nodes are inputs or expressions over other nodes. Each node
@@ -128,11 +148,19 @@ run on one thread.
 **A scenario plan.** `Scenarios` walks back from the requested outputs to
 find the part of the graph they depend on, classifies each node as
 per-scenario, shared across scenarios or constant, and translates the
-per-scenario nodes into a flat program ordered by level. Nodes are assigned
-to reusable slots by liveness, so a scenario needs memory for the values
-live at one time, not for every node. The plan runs one scenario per task on
+per-scenario nodes into a flat program ordered by level. The plan runs one scenario per task on
 CPU threads, or all scenarios level by level on a GPU using kernels
 generated for the plan. Plans are compiled once and rerun with new inputs.
+
+**Memory reuse.** The plan knows the last level that reads each node, so it
+gives a node's storage to a later node once nothing else will read it. A
+scenario then needs working memory for the values live at one time, not for
+every node: 344,124 values for the 19.9-million-node model below, 2.75 MB
+where one value per node would be 159 MB. That decides how many scenarios
+fit on a GPU at once. It does not shrink the plan's own tables, and a run
+still fills the device, with more scenarios.
+[docs/scenario-plans.md](docs/scenario-plans.md) explains the allocation and
+its limits.
 
 These are two separate mechanisms. Parallelism inside `stabilize` speeds up
 one large update of one set of values. A scenario plan evaluates many sets
@@ -154,17 +182,28 @@ More detail: [docs/internals.md](docs/internals.md).
 | Model edits | `redefine` a node's expression; `remove` an unused node | [redefining and removing](crates/watershed-core/README.md#redefining-and-removing-nodes) |
 | Text formulas | Parse `qty * price * (1 + tax)` into the same type-checked expressions | [formulas](crates/watershed-core/README.md#formulas-as-text) |
 | Inspection | `explain`, `describe`, Graphviz output, consistency checks | [inspecting](crates/watershed-core/README.md#inspecting-a-graph) |
-| Scenario evaluation | Many input sets through one plan on CPU threads or CUDA; shared inputs that can be replaced without recompiling; plans kept resident on the GPU | [watershed-gpu](crates/watershed-gpu/README.md) |
+| Scenario evaluation | Many input sets through one plan on CPU threads or CUDA; shared inputs that can be replaced without recompiling; working memory reused by liveness; plans kept resident on the GPU | [watershed-gpu](crates/watershed-gpu/README.md), [how plans work](docs/scenario-plans.md) |
 
 ## Performance
 
 Two results, one for each execution pattern, both on the same insurance
-model: lifelib's [`savings.CashValue_ME_EX2`](https://lifelib.io/libraries/savings/index.html)
-(savings policies with guarantees, projected month by month), built as a graph of
-19.9 million nodes for 20,000 model points. The model points represent
-1,009,152 policies; the computation is over the 20,000. Machine: Ryzen 9
-5950X (16 cores, 32 threads), RTX 3090 (24 GB), double precision throughout.
-Runs of 13 November 2026.
+model: lifelib's [`savings.CashValue_ME_EX2`](https://lifelib.io/libraries/savings/index.html),
+savings policies with guarantees, projected month by month.
+
+- A **model point** is a group of identical policies valued once and
+  multiplied by its count, the usual unit in actuarial models. The
+  portfolio is 20,000 model points standing for 1,009,152 policies. The
+  computation is over the 20,000.
+- The graph has **19.9 million nodes**: about ten for each model point for
+  each month it has left to run (fund value, deaths, lapses, policies in
+  force, running present values), plus the trees that total them.
+- The two tables measure **different workloads** on that graph. The first is
+  one scenario, with one input changed. The second is 10,000 scenarios,
+  each recalculating every node. Their times are not comparable with each
+  other.
+
+Machine: Ryzen 9 5950X (16 cores, 32 threads), RTX 3090 (24 GB), double
+precision throughout. Runs of 13 November 2026.
 
 **Incremental recomputation** (no GPU, one scenario), against lifelib
 running the same model on the same machine. All figures measured:
@@ -179,7 +218,10 @@ After one model point changes, the graph recalculates about 570 of its 19.9
 million nodes (mean of 1,000 amendments). The two implementations agree on
 the result to a relative 3.7×10⁻¹⁵. Reading this table fairly:
 
-- lifelib is faster for a first valuation and when everything changes.
+- lifelib is faster for a first valuation and when everything changes. It
+  holds each quantity as one array over all model points and steps them
+  together, which suits a full valuation; the graph evaluates 19.9 million
+  nodes one by one and first has to be built.
 - lifelib's engine also tracks dependencies. It recomputes whole columns
   because its formulas are vectorised over model points. Valuing only the
   changed model point with lifelib by hand takes 0.29 s.
@@ -203,7 +245,10 @@ The Watershed times exclude one-off setup: 22.6 s to construct the graph and
 than the timed run. A JAX program written for this model with straightforward
 tuning is about 1.6 times faster than the plan.
 
-The GPU pays for large, deep graphs run over many scenarios. For a graph of
+A scenario batch is where the GPU fits: every scenario runs the same
+program on different inputs, so one kernel launch evaluates a group of nodes
+for all of them at once. The GPU pays for large, deep graphs run over many
+scenarios. For a graph of
 a few dozen nodes evaluated over millions of scenarios, transfer to and from
 the device dominates and the plan on CPU threads is as fast, unless the data
 is kept resident on the GPU. On two other models, hand-written parallel CPU
@@ -237,38 +282,56 @@ for JVM projects, is a separate project that uses the engine.
 
 ## Documentation
 
-| Topic | Where |
-|---|---|
-| Core API, features and examples | [crates/watershed-core/README.md](crates/watershed-core/README.md); `cargo doc --open -p watershed-core` |
-| Collections and grouping | [core guide: collections](crates/watershed-core/README.md#collections), [grouping](crates/watershed-core/README.md#grouping) |
-| Exact decimals | [core guide: exact decimals](crates/watershed-core/README.md#exact-decimals) |
-| History and change tracking | [core guide: history](crates/watershed-core/README.md#history-and-change-tracking); `cargo doc --open -p watershed-parquet` |
-| GPU and CPU scenario evaluation | [crates/watershed-gpu/README.md](crates/watershed-gpu/README.md) |
-| Python API | [crates/watershed-py/README.md](crates/watershed-py/README.md), [type stubs](crates/watershed-py/watershed.pyi) |
-| JVM API (Kotlin, Scala 3) | [surefold/watershed-jvm](https://github.com/surefold/watershed-jvm) |
-| WebAssembly and the data grid | [crates/watershed-grid/README.md](crates/watershed-grid/README.md) |
-| Benchmarks and reproducibility | [docs/benchmarks.md](docs/benchmarks.md) |
-| Implementation architecture | [docs/internals.md](docs/internals.md) |
-| Testing and correctness | [docs/testing.md](docs/testing.md) |
-| Known limitations | [below](#limitations), and the "Not done yet" section of the [watershed-gpu README](crates/watershed-gpu/README.md#not-done-yet) |
+The tables above link each capability and component to its guide. The rest:
+
+- **API reference:** `cargo doc --open -p watershed-core` (or
+  `-p watershed-gpu`, `-p watershed-parquet`); Python
+  [type stubs](crates/watershed-py/watershed.pyi).
+- **How scenario plans are compiled and why they need little working
+  memory:** [docs/scenario-plans.md](docs/scenario-plans.md).
+- **Benchmarks, methodology and reproduction:**
+  [docs/benchmarks.md](docs/benchmarks.md), and each example's sources in the
+  [watershed-gpu README](crates/watershed-gpu/README.md#what-each-example-rests-on).
+- **Implementation:** [docs/internals.md](docs/internals.md).
+- **Testing and correctness:** [docs/testing.md](docs/testing.md).
+- **Not done yet in scenario evaluation:**
+  [watershed-gpu README](crates/watershed-gpu/README.md#not-done-yet).
 
 ## Limitations
 
-**Scenario evaluation supports a subset of the graph.**
+### What both patterns can run
 
-- Supported: `f64` and `bool` nodes using `+ - * /`, `min`, `max`, `abs`,
-  `exp`, `ln`, `sqrt`, `pow`, comparisons, and/or/not, and conditionals.
-- Refused when the plan is compiled, with the node's name: `i64`, decimals,
-  text, lists, `choose`, and aggregate totals (so collections' `sum`,
-  `count`, `min`, `max` and groupings).
-- A model written with collections, decimals or `choose` must be rewritten
-  without them to run as scenarios. The examples build their own trees of
-  sums.
-- A table cannot be looked up by a varied input.
+A model runs under both patterns if every node between the scenario inputs
+and outputs is in the first row. Nodes elsewhere in the graph can be
+anything: only the part a plan is compiled from matters, and any part of
+the graph that no scenario input reaches is folded to constants, whatever
+it contains.
+
+| | Constructs | In a model meant for both |
+|---|---|---|
+| Both patterns | `f64` and `bool` nodes: `+ - * /`, `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, comparisons, and/or/not, conditionals (`when`) | Use directly |
+| Incremental only; could be lowered to a plan, not implemented | Aggregate totals (`sum`, `count`, `min`, `max` over a collection, and groupings); `choose`; a table looked up by a value that varies per scenario; `i64` arithmetic | Totals: an explicit tree of `+` nodes, as the examples build. `choose` and lookups: nested conditionals, or the looked-up value fixed per entity when the graph is built. Integers: `f64` |
+| Incremental only | Exact decimals, text and lists of text, errors as values | No equivalent. `f64` in place of a decimal gives up exactness |
+
+A plan refuses an unsupported node when it is compiled, naming the node, so
+a model is never silently run differently. Nothing needs rewriting for the
+incremental engine; what changes is how totals and lookups are written in
+the part of a model that scenarios run through.
+
+History, change sinks, pull mode and `redefine` are features of the graph,
+not of a model's formulas, and do not apply to a plan: a plan is a snapshot
+of the graph as it was when compiled.
+
+**Scenario evaluation.**
+
 - CPU plan results are bit-identical to the graph's. GPU results are too,
   except that a NaN may carry a different payload, `min`/`max` of `0.0` and
   `-0.0` follow x86-64, and `exp`, `ln` and `pow` may differ in the last one
   or two digits. This is established by tests, not by proof.
+- An expression that needs an evaluation stack deeper than 32 is refused.
+- A conditional evaluates both branches in a plan and selects one, which
+  matches the graph only because nothing in the supported subset can fail.
+- Loops are unrolled when the graph is built, so step counts are fixed.
 - The GPU executor is CUDA only. Graph construction and most of plan
   compilation are single-threaded, at about 1 µs per node each.
 

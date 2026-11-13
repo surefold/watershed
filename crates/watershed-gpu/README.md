@@ -338,6 +338,9 @@ random.
 
 ## How it runs
 
+In outline; [docs/scenario-plans.md](../../docs/scenario-plans.md) has the
+detail, with the slot allocation worked through.
+
 - **Levels.** A node's level is one more than the highest it reads, so a
   whole level is worked out at once.
 - **Slots.** A node's value is kept only until the last level that reads it
