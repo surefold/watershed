@@ -84,6 +84,7 @@ Where a time is scaled up from a smaller run, it says so.
 | `loans` | Expected losses on 20,000 mortgages over 10,000 paths of the economy | the same sums written out by hand: 3×10⁻¹⁷ | 6.6 s | about 2 minutes (scaled) | by hand, 32 threads: 17.7 s (scaled) |
 | `pensions` | A pension scheme of 299,562 members over 5,000 paths and 75 years | the same sums by hand: 5×10⁻¹³ | 0.9 s | 15.1 s (scaled) | by hand, 32 threads: 5.0 s (scaled) |
 | `spreadsheet` | A public Excel valuation workbook, 10 million trials | Excel's stored values: all 176 cells | 0.5 s | 1.8 s | the graph, a trial at a time: 104 s (scaled) |
+| `dosing` | An antibiotic's dosing protocol tried on 5 million made-up patients, each followed for 72 hours | SciPy's LSODA solver, 300 patients: 1.7×10⁻¹⁰ | 60 ms a protocol, 51 protocols in 3.0 s | 1.8 s a protocol | the graph: 70 s (scaled) |
 | `monte_carlo` | 200,000 positions on 500 shares, 100,000 futures | the graph, bit for bit | 1.6 s | about 29 s (scaled) | the graph: about 25 minutes (scaled) |
 | `tax_benefit` | A country's tax and benefit rules over 10 million households | the graph, bit for bit | 0.7 s | 0.5 s | the graph: 28 s (scaled) |
 | `insurance` | A car insurer's pricing over 5 million policies | the graph, bit for bit | 0.4 s | 0.15 s | the graph: 10.5 s (scaled) |
@@ -133,6 +134,11 @@ run can reveal, not facts about any insurer, bank or scheme.
 - With nothing paid in, moving the pension scheme from no shares to 40%
   cuts the chance of running out of money from 98% to 34%; 80% does no
   better.
+- At the same dose for every kilogram, patients with good kidneys overshoot
+  the aimed-for exposure to the antibiotic far more often than those with
+  poor ones; a dose for each band of kidney function puts 41% within the
+  aim against 31%, and no dose by weight and kidney function does much
+  better, which is why blood levels are measured.
 - On real prices from 2010 to 2025, shares that fell behind over a few days
   tended to catch up, far beyond what shuffled histories gave (fewer than 1
   in 100 did as well), by about as much as it costs to trade on it.
@@ -159,6 +165,17 @@ mkdir export && python crates/watershed-gpu/examples/shared/liabilities_referenc
 cargo run --release --features cuda --example liabilities -- export
 cargo run --release --features cuda --example capital -- export
 ```
+
+`dosing` needs a few hundred patients worked by an independent solver:
+
+```bash
+pip install numpy scipy
+mkdir out && python crates/watershed-gpu/examples/shared/dosing_reference.py out
+cargo run --release --features cuda --example dosing -- out
+```
+
+Its model's numbers are as recalled from the paper it names and have not
+been checked against it; it shows the method and is not advice on dosing.
 
 `spreadsheet` takes an `.xlsx` workbook, the cells to vary and the cells to
 read. The one above is Aswath Damodaran's `fcffsimpleginzu.xlsx`:
