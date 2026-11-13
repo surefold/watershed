@@ -57,11 +57,13 @@
 //! plan is made, with its name. So is one that reads a node holding an
 //! error, even in a branch that is not taken.
 
+mod keep;
 mod plan;
 
 #[cfg(feature = "cuda")]
 mod cuda;
 
+pub use keep::{Kept, Refresh};
 pub use plan::{MAX_STACK, PlanError, Scenarios};
 
 #[cfg(feature = "cuda")]

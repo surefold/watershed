@@ -644,6 +644,21 @@ impl Scenarios {
         shared: &[NodeId],
         outputs: &[NodeId],
     ) -> Result<Scenarios, PlanError> {
+        Scenarios::cut_at(g, vary, &[], shared, outputs)
+    }
+
+    /// As [`with_shared`](Self::with_shared), with calculated nodes `cut`
+    /// that are not worked out but given, like the inputs `vary` and after
+    /// them in a scenario's values. Nothing a cut node uses is looked at.
+    pub(crate) fn cut_at(
+        g: &Graph,
+        vary: &[NodeId],
+        cut: &[NodeId],
+        shared: &[NodeId],
+        outputs: &[NodeId],
+    ) -> Result<Scenarios, PlanError> {
+        let inputs = vary.len();
+        let vary = &[vary, cut].concat()[..];
         if vary.is_empty() {
             return Err(PlanError::NoInputs);
         }
@@ -685,7 +700,8 @@ impl Scenarios {
         );
         for (&id, place) in places {
             float(id)?;
-            if !g.is_input(id) {
+            let given = matches!(place, Place::Slot(n) if n as usize >= inputs);
+            if !given && !g.is_input(id) {
                 return Err(PlanError::NotAnInput(b.name(id)));
             }
             if b.mark(id, place) {
@@ -707,7 +723,10 @@ impl Scenarios {
         while let Some(visit) = stack.pop() {
             match visit {
                 Visit::Enter(id) => {
-                    if std::mem::replace(&mut seen[id.index()], true) || g.is_input(id) {
+                    if std::mem::replace(&mut seen[id.index()], true)
+                        || g.is_input(id)
+                        || b.place(id).is_some()
+                    {
                         continue;
                     }
                     stack.push(Visit::Leave(id));

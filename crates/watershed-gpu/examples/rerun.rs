@@ -23,6 +23,7 @@ mod savings;
 use savings::*;
 use watershed_core::NodeId;
 use watershed_core::prelude::*;
+use watershed_gpu::Kept;
 
 /// The tree of sums over the policies, for each measure: `levels[0]` is each
 /// policy's own answer, and each level after adds up eight of the one below.
@@ -78,24 +79,17 @@ fn main() -> Result<()> {
     );
 
     // What the first run keeps: every node of the trees from level `keep`
-    // up. `column[measure][level - keep]` is where that level starts in a
-    // path's row of results.
-    let mut outputs: Vec<NodeId> = Vec::new();
-    let mut column = vec![Vec::new(); MEASURES];
-    for measure in 0..MEASURES {
-        for level in &trees[measure][keep..] {
-            column[measure].push(outputs.len());
-            outputs.extend(level.iter().map(|n| n.id()));
-        }
-    }
-    let width = outputs.len();
-    let roots: Vec<usize> = (0..MEASURES)
-        .map(|m| *column[m].last().expect("a root"))
+    // up.
+    let vary: Vec<NodeId> = book.returns.iter().map(|r| r.id()).collect();
+    let roots: Vec<NodeId> = trees.iter().map(|t| t[depth - 1][0].id()).collect();
+    let levels: Vec<NodeId> = trees
+        .iter()
+        .flat_map(|t| t[keep..].iter().flatten().map(|n| n.id()))
         .collect();
-
     let started = Instant::now();
-    let plan = book.plan(&outputs)?;
+    let mut kept = Kept::new(&book.g, &vary, &book.knobs.ids(), &roots, &levels)?;
     let plan_took = started.elapsed();
+    let width = kept.width();
 
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let (drift, spread) = (
@@ -107,15 +101,16 @@ fn main() -> Result<()> {
         .collect();
 
     let started = Instant::now();
-    let mut kept = runner.run(&plan, &inputs)?;
+    let results = runner.run(kept.plan(), &inputs)?;
     let first = started.elapsed();
     println!(
-        "the whole book: plan of {} nodes made in {}, run on the {} in {}",
-        commas(plan.nodes() as f64),
+        "the whole book: plan of {} nodes made in {} (with what each kept node uses), run on the {} in {}",
+        commas(kept.plan().nodes() as f64),
         time(plan_took),
         runner.name(),
         time(first)
     );
+    kept.hold(inputs.clone(), results);
     println!(
         "  kept for each path: {} values, the trees of sums from level {keep} up ({:.0} MB in all)",
         commas(width as f64),
@@ -135,7 +130,7 @@ fn main() -> Result<()> {
     ];
     println!(
         "{:>8} {:>7} {:>9} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "policy", "months", "nodes", "graph", "plan", "run, CPU", "run, GPU", "add again"
+        "policy", "months", "nodes", "graph", "plan", "run, CPU", "run, GPU", "put in"
     );
     let mut worst = (0.0f64, 0.0f64);
     for (n, &k) in chosen.iter().enumerate() {
@@ -146,20 +141,21 @@ fn main() -> Result<()> {
         book.g.stabilize();
         let graph_took = started.elapsed();
 
-        // A plan of just the kept node above the policy, for each measure.
-        let at = k >> (3 * keep);
+        // What to run: a plan of the kept nodes the change reaches, cut
+        // at the kept nodes it does not.
         let started = Instant::now();
-        let above: Vec<NodeId> = (0..MEASURES).map(|m| trees[m][keep][at].id()).collect();
-        let small = book.plan(&above)?;
+        let refresh = kept
+            .refresh(&book.g, &[book.promised[k].id()])?
+            .ok_or("nothing kept uses the policy")?;
         let small_took = started.elapsed();
 
         let started = Instant::now();
-        let again = small.run_cpu(&inputs);
+        let again = refresh.plan.run_cpu(&refresh.inputs);
         let cpu_took = started.elapsed();
         #[cfg(feature = "cuda")]
         let gpu_took = {
             let started = Instant::now();
-            let on_gpu = runner.gpu.run(&small, &inputs)?;
+            let on_gpu = runner.gpu.run(&refresh.plan, &refresh.inputs)?;
             let took = started.elapsed();
             assert!(
                 on_gpu
@@ -173,32 +169,14 @@ fn main() -> Result<()> {
         #[cfg(not(feature = "cuda"))]
         let gpu_took = String::from("-");
 
-        // Put the new values in, and add the sums above them again.
         let started = Instant::now();
-        for (s, row) in kept.chunks_mut(width).enumerate() {
-            for m in 0..MEASURES {
-                row[column[m][0] + at] = again[s * MEASURES + m];
-                let mut child = at;
-                for level in keep + 1..depth {
-                    let parent = child / 8;
-                    let below = column[m][level - 1 - keep];
-                    let first = parent * 8;
-                    let last = (first + 8).min(trees[m][level - 1].len());
-                    let mut all = row[below + first];
-                    for x in &row[below + first + 1..below + last] {
-                        all += x;
-                    }
-                    row[column[m][level - keep] + parent] = all;
-                    child = parent;
-                }
-            }
-        }
+        kept.apply(&refresh, &again);
         let add_took = started.elapsed();
         println!(
             "{:>8} {:>7} {:>9} {:>10} {:>10} {:>10} {:>10} {:>10}",
             k,
             policies[k].months_left(),
-            commas(small.nodes() as f64),
+            commas(refresh.plan.nodes() as f64),
             time(graph_took),
             time(small_took),
             time(cpu_took),
@@ -212,18 +190,15 @@ fn main() -> Result<()> {
         // whole plan again and running all of it?
         if n == 0 || n == chosen.len() - 1 {
             let started = Instant::now();
-            let whole = book.plan(&outputs)?;
+            let whole = Kept::new(&book.g, &vary, &book.knobs.ids(), &roots, &levels)?;
             let replanned = started.elapsed();
             let started = Instant::now();
-            let fresh = runner.run(&whole, &inputs)?;
+            let fresh = runner.run(whole.plan(), &inputs)?;
             let reran = started.elapsed();
             let same = fresh
                 .iter()
-                .zip(&kept)
+                .zip(kept.values())
                 .all(|(a, b)| a.to_bits() == b.to_bits());
-            let moved = (0..scenarios)
-                .filter(|s| fresh[s * width + roots[NET]] != 0.0)
-                .count();
             println!(
                 "    checked: the whole plan made again ({}) and run again ({}) gives {} for all {} values on all {} paths",
                 time(replanned),
@@ -234,14 +209,14 @@ fn main() -> Result<()> {
                     "SOMETHING ELSE"
                 },
                 commas(width as f64),
-                commas(moved as f64)
+                commas(scenarios as f64)
             );
             assert!(same, "bringing the run up to date gave something else");
         }
     }
     println!();
     println!(
-        "bringing {} paths up to date after one policy changes took at most {} (plan, CPU run and adding again),",
+        "bringing {} paths up to date after one policy changes took at most {} (plan, CPU run and putting in),",
         commas(scenarios as f64),
         time(std::time::Duration::from_secs_f64(worst.0))
     );
