@@ -12,7 +12,8 @@
 //! is one more than the highest level it reads, so a whole level can be
 //! worked out at once.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::fmt;
 use std::ops::Range;
 
@@ -51,6 +52,72 @@ const EXP: u32 = 21;
 const LN: u32 = 22;
 const SQRT: u32 = 23;
 const POW: u32 = 24;
+
+/// Where a load reads from.
+#[cfg(feature = "cuda")]
+pub(crate) enum Source {
+    Slot,
+    Const,
+    Shared,
+}
+
+/// How many values an instruction takes off the stack.
+#[cfg(feature = "cuda")]
+pub(crate) fn arity(code: u32) -> usize {
+    match code {
+        LOAD | CONST | LOAD_SHARED => 0,
+        NEG | ABS | NOT | EXP | LN | SQRT => 1,
+        SELECT => 3,
+        _ => 2,
+    }
+}
+
+/// Where a load reads from.
+#[cfg(feature = "cuda")]
+pub(crate) fn source_of(code: u32) -> Source {
+    match code {
+        LOAD => Source::Slot,
+        CONST => Source::Const,
+        _ => Source::Shared,
+    }
+}
+
+/// An instruction that is not a load, written in C on the values named. It
+/// must give what `eval` gives and what `kernel.cu` gives for the same code.
+#[cfg(feature = "cuda")]
+pub(crate) fn in_c(code: u32, on: &[&str]) -> String {
+    let truth = |test: String| format!("({test}) ? 1.0 : 0.0");
+    let a = on[0];
+    let b = on.get(1).copied().unwrap_or("");
+    match code {
+        NEG => format!("-{a}"),
+        ABS => format!("fabs({a})"),
+        EXP => format!("exp({a})"),
+        LN => format!("log({a})"),
+        SQRT => format!("sqrt({a})"),
+        NOT => truth(format!("{a} == 0.0")),
+        // Condition, then, otherwise.
+        SELECT => format!("({a} != 0.0) ? {b} : {}", on[2]),
+        ADD => format!("{a} + {b}"),
+        SUB => format!("{a} - {b}"),
+        MUL => format!("{a} * {b}"),
+        DIV => format!("{a} / {b}"),
+        POW => format!("pow({a}, {b})"),
+        // As Rust's `f64::min` and `f64::max` come out on x86-64: a NaN
+        // gives the other side, and of two equal values the second.
+        MIN => format!("({b} != {b}) ? {a} : (({a} < {b}) ? {a} : {b})"),
+        MAX => format!("({b} != {b}) ? {a} : (({a} > {b}) ? {a} : {b})"),
+        LT => truth(format!("{a} < {b}")),
+        LE => truth(format!("{a} <= {b}")),
+        GT => truth(format!("{a} > {b}")),
+        GE => truth(format!("{a} >= {b}")),
+        EQ => truth(format!("{a} == {b}")),
+        NE => truth(format!("{a} != {b}")),
+        AND => truth(format!("{a} != 0.0 && {b} != 0.0")),
+        OR => truth(format!("{a} != 0.0 || {b} != 0.0")),
+        _ => unreachable!("no such instruction"),
+    }
+}
 
 /// The most slots, shared values or constants a plan can number: what fits
 /// beside the code.
@@ -139,22 +206,51 @@ pub(crate) enum Output {
     Fixed(f64),
 }
 
+/// Nodes next to each other in a level whose instructions differ only in
+/// what they read: a kernel compiled for the shape works them all out.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) struct Group {
+    /// Which of the plan's shapes.
+    pub(crate) shape: u32,
+    pub(crate) first: u32,
+    pub(crate) count: u32,
+}
+
+/// How many scenarios are added up at a time when outputs are totalled, on
+/// the GPU and on the CPU alike, so that both add in the same order.
+pub(crate) const BLOCK: usize = 1024;
+
 /// A graph prepared to run for many sets of inputs.
 ///
 /// It is a copy: later changes to the graph do not reach it. Values of nodes
 /// that depend on neither a varied nor a shared input are taken as they are
 /// when the plan is made, so call [`Graph::stabilize`] first.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub struct Scenarios {
-    /// How many inputs are varied. They take slots `0..vary`; calculated node
-    /// `n` takes slot `vary + n`.
+    /// How many inputs are varied. They take slots `0..vary`.
     pub(crate) vary: usize,
-    /// Per calculated node: where its instructions start in `ops`, and how many.
+    /// How many slots a scenario needs. A calculated node's slot is used
+    /// again once the last level that reads the node has been worked out.
+    slots: usize,
+    /// Per calculated node: where its instructions start in `ops`, how many
+    /// there are, and the slot its value goes in.
     pub(crate) programs: Vec<u32>,
     pub(crate) ops: Vec<u32>,
     pub(crate) consts: Vec<f64>,
     /// The calculated nodes of each level, lowest first.
     pub(crate) levels: Vec<Range<u32>>,
+    /// The instruction codes of each shape of node, without what they read.
+    pub(crate) shapes: Vec<Vec<u32>>,
+    /// The nodes again as runs of one shape, in the order they are worked
+    /// out: each level's groups come before the next level's.
+    pub(crate) groups: Vec<Group>,
+    /// What every node reads (a slot, a constant or a shared value for each
+    /// of its loads, in order), one node after another.
+    pub(crate) operands: Vec<u32>,
+    /// Per calculated node: where its operands start.
+    pub(crate) operand_at: Vec<u32>,
     pub(crate) outputs: Vec<Output>,
     /// How many inputs are shared. Their values are the first of `shared`.
     shared_inputs: usize,
@@ -193,36 +289,13 @@ enum Kind {
 
 struct Builder<'a> {
     g: &'a Graph,
-    place_of: HashMap<NodeId, Place>,
+    /// Where each node of the graph is, by its index: 0 if it is the same
+    /// always (or not yet met), otherwise a [`Place`] as `mark` writes it.
+    places: Vec<u32>,
     /// The level of each slot; a varied input is at level 0.
     level_of: Vec<u32>,
     consts: Vec<f64>,
     const_of: HashMap<u64, u32>,
-}
-
-/// One node's instructions as they are made.
-struct Program<'o> {
-    node: NodeId,
-    ops: &'o mut Vec<u32>,
-    /// The stack in use, and the most it has been.
-    depth: usize,
-    deepest: usize,
-    /// One more than the highest level read.
-    level: u32,
-}
-
-impl Program<'_> {
-    /// An instruction that leaves one more on the stack.
-    fn push(&mut self, op: u32) {
-        self.ops.push(op);
-        self.depth += 1;
-        self.deepest = self.deepest.max(self.depth);
-    }
-    /// An instruction that takes `takes` off the stack and leaves one.
-    fn apply(&mut self, op: u32, takes: usize) {
-        self.ops.push(op);
-        self.depth -= takes - 1;
-    }
 }
 
 impl Builder<'_> {
@@ -230,11 +303,24 @@ impl Builder<'_> {
         self.g.name(id).to_string()
     }
 
-    fn unsupported(&self, node: NodeId, what: impl Into<String>) -> PlanError {
-        PlanError::Unsupported {
-            node: self.name(node),
-            what: what.into(),
+    fn place(&self, id: NodeId) -> Option<Place> {
+        match self.places[id.index()] {
+            0 => None,
+            mark if mark & 1 == 1 => Some(Place::Slot(mark >> 1)),
+            mark => Some(Place::Shared((mark >> 1) - 1)),
         }
+    }
+
+    /// Records where a node is. Gives back whether it had a place already.
+    fn mark(&mut self, id: NodeId, place: Place) -> bool {
+        let before = std::mem::replace(
+            &mut self.places[id.index()],
+            match place {
+                Place::Slot(slot) => slot << 1 | 1,
+                Place::Shared(at) => (at + 1) << 1,
+            },
+        );
+        before != 0
     }
 
     fn constant(&mut self, x: f64) -> Result<u32, PlanError> {
@@ -251,13 +337,13 @@ impl Builder<'_> {
     }
 
     /// The value of a node that is the same always.
-    fn fixed(&self, id: NodeId) -> Result<(f64, Kind), PlanError> {
+    fn fixed(&self, id: NodeId) -> Result<f64, PlanError> {
         if !self.g.is_calculated(id) {
             return Err(PlanError::NotCalculated(self.name(id)));
         }
         match self.g.value(id) {
-            Value::F64(x) => Ok((*x, Kind::Float)),
-            Value::Bool(x) => Ok((f64::from(u8::from(*x)), Kind::Bool)),
+            Value::F64(x) => Ok(*x),
+            Value::Bool(x) => Ok(f64::from(u8::from(*x))),
             Value::Error(error) => Err(PlanError::HoldsError {
                 node: self.name(id),
                 error: error.to_string(),
@@ -268,83 +354,123 @@ impl Builder<'_> {
             }),
         }
     }
+}
 
-    /// The kind of a node that is not the same always.
-    fn kind_of(&self, id: NodeId) -> Result<Kind, PlanError> {
-        match self.g.node_type(id) {
-            Type::F64 => Ok(Kind::Float),
-            Type::Bool => Ok(Kind::Bool),
-            ty => Err(PlanError::NotAFloat {
-                node: self.name(id),
-                ty,
-            }),
+/// What a node of this type leaves on the stack.
+fn kind_of(g: &Graph, id: NodeId) -> Result<Kind, PlanError> {
+    match g.node_type(id) {
+        Type::F64 => Ok(Kind::Float),
+        Type::Bool => Ok(Kind::Bool),
+        ty => Err(PlanError::NotAFloat {
+            node: g.name(id).to_string(),
+            ty,
+        }),
+    }
+}
+
+/// Some nodes' instructions before it is known where what they read is: a
+/// load's number is into `reads`, and a constant's into `consts`. These are
+/// made for many nodes at once, on every core; where each node reads from
+/// is settled afterwards, one node after another.
+#[derive(Default)]
+struct Rough {
+    ops: Vec<u32>,
+    reads: Vec<NodeId>,
+    consts: Vec<f64>,
+    nodes: Vec<RoughNode>,
+}
+
+enum RoughNode {
+    /// A total, which has members in place of an expression.
+    Total,
+    /// These of the rough instructions, needing a stack this deep.
+    Ops(Range<usize>, usize),
+    /// It cannot be done. This matters only if the node turns out to depend
+    /// on a varied or shared input.
+    Refused(PlanError),
+}
+
+/// One node's rough instructions as they are made.
+struct Program<'r> {
+    g: &'r Graph,
+    node: NodeId,
+    rough: &'r mut Rough,
+    /// The stack in use, and the most it has been.
+    depth: usize,
+    deepest: usize,
+}
+
+impl Program<'_> {
+    /// An instruction that leaves one more on the stack.
+    fn push(&mut self, op: u32) {
+        self.rough.ops.push(op);
+        self.depth += 1;
+        self.deepest = self.deepest.max(self.depth);
+    }
+
+    /// An instruction that takes `takes` off the stack and leaves one.
+    fn apply(&mut self, op: u32, takes: usize) {
+        self.rough.ops.push(op);
+        self.depth -= takes - 1;
+    }
+
+    fn unsupported(&self, what: impl Into<String>) -> PlanError {
+        PlanError::Unsupported {
+            node: self.g.name(self.node).to_string(),
+            what: what.into(),
         }
     }
 
-    /// Adds the instructions for `ir` to the program, and says what they
-    /// leave on the stack.
+    fn constant(&mut self, x: f64) {
+        let at = self.rough.consts.len() as u32;
+        self.rough.consts.push(x);
+        self.push(CONST | at << CODE_BITS);
+    }
+
+    /// Adds the instructions for `ir`, and says what they leave on the
+    /// stack.
     ///
     /// Both branches of a condition are worked out and one is kept. That
     /// gives what the graph gives, which works out only the branch taken,
     /// because nothing here can fail: there are no errors to meet in the
     /// branch not taken.
-    fn translate(&mut self, p: &mut Program, ir: &Ir) -> Result<Kind, PlanError> {
-        let node = p.node;
-        let floats = |b: &Self, kind: Kind, what: &str| match kind {
-            Kind::Float => Ok(()),
-            Kind::Bool => Err(b.unsupported(node, format!("{what} of a bool"))),
-        };
+    fn translate(&mut self, ir: &Ir) -> Result<Kind, PlanError> {
         match ir {
             Ir::Const(Value::F64(x)) => {
-                let at = self.constant(*x)?;
-                p.push(CONST | at << CODE_BITS);
+                self.constant(*x);
                 Ok(Kind::Float)
             }
             Ir::Const(Value::Bool(x)) => {
-                let at = self.constant(f64::from(u8::from(*x)))?;
-                p.push(CONST | at << CODE_BITS);
+                self.constant(f64::from(u8::from(*x)));
                 Ok(Kind::Bool)
             }
-            Ir::Const(other) => Err(self.unsupported(
-                p.node,
-                match other.type_of() {
-                    Some(ty) => format!("work on {ty}"),
-                    None => "an error".into(),
-                },
-            )),
-            Ir::Ref(r) => match self.place_of.get(&r.node).copied() {
-                Some(Place::Slot(slot)) => {
-                    p.level = p.level.max(self.level_of[slot as usize] + 1);
-                    p.push(LOAD | slot << CODE_BITS);
-                    self.kind_of(r.node)
-                }
-                Some(Place::Shared(at)) => {
-                    p.push(LOAD_SHARED | at << CODE_BITS);
-                    self.kind_of(r.node)
-                }
-                None => {
-                    let (x, kind) = self.fixed(r.node)?;
-                    let at = self.constant(x)?;
-                    p.push(CONST | at << CODE_BITS);
-                    Ok(kind)
-                }
-            },
+            Ir::Const(other) => Err(self.unsupported(match other.type_of() {
+                Some(ty) => format!("work on {ty}"),
+                None => "an error".into(),
+            })),
+            Ir::Ref(r) => {
+                let kind = kind_of(self.g, r.node)?;
+                let at = self.rough.reads.len() as u32;
+                self.rough.reads.push(r.node);
+                self.push(LOAD | at << CODE_BITS);
+                Ok(kind)
+            }
             Ir::Unary(op, a) => {
-                let kind = self.translate(p, a)?;
+                let kind = self.translate(a)?;
                 match (op, kind) {
-                    (UnOp::Neg, Kind::Float) => p.apply(NEG, 1),
-                    (UnOp::Abs, Kind::Float) => p.apply(ABS, 1),
-                    (UnOp::Exp, Kind::Float) => p.apply(EXP, 1),
-                    (UnOp::Ln, Kind::Float) => p.apply(LN, 1),
-                    (UnOp::Sqrt, Kind::Float) => p.apply(SQRT, 1),
-                    (UnOp::Not, Kind::Bool) => p.apply(NOT, 1),
-                    (other, _) => return Err(self.unsupported(p.node, format!("a {other:?}"))),
+                    (UnOp::Neg, Kind::Float) => self.apply(NEG, 1),
+                    (UnOp::Abs, Kind::Float) => self.apply(ABS, 1),
+                    (UnOp::Exp, Kind::Float) => self.apply(EXP, 1),
+                    (UnOp::Ln, Kind::Float) => self.apply(LN, 1),
+                    (UnOp::Sqrt, Kind::Float) => self.apply(SQRT, 1),
+                    (UnOp::Not, Kind::Bool) => self.apply(NOT, 1),
+                    (other, _) => return Err(self.unsupported(format!("a {other:?}"))),
                 }
                 Ok(kind)
             }
             Ir::Binary(op, a, b) => {
-                let left = self.translate(p, a)?;
-                let right = self.translate(p, b)?;
+                let left = self.translate(a)?;
+                let right = self.translate(b)?;
                 let (code, gives) = match op {
                     BinOp::Add => (ADD, Kind::Float),
                     BinOp::Sub => (SUB, Kind::Float),
@@ -361,34 +487,62 @@ impl Builder<'_> {
                     BinOp::Ne => (NE, Kind::Bool),
                     BinOp::And => (AND, Kind::Bool),
                     BinOp::Or => (OR, Kind::Bool),
-                    other => return Err(self.unsupported(p.node, format!("a {other:?}"))),
+                    other => return Err(self.unsupported(format!("a {other:?}"))),
                 };
                 // Arithmetic is on numbers; comparing is of either, since
                 // false is below true as 0.0 is below 1.0. `And` and `Or`
                 // are of bools, which the graph's own type check has seen to.
-                if gives == Kind::Float {
-                    floats(self, left, "arithmetic")?;
-                    floats(self, right, "arithmetic")?;
+                if gives == Kind::Float && (left == Kind::Bool || right == Kind::Bool) {
+                    return Err(self.unsupported("arithmetic of a bool"));
                 }
-                p.apply(code, 2);
+                self.apply(code, 2);
                 Ok(gives)
             }
             Ir::If(condition, then, otherwise) => {
-                self.translate(p, condition)?;
-                let kind = self.translate(p, then)?;
-                self.translate(p, otherwise)?;
-                p.apply(SELECT, 3);
+                self.translate(condition)?;
+                let kind = self.translate(then)?;
+                self.translate(otherwise)?;
+                self.apply(SELECT, 3);
                 Ok(kind)
             }
-            Ir::Choose(..) => Err(self.unsupported(p.node, "a choice")),
-            Ir::List(_) => Err(self.unsupported(p.node, "work on a list")),
+            Ir::Choose(..) => Err(self.unsupported("a choice")),
+            Ir::List(_) => Err(self.unsupported("work on a list")),
         }
     }
 }
 
+/// The rough instructions of some nodes.
+fn rough(g: &Graph, nodes: &[NodeId]) -> Rough {
+    let mut rough = Rough::default();
+    for &node in nodes {
+        let Some(ir) = g.expression(node) else {
+            rough.nodes.push(RoughNode::Total);
+            continue;
+        };
+        let start = rough.ops.len();
+        let mut program = Program {
+            g,
+            node,
+            rough: &mut rough,
+            depth: 0,
+            deepest: 0,
+        };
+        let translated = program.translate(&ir);
+        let deepest = program.deepest;
+        rough.nodes.push(match translated {
+            Ok(_) => RoughNode::Ops(start..rough.ops.len(), deepest),
+            Err(refused) => {
+                rough.ops.truncate(start);
+                RoughNode::Refused(refused)
+            }
+        });
+    }
+    rough
+}
+
 enum Visit {
     Enter(NodeId),
-    Leave(NodeId, Option<Ir>),
+    Leave(NodeId),
 }
 
 /// Runs one node's instructions. `vals` holds this scenario's slots (none,
@@ -455,6 +609,23 @@ fn eval(ops: &[u32], consts: &[f64], shared: &[f64], vals: &[f64]) -> f64 {
     stack[0]
 }
 
+/// Adds values up a block at a time, then the blocks.
+pub(crate) fn total(values: impl Iterator<Item = f64>) -> f64 {
+    let (mut all, mut block, mut in_block) = (0.0, 0.0, 0);
+    for x in values {
+        block += x;
+        in_block += 1;
+        if in_block == BLOCK {
+            all += block;
+            (block, in_block) = (0.0, 0);
+        }
+    }
+    if in_block > 0 {
+        all += block;
+    }
+    all
+}
+
 impl Scenarios {
     /// Prepares `g` to be run for many sets of values of the inputs `vary`,
     /// reading `outputs` each time.
@@ -496,7 +667,7 @@ impl Scenarios {
         };
         let mut b = Builder {
             g,
-            place_of: HashMap::new(),
+            places: vec![0; g.len()],
             level_of: vec![0; vary.len()],
             consts: Vec::new(),
             const_of: HashMap::new(),
@@ -517,11 +688,11 @@ impl Scenarios {
             if !g.is_input(id) {
                 return Err(PlanError::NotAnInput(b.name(id)));
             }
-            if b.place_of.insert(id, place).is_some() {
+            if b.mark(id, place) {
                 return Err(PlanError::Repeated(b.name(id)));
             }
             if matches!(place, Place::Shared(_)) {
-                shared_values.push(b.fixed(id)?.0);
+                shared_values.push(b.fixed(id)?);
             }
         }
         for &id in outputs {
@@ -530,153 +701,287 @@ impl Scenarios {
 
         // Every calculated node the outputs depend on, each after the nodes
         // it uses. This follows every branch of a condition, taken or not.
-        let mut order: Vec<(NodeId, Option<Ir>)> = Vec::new();
-        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut order: Vec<NodeId> = Vec::new();
+        let mut seen = vec![false; g.len()];
         let mut stack: Vec<Visit> = outputs.iter().map(|&id| Visit::Enter(id)).collect();
-        let mut refs = Vec::new();
         while let Some(visit) = stack.pop() {
             match visit {
                 Visit::Enter(id) => {
-                    if !seen.insert(id) || g.is_input(id) {
+                    if std::mem::replace(&mut seen[id.index()], true) || g.is_input(id) {
                         continue;
                     }
-                    let ir = g.expression(id);
-                    let uses: Vec<NodeId> = match &ir {
-                        Some(ir) => {
-                            refs.clear();
-                            ir.refs(&mut refs);
-                            refs.iter().map(|r| r.node).collect()
-                        }
-                        // A total, which has members in place of an expression.
-                        None => g.dependencies(id),
-                    };
-                    stack.push(Visit::Leave(id, ir));
+                    stack.push(Visit::Leave(id));
                     stack.extend(
-                        uses.into_iter()
-                            .filter(|u| !seen.contains(u))
+                        g.dependencies(id)
+                            .into_iter()
+                            .filter(|u| !seen[u.index()])
                             .map(Visit::Enter),
                     );
                 }
-                Visit::Leave(id, ir) => order.push((id, ir)),
+                Visit::Leave(id) => order.push(id),
             }
         }
+        drop(seen);
 
-        // Turn each node that is not the same always into instructions.
+        // Each node's instructions, without yet knowing where what it reads
+        // is: that needs nothing but the graph, so every core does a share.
+        const AT_A_TIME: usize = 2048;
+        let roughs: Vec<Rough> = order
+            .par_chunks(AT_A_TIME)
+            .map(|nodes| rough(g, nodes))
+            .collect();
+
+        // Now, one node after another, where each reads from. A node that
+        // reads nothing varied or shared is the same always and is left out.
         let mut ops: Vec<u32> = Vec::new();
         let mut drafts: Vec<Draft> = Vec::new();
         let mut shared_ops: Vec<u32> = Vec::new();
         let mut shared_programs: Vec<u32> = Vec::new();
-        for (id, ir) in order {
-            let Some(ir) = ir else {
-                if g.dependencies(id)
-                    .iter()
-                    .any(|d| b.place_of.contains_key(d))
-                {
-                    return Err(b.unsupported(id, "a total"));
+        for (nodes, rough) in order.chunks(AT_A_TIME).zip(&roughs) {
+            for (&id, node) in nodes.iter().zip(&rough.nodes) {
+                let (range, deepest) = match node {
+                    RoughNode::Total => {
+                        if g.dependencies(id).iter().any(|&d| b.place(d).is_some()) {
+                            return Err(PlanError::Unsupported {
+                                node: b.name(id),
+                                what: "a total".into(),
+                            });
+                        }
+                        continue;
+                    }
+                    RoughNode::Refused(refused) => {
+                        // Whether it matters: does it read anything that is
+                        // not the same always?
+                        if g.dependencies(id).iter().any(|&d| b.place(d).is_some()) {
+                            kind_of(g, id)?;
+                            return Err(refused.clone());
+                        }
+                        continue;
+                    }
+                    RoughNode::Ops(range, deepest) => (range.clone(), *deepest),
+                };
+                let reads = |op: &u32| match op & CODE {
+                    LOAD => b.place(rough.reads[(op >> CODE_BITS) as usize]),
+                    _ => None,
+                };
+                let mut places = rough.ops[range.clone()].iter().filter_map(reads);
+                let every_scenario = places.clone().any(|p| matches!(p, Place::Slot(_)));
+                if !every_scenario && places.next().is_none() {
+                    continue;
                 }
-                continue;
-            };
-            refs.clear();
-            ir.refs(&mut refs);
-            let mut reads = refs.iter().filter_map(|r| b.place_of.get(&r.node));
-            let every_scenario = reads.clone().any(|p| matches!(p, Place::Slot(_)));
-            if !every_scenario && reads.next().is_none() {
-                continue;
-            }
-            b.kind_of(id)?;
-            let into = match every_scenario {
-                true => &mut ops,
-                false => &mut shared_ops,
-            };
-            let start = into.len();
-            let mut program = Program {
-                node: id,
-                ops: into,
-                depth: 0,
-                deepest: 0,
-                level: 0,
-            };
-            b.translate(&mut program, &ir)?;
-            let (deepest, level) = (program.deepest, program.level);
-            if deepest > MAX_STACK {
-                return Err(PlanError::TooDeep(b.name(id)));
-            }
-            if into.len() > u32::MAX as usize {
-                return Err(PlanError::TooLarge);
-            }
-            if every_scenario {
-                let slot = vary.len() + drafts.len();
-                if slot > MAX_ARG {
+                kind_of(g, id)?;
+                if deepest > MAX_STACK {
+                    return Err(PlanError::TooDeep(b.name(id)));
+                }
+                let into = match every_scenario {
+                    true => &mut ops,
+                    false => &mut shared_ops,
+                };
+                let start = into.len();
+                let mut level = 0;
+                for &op in &rough.ops[range] {
+                    let at = (op >> CODE_BITS) as usize;
+                    into.push(match op & CODE {
+                        LOAD => match b.place(rough.reads[at]) {
+                            Some(Place::Slot(slot)) => {
+                                level = level.max(b.level_of[slot as usize] + 1);
+                                LOAD | slot << CODE_BITS
+                            }
+                            Some(Place::Shared(at)) => LOAD_SHARED | at << CODE_BITS,
+                            None => {
+                                let x = b.fixed(rough.reads[at])?;
+                                CONST | b.constant(x)? << CODE_BITS
+                            }
+                        },
+                        CONST => CONST | b.constant(rough.consts[at])? << CODE_BITS,
+                        _ => op,
+                    });
+                }
+                if into.len() > u32::MAX as usize {
                     return Err(PlanError::TooLarge);
                 }
-                b.place_of.insert(id, Place::Slot(slot as u32));
-                b.level_of.push(level);
-                drafts.push(Draft {
-                    level,
-                    ops: start..ops.len(),
-                });
-            } else {
-                let at = shared.len() + shared_programs.len() / 2;
-                if at > MAX_ARG {
-                    return Err(PlanError::TooLarge);
+                if every_scenario {
+                    let slot = vary.len() + drafts.len();
+                    if slot > MAX_ARG {
+                        return Err(PlanError::TooLarge);
+                    }
+                    b.mark(id, Place::Slot(slot as u32));
+                    b.level_of.push(level);
+                    drafts.push(Draft {
+                        level,
+                        ops: start..ops.len(),
+                    });
+                } else {
+                    let at = shared.len() + shared_programs.len() / 2;
+                    if at > MAX_ARG {
+                        return Err(PlanError::TooLarge);
+                    }
+                    b.mark(id, Place::Shared(at as u32));
+                    shared_programs.push(start as u32);
+                    shared_programs.push((shared_ops.len() - start) as u32);
                 }
-                b.place_of.insert(id, Place::Shared(at as u32));
-                shared_programs.push(start as u32);
-                shared_programs.push((shared_ops.len() - start) as u32);
             }
         }
+        drop(roughs);
 
-        // Put the nodes in level order, and point every load at the slot its
-        // node ends up in.
+        // A node's shape is its instructions without what they read. Nodes
+        // of one shape in one level are worked out together.
+        let mut shapes: Vec<Vec<u32>> = Vec::new();
+        let mut shape_of: Vec<u32> = Vec::with_capacity(drafts.len());
+        let mut known: HashMap<Vec<u32>, u32> = HashMap::new();
+        let mut codes: Vec<u32> = Vec::new();
+        for draft in &drafts {
+            codes.clear();
+            codes.extend(ops[draft.ops.clone()].iter().map(|op| op & CODE));
+            let shape = match known.get(&codes) {
+                Some(&shape) => shape,
+                None => {
+                    let shape = shapes.len() as u32;
+                    shapes.push(codes.clone());
+                    known.insert(codes.clone(), shape);
+                    shape
+                }
+            };
+            shape_of.push(shape);
+        }
+
+        // Put the nodes in level order, and within a level in order of shape.
         let mut by_level: Vec<u32> = (0..drafts.len() as u32).collect();
-        by_level.sort_by_key(|&n| drafts[n as usize].level);
+        by_level.sort_by_key(|&n| (drafts[n as usize].level, shape_of[n as usize]));
         let mut moved_to = vec![0u32; drafts.len()];
         for (now, &was) in by_level.iter().enumerate() {
             moved_to[was as usize] = now as u32;
         }
-        let final_slot = |slot: u32| match (slot as usize).checked_sub(vary.len()) {
-            Some(n) => vary.len() as u32 + moved_to[n],
+        // The node a provisional slot belongs to, in the new order.
+        let node_of = |slot: u32| {
+            (slot as usize)
+                .checked_sub(vary.len())
+                .map(|n| moved_to[n] as usize)
+        };
+
+        // The last level that reads each node. An output is read at the end.
+        let mut last_read: Vec<u32> = by_level
+            .iter()
+            .map(|&was| drafts[was as usize].level)
+            .collect();
+        for &was in &by_level {
+            let draft = &drafts[was as usize];
+            for &op in &ops[draft.ops.clone()] {
+                if op & CODE == LOAD {
+                    if let Some(read) = node_of(op >> CODE_BITS) {
+                        last_read[read] = last_read[read].max(draft.level);
+                    }
+                }
+            }
+        }
+        for id in outputs {
+            if let Some(Place::Slot(slot)) = b.place(*id) {
+                if let Some(node) = node_of(slot) {
+                    last_read[node] = u32::MAX;
+                }
+            }
+        }
+
+        // Give each node a slot. A slot is free again for the levels after
+        // the last one that reads it: no node of a level writes where
+        // another node of the same level reads.
+        let highest = drafts.iter().map(|d| d.level).max().unwrap_or(0) as usize;
+        let mut freed_after: Vec<Vec<u32>> = vec![Vec::new(); highest + 1];
+        // The lowest free slot is used first, so that a level's nodes have
+        // slots in rising order, mostly next to each other, and the slots in
+        // use stay packed together: the CPU reads memory in order far
+        // faster than it hops about.
+        let mut free: BinaryHeap<Reverse<u32>> = BinaryHeap::new();
+        let mut slot_of = vec![0u32; drafts.len()];
+        let mut slots = vary.len() as u32;
+        let mut released = 0;
+        for (now, &was) in by_level.iter().enumerate() {
+            let level = drafts[was as usize].level as usize;
+            while released < level {
+                free.extend(freed_after[released].drain(..).map(Reverse));
+                released += 1;
+            }
+            let slot = match free.pop() {
+                Some(Reverse(slot)) => slot,
+                None => {
+                    slots += 1;
+                    slots - 1
+                }
+            };
+            slot_of[now] = slot;
+            if last_read[now] != u32::MAX {
+                freed_after[last_read[now] as usize].push(slot);
+            }
+        }
+        let final_slot = |slot: u32| match node_of(slot) {
+            Some(node) => slot_of[node],
             None => slot,
         };
+
         let mut sorted = Vec::with_capacity(ops.len());
-        let mut programs = Vec::with_capacity(2 * drafts.len());
+        let mut programs = Vec::with_capacity(3 * drafts.len());
+        let mut operands: Vec<u32> = Vec::new();
+        let mut operand_at = Vec::with_capacity(drafts.len());
         let mut levels: Vec<Range<u32>> = Vec::new();
+        let mut groups: Vec<Group> = Vec::new();
+        let mut level_before = None;
         for (now, &was) in by_level.iter().enumerate() {
             let draft = &drafts[was as usize];
+            if operands.len() > u32::MAX as usize {
+                return Err(PlanError::TooLarge);
+            }
             programs.push(sorted.len() as u32);
             programs.push(draft.ops.len() as u32);
+            programs.push(slot_of[now]);
+            operand_at.push(operands.len() as u32);
             for &op in &ops[draft.ops.clone()] {
-                sorted.push(match op & CODE {
+                let op = match op & CODE {
                     LOAD => LOAD | final_slot(op >> CODE_BITS) << CODE_BITS,
                     _ => op,
-                });
+                };
+                if matches!(op & CODE, LOAD | CONST | LOAD_SHARED) {
+                    operands.push(op >> CODE_BITS);
+                }
+                sorted.push(op);
             }
             let now = now as u32;
+            let same_level = level_before == Some(draft.level);
+            level_before = Some(draft.level);
             match levels.last_mut() {
-                Some(last)
-                    if drafts[by_level[last.start as usize] as usize].level == draft.level =>
-                {
-                    last.end = now + 1;
-                }
+                Some(last) if same_level => last.end = now + 1,
                 _ => levels.push(now..now + 1),
+            }
+            let shape = shape_of[was as usize];
+            match groups.last_mut() {
+                Some(last) if same_level && last.shape == shape => last.count += 1,
+                _ => groups.push(Group {
+                    shape,
+                    first: now,
+                    count: 1,
+                }),
             }
         }
 
         let outputs = outputs
             .iter()
-            .map(|id| match b.place_of.get(id) {
-                Some(&Place::Slot(slot)) => Ok(Output::Slot(final_slot(slot))),
-                Some(&Place::Shared(at)) => Ok(Output::Shared(at)),
-                None => b.fixed(*id).map(|(x, _)| Output::Fixed(x)),
+            .map(|&id| match b.place(id) {
+                Some(Place::Slot(slot)) => Ok(Output::Slot(final_slot(slot))),
+                Some(Place::Shared(at)) => Ok(Output::Shared(at)),
+                None => b.fixed(id).map(Output::Fixed),
             })
             .collect::<Result<_, _>>()?;
 
         let mut plan = Scenarios {
             vary: vary.len(),
+            slots: slots as usize,
             programs,
             ops: sorted,
             consts: b.consts,
             levels,
+            shapes,
+            groups,
+            operands,
+            operand_at,
             outputs,
             shared_inputs: shared.len(),
             shared: Vec::new(),
@@ -726,7 +1031,7 @@ impl Scenarios {
 
     /// How many nodes are calculated for each scenario.
     pub fn nodes(&self) -> usize {
-        self.programs.len() / 2
+        self.programs.len() / 3
     }
 
     /// How many levels those nodes are in.
@@ -734,13 +1039,22 @@ impl Scenarios {
         self.levels.len()
     }
 
-    /// The memory one scenario takes while it is being worked out.
+    /// The memory one scenario takes while it is being worked out: a
+    /// number for each varied input and for as many nodes as are needed at
+    /// once, which is far fewer than there are when most are read only by
+    /// the next level or two.
     pub fn bytes_per_scenario(&self) -> usize {
         self.slots() * size_of::<f64>()
     }
 
     pub(crate) fn slots(&self) -> usize {
-        self.vary + self.nodes()
+        self.slots
+    }
+
+    /// How many different shapes of node there are: nodes whose formulas
+    /// differ only in what they read have one shape.
+    pub fn shapes(&self) -> usize {
+        self.shapes.len()
     }
 
     /// How many scenarios `inputs` holds.
@@ -780,12 +1094,28 @@ impl Scenarios {
         results
     }
 
+    /// Each output added up over every scenario, on the CPU.
+    ///
+    /// The scenarios are added in blocks of 1,024 and then the blocks, the
+    /// order `Loaded::totals` adds them in on the
+    /// GPU, so the two give the same totals to the last bit.
+    ///
+    /// # Panics
+    /// If the length of `inputs` is not a whole number of scenarios.
+    pub fn totals_cpu(&self, inputs: &[f64]) -> Vec<f64> {
+        let results = self.run_cpu(inputs);
+        let outputs = self.outputs.len();
+        (0..outputs)
+            .map(|o| total(results.iter().skip(o).step_by(outputs).copied()))
+            .collect()
+    }
+
     fn run_one(&self, scenario: &[f64], vals: &mut [f64], result: &mut [f64]) {
         vals[..self.vary].copy_from_slice(scenario);
-        for (node, program) in self.programs.chunks_exact(2).enumerate() {
+        for program in self.programs.chunks_exact(3) {
             let (start, len) = (program[0] as usize, program[1] as usize);
             let ops = &self.ops[start..start + len];
-            vals[self.vary + node] = eval(ops, &self.consts, &self.shared, vals);
+            vals[program[2] as usize] = eval(ops, &self.consts, &self.shared, vals);
         }
         for (out, output) in result.iter_mut().zip(&self.outputs) {
             *out = match *output {

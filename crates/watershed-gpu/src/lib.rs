@@ -40,6 +40,11 @@
 //! this have looked as good on data with nothing in it to find?" hundreds
 //! of times.
 //!
+//! With the `cuda` feature, `Gpu::load` puts a plan and its scenarios on
+//! the GPU to stay: `Loaded::run` and `Loaded::totals` then run them
+//! again after `set_shared`, copying up only what changed, and `totals`
+//! adds each output up on the GPU and copies back almost nothing.
+//!
 //! # What it handles
 //!
 //! Numbers (`f64`) and yes-or-no values: arithmetic, `min`, `max`, `abs`,
@@ -60,4 +65,4 @@ mod cuda;
 pub use plan::{MAX_STACK, PlanError, Scenarios};
 
 #[cfg(feature = "cuda")]
-pub use cuda::{Gpu, GpuError, Timing};
+pub use cuda::{Gpu, GpuError, Loaded, Timing};

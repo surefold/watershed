@@ -525,8 +525,13 @@ impl Book {
                     a
                 },
             );
+        Book::of_totals(&sums, results.len() / OUTPUTS)
+    }
+
+    /// From each output already added up over `policies` policies.
+    fn of_totals(sums: &[f64], policies: usize) -> Book {
         Book {
-            policies: results.len() / OUTPUTS,
+            policies,
             kept: sums[KEPT],
             premium: sums[PREMIUM],
             claims: sums[CLAIMS_PAID],
@@ -778,10 +783,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map(|(k, _)| k)
         .collect();
-    // On a part of the book, then the best on all of it.
-    let part = &policies[..n.min(500_000) * FACTS.len()];
+    // On the GPU the policies are loaded once and stay there: a review
+    // changes a few shared numbers, and only the totals come back, so every
+    // review is tried on the whole book. On the CPU, on a part of it.
+    let part = match cfg!(feature = "cuda") {
+        true => &policies[..],
+        false => &policies[..n.min(500_000) * FACTS.len()],
+    };
+    #[cfg(feature = "cuda")]
+    let mut loaded = runner.gpu.load(&plan, part)?;
+    // Only the GPU's way changes anything it holds.
+    #[cfg_attr(not(feature = "cuda"), allow(unused_mut))]
+    let mut book_under = |plan: &Scenarios| -> Result<Book, Box<dyn std::error::Error>> {
+        #[cfg(feature = "cuda")]
+        let totals = loaded.totals(plan)?;
+        #[cfg(not(feature = "cuda"))]
+        let totals = plan.totals_cpu(part);
+        Ok(Book::of_totals(&totals, part.len() / FACTS.len()))
+    };
     plan.set_shared(&today.values());
-    let part_now = Book::of(&runner.run(&plan, part)?);
+    let part_now = book_under(&plan)?;
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     let mut best = (today.values(), part_now);
     let started = Instant::now();
@@ -794,7 +815,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 values[k] *= 1.0 + step * rng.between(-1.0, 1.0);
             }
             plan.set_shared(&values);
-            let tried = Book::of(&runner.run(&plan, part)?);
+            let tried = book_under(&plan)?;
             if tried.kept >= part_now.kept && tried.profit > best.1.profit {
                 best = (values, tried);
             }
@@ -808,6 +829,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time(took),
         time(took / tries as u32)
     );
+    #[cfg(feature = "cuda")]
+    drop(loaded);
     plan.set_shared(&best.0);
     let results = runner.run(&plan, &policies)?;
     println!("on the whole book:");
