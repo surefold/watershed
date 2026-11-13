@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     row("the plan, 1 core", single);
     row(&format!("the plan, {cores} cores"), cpu / scenarios as u32);
 
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     {
         use watershed_gpu::Gpu;
         let started = Instant::now();

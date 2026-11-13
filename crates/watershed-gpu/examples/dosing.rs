@@ -445,7 +445,7 @@ fn main() -> Result<()> {
         .ok_or("give the folder dosing_reference.py wrote to")?;
     let n: usize = match args.next() {
         Some(n) => n.replace('_', "").parse()?,
-        None if cfg!(feature = "cuda") => 5_000_000,
+        None if cfg!(feature = "gpu") => 5_000_000,
         None => 500_000,
     };
     let usual = Protocol::usual();
@@ -506,9 +506,9 @@ fn main() -> Result<()> {
         commas((n * HOURS) as f64)
     );
     let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     let gpu = watershed_gpu::Gpu::new()?;
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     let mut loaded = {
         let started = Instant::now();
         let loaded = gpu.load(&counting, &patients)?;
@@ -516,11 +516,11 @@ fn main() -> Result<()> {
         loaded
     };
     // Each band's counts under a protocol.
-    #[cfg_attr(not(feature = "cuda"), allow(unused_mut))]
+    #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
     let mut count = |plan: &Scenarios| -> Result<Counts> {
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         let totals = loaded.totals(plan)?;
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         let totals = plan.totals_cpu(&patients);
         Ok(Counts(totals))
     };
@@ -533,12 +533,12 @@ fn main() -> Result<()> {
     assert_eq!(now.0, again.0);
     println!(
         "  {}: every patient under the usual protocol in {} the first time, {} after ({} patient-hours a second)",
-        if cfg!(feature = "cuda") { "GPU" } else { "CPU" },
+        if cfg!(feature = "gpu") { "GPU" } else { "CPU" },
         time(first_took),
         time(took),
         commas((n * HOURS) as f64 / took.as_secs_f64())
     );
-    if cfg!(feature = "cuda") {
+    if cfg!(feature = "gpu") {
         let some = n.min(1_000_000);
         let started = Instant::now();
         let on_cpu = counting.totals_cpu(&patients[..some * FACTS]);

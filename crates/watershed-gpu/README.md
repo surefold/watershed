@@ -80,6 +80,13 @@ cargo test -p watershed-gpu                    # the plan, on the CPU
 cargo test -p watershed-gpu --features cuda    # and on the GPU
 ```
 
+`cuda` is built against CUDA 13.1, which needs NVIDIA driver 580 or later.
+For a machine with an older driver, `--features cuda-12` in its place builds
+against CUDA 12.8 (driver 570 or later); the two cannot be on together. The
+tests pass with either, and the insurance book of 20,000 kinds of policy on
+10,000 paths gave the same answers to the last bit with both (one run of
+each, on one RTX 3090).
+
 The crate allows `unsafe` in one place, the kernel launch.
 
 ## What it has been tried on

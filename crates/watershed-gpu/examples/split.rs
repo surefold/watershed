@@ -71,7 +71,7 @@ fn lot(mut args: impl Iterator<Item = String>) -> Result<()> {
 
     let started = Instant::now();
     let results = match on.as_str() {
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         "gpu" => {
             watershed_gpu::Gpu::new()?
                 .run_within(&plan, &inputs, allowed)?
@@ -137,12 +137,12 @@ fn main() -> Result<()> {
     let whole = runner.run(&plan, &inputs)?;
     let whole_took = started.elapsed();
     println!("in one go, on the {}: {}", runner.name(), time(whole_took));
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     let allowed = runner.gpu.free_memory()? / 5 * 4 / (workers - on_cpu).max(1);
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(not(feature = "gpu"))]
     let allowed = 0usize;
     // The workers have the GPU to themselves.
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     drop(runner);
 
     // What a worker is given: the plan and the paths, as files.
@@ -189,7 +189,7 @@ fn main() -> Result<()> {
     for w in 0..workers {
         let first = w * each;
         let count = each.min(scenarios - first);
-        let on = if cfg!(feature = "cuda") && w >= on_cpu {
+        let on = if cfg!(feature = "gpu") && w >= on_cpu {
             "gpu"
         } else {
             "cpu"

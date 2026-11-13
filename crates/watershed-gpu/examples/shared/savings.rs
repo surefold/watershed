@@ -427,24 +427,24 @@ impl Book {
 // ---- Running it ----
 
 pub struct Runner {
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     pub gpu: watershed_gpu::Gpu,
 }
 
 impl Runner {
     pub fn new() -> Result<Runner> {
         Ok(Runner {
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "gpu")]
             gpu: watershed_gpu::Gpu::new()?,
         })
     }
 
     pub fn name(&self) -> &'static str {
-        if cfg!(feature = "cuda") { "GPU" } else { "CPU" }
+        if cfg!(feature = "gpu") { "GPU" } else { "CPU" }
     }
 
     pub fn run(&self, plan: &Scenarios, inputs: &[f64]) -> Result<Vec<f64>> {
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         {
             let allowed = self.gpu.free_memory()? / 5 * 4;
             let (results, timing) = self.gpu.run_within(plan, inputs, allowed)?;
@@ -454,7 +454,7 @@ impl Runner {
             }
             Ok(results)
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         Ok(plan.run_cpu(inputs))
     }
 }

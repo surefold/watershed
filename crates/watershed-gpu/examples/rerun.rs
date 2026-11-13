@@ -164,7 +164,7 @@ fn main() -> Result<()> {
         let started = Instant::now();
         let again = refresh.plan.run_cpu(&refresh.inputs);
         let cpu_took = started.elapsed();
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         let gpu_took = {
             let started = Instant::now();
             let on_gpu = runner.gpu.run(&refresh.plan, &refresh.inputs)?;
@@ -178,7 +178,7 @@ fn main() -> Result<()> {
             );
             time(took)
         };
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         let gpu_took = String::from("-");
 
         let started = Instant::now();

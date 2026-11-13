@@ -111,7 +111,7 @@ fn sum(g: &mut Graph, name: &str, mut nodes: Vec<Node<f64>>) -> Result<Node<f64>
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let futures: usize = match std::env::args().nth(1) {
         Some(n) => n.replace('_', "").parse().expect("a number of futures"),
-        None if cfg!(feature = "cuda") => 100_000,
+        None if cfg!(feature = "gpu") => 100_000,
         None => 10_000,
     };
 
@@ -215,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Work the portfolio out for every future.
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     let results = {
         let gpu = watershed_gpu::Gpu::new()?;
         let allowed = gpu.free_memory()? / 5 * 4;
@@ -247,7 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         results
     };
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(not(feature = "gpu"))]
     let results = {
         let started = Instant::now();
         let results = plan.run_cpu(&inputs);

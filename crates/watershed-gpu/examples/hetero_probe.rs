@@ -17,17 +17,17 @@
 //! concurrent, planner. Every strategy's answers are checked against the others to
 //! the last bit before a time is printed.
 
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(feature = "gpu"))]
 fn main() {
     println!("this needs --features cuda");
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 fn main() {
     probe::main()
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 mod probe {
 
     use std::collections::HashMap;

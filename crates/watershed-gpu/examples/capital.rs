@@ -94,7 +94,7 @@ fn main() -> Result<()> {
     let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
     // On the GPU the plan is loaded once and stays there: each year changes
     // the paths and a few shared numbers, and nothing else is copied.
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     let mut loaded = runner.gpu.load(&plan, &paths_for(GROWTH))?;
     // What the book is worth after the funds are multiplied by `funds` and
     // rates move by `rates`: on every inner path, and on the first tenth.
@@ -103,12 +103,12 @@ fn main() -> Result<()> {
         a.fund = funds;
         plan.set_shared(&a.values());
         let paths = paths_for(GROWTH + rates);
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         let results = {
             loaded.set_inputs(&plan, &paths)?;
             loaded.run(&plan)?
         };
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         let results = runner.run(&plan, &paths)?;
         Ok((mean(&results), mean(&results[..(inner / 10).max(1)])))
     };

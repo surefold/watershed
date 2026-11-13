@@ -345,7 +345,7 @@ fn what_cannot_be_done_is_refused_by_name() {
 }
 
 /// Needs an NVIDIA GPU and the CUDA libraries: `cargo test --features cuda`.
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 mod on_the_gpu {
     use super::*;
     use watershed_gpu::Gpu;
