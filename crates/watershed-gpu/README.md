@@ -235,7 +235,19 @@ path (915 MB). Medians of five runs:
 Every kept value on every path is the same to the last bit as making and
 running the whole plan again; the example checks that twice a run. Which
 nodes to keep is yours to choose: more of them means less to work out after
-a change and more memory. A change that reaches most of the book, like a new
+a change and more memory. `Kept::nearest(&g, &outputs, most)` chooses for
+you, taking the calculated nodes nearest the outputs up to a number; given
+12,000 it picks the same 11,436 here, with the same times (one run). It
+suits a model that ends by adding many things up. The `loans` example uses
+it too: 20,000 loans on 10,000 paths, 8,577 values kept a path, and after
+one house is revalued every path is up to date in about 30 ms on the GPU
+(0.5 s the first time, while kernels are compiled) against 7 s to run the
+book again; one run.
+
+Run the small plan where the whole one was run. `loans` uses `exp`, whose
+last digits differ between a GPU and a CPU: refreshed on the GPU its values
+are the same to the last bit as running everything again, and refreshed on
+the CPU they differ by up to 1.3e-15 of themselves. A change that reaches most of the book, like a new
 mortality table, gains nothing. The small plan ran on the CPU; on the GPU it
 took 32 to 248 ms.
 

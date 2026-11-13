@@ -11,13 +11,18 @@
 //! at the kept nodes that are still right, which it is given as it is given
 //! the varied inputs.
 //!
+//! Run the small plan where the whole one was run. A GPU and a CPU give the
+//! same bits except for the last digits of `exp`, `ln` and `pow`, so a
+//! model that uses those, refreshed on the other device, is right to about
+//! 1e-15 and not to the last bit.
+//!
 //! Which nodes to keep is the caller's choice: more of them means less to
 //! work out after a change and more memory. The outputs are always kept.
 
 use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
-use watershed_core::{Graph, NodeId};
+use watershed_core::{Graph, NodeId, Type};
 
 use crate::plan::{PlanError, Scenarios};
 
@@ -134,6 +139,41 @@ impl Kept {
             inputs: Vec::new(),
             values: Vec::new(),
         })
+    }
+
+    /// Chooses nodes to keep without being told the graph's shape: the
+    /// calculated nodes nearest the outputs, a step at a time (what the
+    /// outputs use, then what those use, and so on), for as long as no more
+    /// than `most` are kept in all. A step is taken whole or not at all.
+    ///
+    /// This suits a graph that ends by adding many things up, where the
+    /// nodes near the outputs are sums over parts of the model: a change to
+    /// one part then reaches few of them. It does not look at what any
+    /// particular change would reach.
+    pub fn nearest(g: &Graph, outputs: &[NodeId], most: usize) -> Vec<NodeId> {
+        let mut seen: HashSet<NodeId> = outputs.iter().copied().collect();
+        let mut keep: Vec<NodeId> = Vec::new();
+        let mut step: Vec<NodeId> = outputs.to_vec();
+        loop {
+            let mut next: Vec<NodeId> = Vec::new();
+            for &id in &step {
+                for used in g.dependencies(id) {
+                    if !g.is_input(used) && seen.insert(used) {
+                        next.push(used);
+                    }
+                }
+            }
+            // Only numbers can be kept; anything else is passed through.
+            let numbers = next
+                .iter()
+                .filter(|&&id| g.node_type(id) == Type::F64)
+                .count();
+            if next.is_empty() || keep.len() + numbers > most {
+                return keep;
+            }
+            keep.extend(next.iter().filter(|&&id| g.node_type(id) == Type::F64));
+            step = next;
+        }
     }
 
     /// The plan of the whole run. Its results are every kept value for each
@@ -349,6 +389,20 @@ mod tests {
                     .all(|(a, b)| a.to_bits() == b.to_bits())
             );
         }
+        // Chosen without being told: the groups are the step nearest the
+        // total, and the step after is too many.
+        let mut near = Kept::nearest(&g, &[total.id()], 10);
+        near.sort();
+        assert_eq!(near, keep);
+        assert!(Kept::nearest(&g, &[total.id()], 4).is_empty());
+        // With room for more it goes on into the accounts, past the
+        // conditions, which are not numbers and are not kept.
+        let more = Kept::nearest(&g, &[total.id()], 1_000);
+        assert!(more.len() > 25);
+        assert!(more.iter().all(|&id| g.node_type(id) == Type::F64));
+        let deep = Kept::new(&g, &vary, &[], &[total.id()], &more).unwrap();
+        assert_eq!(deep.plan().run_cpu(&inputs).len(), 50 * deep.width());
+
         // An input nothing kept uses.
         let aside = g.input("aside", 1.0).unwrap();
         assert_eq!(kept.refresh_cpu(&g, &[aside.id()]).unwrap(), 0);

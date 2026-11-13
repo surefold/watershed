@@ -58,7 +58,11 @@ fn main() -> Result<()> {
     let dir = Path::new(&dir);
     let kinds: usize = args.next().map_or(Ok(20_000), |a| a.parse())?;
     let scenarios: usize = args.next().map_or(Ok(10_000), |a| a.parse())?;
-    let keep: usize = args.next().map_or(Ok(1), |a| a.parse())?;
+    // The level of the trees to keep from, or `most=N` to let the engine
+    // choose up to N nodes without being told about the trees.
+    let keep = args.next().unwrap_or_else(|| "1".into());
+    let most: Option<usize> = keep.strip_prefix("most=").map(str::parse).transpose()?;
+    let keep: usize = if most.is_some() { 0 } else { keep.parse()? };
 
     let tables = tables(dir)?;
     let policies = policies(&dir.join("points_book.csv"), kinds)?;
@@ -86,6 +90,10 @@ fn main() -> Result<()> {
         .iter()
         .flat_map(|t| t[keep..].iter().flatten().map(|n| n.id()))
         .collect();
+    let levels = match most {
+        Some(most) => Kept::nearest(&book.g, &roots, most),
+        None => levels,
+    };
     let started = Instant::now();
     let mut kept = Kept::new(&book.g, &vary, &book.knobs.ids(), &roots, &levels)?;
     let plan_took = started.elapsed();
@@ -112,8 +120,12 @@ fn main() -> Result<()> {
     );
     kept.hold(inputs.clone(), results);
     println!(
-        "  kept for each path: {} values, the trees of sums from level {keep} up ({:.0} MB in all)",
+        "  kept for each path: {} values, {} ({:.0} MB in all)",
         commas(width as f64),
+        match most {
+            Some(most) => format!("the nearest the outputs, at most {}", commas(most as f64)),
+            None => format!("the trees of sums from level {keep} up"),
+        },
         (width * scenarios * 8) as f64 / 1e6
     );
     println!();

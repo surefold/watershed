@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use watershed_core::prelude::*;
 use watershed_core::{IntoExpr, NodeId, when};
-use watershed_gpu::Scenarios;
+use watershed_gpu::{Kept, Scenarios};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -765,6 +765,92 @@ fn main() -> Result<()> {
         "  unemployment is 2 points higher next quarter: {} nodes, in {}",
         commas(all.recalculated as f64),
         time(started.elapsed())
+    );
+    println!();
+
+    // ---- 6. One thing changes, and every path's answer is wanted ----
+    // EXPERIMENTAL. The run keeps the calculated nodes nearest the totals,
+    // chosen from the graph and a number alone. After a house is revalued
+    // only the kept nodes that can reach is worked out again, on every path.
+    println!("6. Every path brought up to date after one house is revalued");
+    println!();
+    let vary: Vec<NodeId> = book.economy.iter().map(|e| e.id()).collect();
+    let shared: Vec<NodeId> = book.knobs.iter().map(|k| k.id()).collect();
+    let keep = Kept::nearest(&book.g, &totals, 12_000);
+    let started = Instant::now();
+    let mut kept = Kept::new(&book.g, &vary, &shared, &totals, &keep)?;
+    let made = started.elapsed();
+    let started = Instant::now();
+    let results = runner.run(kept.plan(), &paths)?;
+    let first = started.elapsed();
+    kept.hold(paths.clone(), results);
+    println!(
+        "  the plan made in {} and run on the {} in {}, keeping {} values a path ({:.0} MB)",
+        time(made),
+        runner.name(),
+        time(first),
+        commas(kept.width() as f64),
+        (kept.width() * scenarios * 8) as f64 / 1e6
+    );
+    let mut slowest = Duration::ZERO;
+    let mut between = 0.0f64;
+    for n in 0..5 {
+        let k = (n * 7919 + 1) % size;
+        book.g.set(book.houses[k], loans[k].house * 0.8)?;
+        book.g.stabilize();
+        // Run where the whole book was run: this model uses `exp`, whose
+        // last digits differ between the CPU and the GPU.
+        let started = Instant::now();
+        let refresh = kept
+            .refresh(&book.g, &[book.houses[k].id()])?
+            .ok_or("nothing kept uses the house")?;
+        let results = runner.run(&refresh.plan, &refresh.inputs)?;
+        kept.apply(&refresh, &results);
+        let took = started.elapsed();
+        let again = refresh.stale();
+        // How far the CPU's answers would have been from these.
+        let on_cpu = refresh.plan.run_cpu(&refresh.inputs);
+        let apart = on_cpu
+            .iter()
+            .zip(&results)
+            .map(|(a, b)| (a - b).abs() / b.abs().max(1.0))
+            .fold(0.0f64, f64::max);
+        between = between.max(apart);
+        slowest = slowest.max(took);
+        println!(
+            "  loan {k}'s house 20% lower: {again} kept values a path worked out again, {} paths up to date in {}",
+            commas(scenarios as f64),
+            time(took)
+        );
+    }
+    let started = Instant::now();
+    let whole = Kept::new(&book.g, &vary, &shared, &totals, &keep)?;
+    let made = started.elapsed();
+    let started = Instant::now();
+    let fresh = runner.run(whole.plan(), &paths)?;
+    let ran = started.elapsed();
+    let same = fresh
+        .iter()
+        .zip(kept.values())
+        .all(|(a, b)| a.to_bits() == b.to_bits());
+    println!(
+        "  checked: the whole plan made again ({}) and run again ({}) gives {}",
+        time(made),
+        time(ran),
+        if same {
+            "the same to the last bit, every kept value on every path"
+        } else {
+            "SOMETHING ELSE"
+        }
+    );
+    assert!(same, "bringing the run up to date gave something else");
+    println!(
+        "  at most {} to bring the run up to date, against {} to run it again",
+        time(slowest),
+        time(ran)
+    );
+    println!(
+        "  (run on the CPU instead, the new values would differ from these by at most {between:.1e} of themselves)"
     );
     Ok(())
 }
