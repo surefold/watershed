@@ -136,6 +136,36 @@ impl Kept {
         })
     }
 
+    /// Chooses nodes to keep without being told the graph's shape: the
+    /// calculated nodes nearest the outputs, a step at a time (what the
+    /// outputs use, then what those use, and so on), for as long as no more
+    /// than `most` are kept in all. A step is taken whole or not at all.
+    ///
+    /// This suits a graph that ends by adding many things up, where the
+    /// nodes near the outputs are sums over parts of the model: a change to
+    /// one part then reaches few of them. It does not look at what any
+    /// particular change would reach.
+    pub fn nearest(g: &Graph, outputs: &[NodeId], most: usize) -> Vec<NodeId> {
+        let mut seen: HashSet<NodeId> = outputs.iter().copied().collect();
+        let mut keep: Vec<NodeId> = Vec::new();
+        let mut step: Vec<NodeId> = outputs.to_vec();
+        loop {
+            let mut next: Vec<NodeId> = Vec::new();
+            for &id in &step {
+                for used in g.dependencies(id) {
+                    if !g.is_input(used) && seen.insert(used) {
+                        next.push(used);
+                    }
+                }
+            }
+            if next.is_empty() || keep.len() + next.len() > most {
+                return keep;
+            }
+            keep.extend(&next);
+            step = next;
+        }
+    }
+
     /// The plan of the whole run. Its results are every kept value for each
     /// scenario, to give to [`hold`](Self::hold).
     pub fn plan(&self) -> &Scenarios {
@@ -349,6 +379,13 @@ mod tests {
                     .all(|(a, b)| a.to_bits() == b.to_bits())
             );
         }
+        // Chosen without being told: the groups are the step nearest the
+        // total, and the step after is too many.
+        let mut near = Kept::nearest(&g, &[total.id()], 10);
+        near.sort();
+        assert_eq!(near, keep);
+        assert!(Kept::nearest(&g, &[total.id()], 4).is_empty());
+
         // An input nothing kept uses.
         let aside = g.input("aside", 1.0).unwrap();
         assert_eq!(kept.refresh_cpu(&g, &[aside.id()]).unwrap(), 0);

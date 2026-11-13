@@ -235,7 +235,11 @@ path (915 MB). Medians of five runs:
 Every kept value on every path is the same to the last bit as making and
 running the whole plan again; the example checks that twice a run. Which
 nodes to keep is yours to choose: more of them means less to work out after
-a change and more memory. A change that reaches most of the book, like a new
+a change and more memory. `Kept::nearest(&g, &outputs, most)` chooses for
+you, taking the calculated nodes nearest the outputs up to a number; given
+12,000 it picks the same 11,436 here, with the same times (one run). It
+suits a model that ends by adding many things up, and has been tried on this
+one only. A change that reaches most of the book, like a new
 mortality table, gains nothing. The small plan ran on the CPU; on the GPU it
 took 32 to 248 ms.
 
