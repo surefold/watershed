@@ -967,9 +967,11 @@ impl Scenarios {
             &|n| &ops[drafts[by_level[n] as usize].ops.clone()],
             &node_of,
             &kept,
-            setting("WATERSHED_BAND", 32) as u32,
-            setting("WATERSHED_CLUSTER", 256),
-            setting("WATERSHED_SHAPES", 96),
+            crate::fuse::Limits {
+                band: setting("WATERSHED_BAND", 32) as u32,
+                most: setting("WATERSHED_CLUSTER", 256),
+                shapes_most: setting("WATERSHED_SHAPES", 96),
+            },
         );
 
         let mut sorted = Vec::with_capacity(ops.len());

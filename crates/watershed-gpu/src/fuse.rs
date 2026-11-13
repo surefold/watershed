@@ -52,6 +52,17 @@ pub(crate) struct Fused {
     pub(crate) slot_of: Vec<Option<u32>>,
 }
 
+/// How far clustering goes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    /// How many levels deep a band is.
+    pub(crate) band: u32,
+    /// The most nodes in a cluster.
+    pub(crate) most: usize,
+    /// The most shapes of cluster of more than one node.
+    pub(crate) shapes_most: usize,
+}
+
 struct Cluster {
     members: Vec<u32>,
     sealed: bool,
@@ -60,19 +71,20 @@ struct Cluster {
 /// Makes clusters of a plan's nodes. `level` and `ops` give each node's
 /// level and instructions, in the plan's order; a load's number is a slot of
 /// a varied input if below `vary`, and otherwise `node_of` says which node
-/// it reads. `kept` are the nodes that are outputs. Bands are `band` levels
-/// deep, a cluster has at most `most` nodes, and there are at most
-/// `shapes_most` shapes of cluster of more than one node.
+/// it reads. `kept` are the nodes that are outputs. `limits` say how far to go.
 pub(crate) fn fuse<'o>(
     vary: usize,
     level: &[u32],
     ops: &dyn Fn(usize) -> &'o [u32],
     node_of: &dyn Fn(u32) -> Option<usize>,
     kept: &[usize],
-    band: u32,
-    most: usize,
-    shapes_most: usize,
+    limits: Limits,
 ) -> Option<Fused> {
+    let Limits {
+        band,
+        most,
+        shapes_most,
+    } = limits;
     let nodes = level.len();
     let reads = |n: usize| {
         ops(n)
