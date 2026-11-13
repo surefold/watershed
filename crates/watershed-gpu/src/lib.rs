@@ -63,7 +63,7 @@ mod plan;
 #[cfg(feature = "gpu")]
 mod cuda;
 
-pub use keep::{Kept, Refresh};
+pub use keep::{Kept, Patch, Refresh};
 pub use plan::{LoadError, MAX_STACK, PlanError, Scenarios};
 
 #[cfg(feature = "gpu")]
