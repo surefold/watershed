@@ -20,14 +20,16 @@ use std::ops::Range;
 use rayon::prelude::*;
 use watershed_core::{BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
 
+use crate::fuse::{Fused, fuse};
+
 // The instruction codes. `kernel.cu` has the same numbers; the two must be
 // changed together. An instruction is one `u32`: the code in the low five
 // bits, and a slot, shared value or constant number in the rest. A bool is
 // held as 1.0 or 0.0.
-const CODE_BITS: u32 = 5;
-const CODE: u32 = (1 << CODE_BITS) - 1;
-const LOAD: u32 = 0;
-const CONST: u32 = 1;
+pub(crate) const CODE_BITS: u32 = 5;
+pub(crate) const CODE: u32 = (1 << CODE_BITS) - 1;
+pub(crate) const LOAD: u32 = 0;
+pub(crate) const CONST: u32 = 1;
 const ADD: u32 = 2;
 const SUB: u32 = 3;
 const MUL: u32 = 4;
@@ -36,7 +38,7 @@ const MIN: u32 = 6;
 const MAX: u32 = 7;
 const NEG: u32 = 8;
 const ABS: u32 = 9;
-const LOAD_SHARED: u32 = 10;
+pub(crate) const LOAD_SHARED: u32 = 10;
 const LT: u32 = 11;
 const LE: u32 = 12;
 const GT: u32 = 13;
@@ -65,7 +67,7 @@ pub(crate) enum Source {
 #[cfg(feature = "cuda")]
 pub(crate) fn arity(code: u32) -> usize {
     match code {
-        LOAD | CONST | LOAD_SHARED => 0,
+        LOAD | CONST | LOAD_SHARED | crate::fuse::LOCAL => 0,
         NEG | ABS | NOT | EXP | LN | SQRT => 1,
         SELECT => 3,
         _ => 2,
@@ -251,6 +253,10 @@ pub struct Scenarios {
     pub(crate) operands: Vec<u32>,
     /// Per calculated node: where its operands start.
     pub(crate) operand_at: Vec<u32>,
+    /// The nodes again as clusters a GPU thread works out in one go (see
+    /// the `fuse` module), and where the outputs are when it is run so.
+    pub(crate) fused: Option<Fused>,
+    pub(crate) fused_outputs: Vec<Output>,
     pub(crate) outputs: Vec<Output>,
     /// How many inputs are shared. Their values are the first of `shared`.
     shared_inputs: usize,
@@ -644,7 +650,26 @@ impl Scenarios {
         shared: &[NodeId],
         outputs: &[NodeId],
     ) -> Result<Scenarios, PlanError> {
-        Scenarios::cut_at(g, vary, &[], shared, outputs)
+        // EXPERIMENTAL: set WATERSHED_CLUSTERS to make every plan as
+        // `with_clusters` does, to try it without changing a program.
+        let clusters = std::env::var_os("WATERSHED_CLUSTERS").is_some();
+        Scenarios::build(g, vary, &[], shared, outputs, clusters)
+    }
+
+    /// EXPERIMENTAL. As [`with_shared`](Self::with_shared), and also puts
+    /// the nodes into clusters that a GPU thread works out in one go,
+    /// keeping to itself what only the cluster reads. On a big graph run
+    /// for many scenarios the GPU is then faster, by half as much again on
+    /// the one it was measured on. The plan takes longer to make, and the
+    /// first run in a program longer still, while a kernel is compiled for
+    /// each shape of cluster. The answers are the same.
+    pub fn with_clusters(
+        g: &Graph,
+        vary: &[NodeId],
+        shared: &[NodeId],
+        outputs: &[NodeId],
+    ) -> Result<Scenarios, PlanError> {
+        Scenarios::build(g, vary, &[], shared, outputs, true)
     }
 
     /// As [`with_shared`](Self::with_shared), with calculated nodes `cut`
@@ -656,6 +681,17 @@ impl Scenarios {
         cut: &[NodeId],
         shared: &[NodeId],
         outputs: &[NodeId],
+    ) -> Result<Scenarios, PlanError> {
+        Scenarios::build(g, vary, cut, shared, outputs, false)
+    }
+
+    fn build(
+        g: &Graph,
+        vary: &[NodeId],
+        cut: &[NodeId],
+        shared: &[NodeId],
+        outputs: &[NodeId],
+        clusters: bool,
     ) -> Result<Scenarios, PlanError> {
         let inputs = vary.len();
         let vary = &[vary, cut].concat()[..];
@@ -937,6 +973,40 @@ impl Scenarios {
             None => slot,
         };
 
+        // The same nodes as clusters, for the GPU.
+        let levels_now: Vec<u32> = by_level
+            .iter()
+            .map(|&was| drafts[was as usize].level)
+            .collect();
+        let kept: Vec<usize> = outputs
+            .iter()
+            .filter_map(|&id| match b.place(id) {
+                Some(Place::Slot(slot)) => node_of(slot),
+                _ => None,
+            })
+            .collect();
+        let setting = |name: &str, otherwise: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(otherwise)
+        };
+        let fused = match clusters {
+            true => fuse(
+                vary.len(),
+                &levels_now,
+                &|n| &ops[drafts[by_level[n] as usize].ops.clone()],
+                &node_of,
+                &kept,
+                crate::fuse::Limits {
+                    band: setting("WATERSHED_BAND", 32) as u32,
+                    most: setting("WATERSHED_CLUSTER", 256),
+                    shapes_most: setting("WATERSHED_SHAPES", 96),
+                },
+            ),
+            false => None,
+        };
+
         let mut sorted = Vec::with_capacity(ops.len());
         let mut programs = Vec::with_capacity(3 * drafts.len());
         let mut operands: Vec<u32> = Vec::new();
@@ -981,6 +1051,18 @@ impl Scenarios {
             }
         }
 
+        let fused_outputs = outputs
+            .iter()
+            .map(|&id| match (b.place(id), &fused) {
+                (Some(Place::Slot(slot)), Some(fused)) => Ok(Output::Slot(match node_of(slot) {
+                    Some(node) => fused.slot_of[node].expect("an output has a slot"),
+                    None => slot,
+                })),
+                (Some(Place::Slot(slot)), None) => Ok(Output::Slot(final_slot(slot))),
+                (Some(Place::Shared(at)), _) => Ok(Output::Shared(at)),
+                (None, _) => b.fixed(id).map(Output::Fixed),
+            })
+            .collect::<Result<_, _>>()?;
         let outputs = outputs
             .iter()
             .map(|&id| match b.place(id) {
@@ -1001,6 +1083,8 @@ impl Scenarios {
             groups,
             operands,
             operand_at,
+            fused,
+            fused_outputs,
             outputs,
             shared_inputs: shared.len(),
             shared: Vec::new(),
@@ -1068,6 +1152,20 @@ impl Scenarios {
 
     pub(crate) fn slots(&self) -> usize {
         self.slots
+    }
+
+    /// The memory one scenario takes on the GPU when the nodes are worked
+    /// out in clusters, which keep to themselves what nothing else reads.
+    pub fn bytes_per_scenario_in_clusters(&self) -> Option<usize> {
+        self.fused.as_ref().map(|f| f.slots * size_of::<f64>())
+    }
+
+    /// How many clusters the nodes are in for the GPU, and how many
+    /// different shapes of cluster there are.
+    pub fn clusters(&self) -> Option<(usize, usize)> {
+        self.fused
+            .as_ref()
+            .map(|f| (f.operand_at.len(), f.shapes.len()))
     }
 
     /// How many different shapes of node there are: nodes whose formulas
