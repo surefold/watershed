@@ -1,0 +1,14 @@
+# hetero_probe repeat 20000 48 2000
+# 14:36:08 gpu: 4 %, 571 MiB | other compute apps: | load: 21.17
+gpu ready in 221.70 ms (n=1)
+graph: 2943052 nodes, built in 2.005 s (n=1)
+plan: 2883002 nodes, 151 levels; made in 1.113 s (1.097 s..1.113 s, n=2)
+first gpu run: 180.47 ms of which compiling 11.48 ms (n=1)
+gpu run again (plan and kernels kept, buffers not): 137.08 ms (135.55 ms..139.44 ms, n=7); up 12.88 ms compute 121.76 ms down 2.10 ms
+load (plan and inputs to the device): 33.91 ms (13.06 ms..33.91 ms, n=2)
+loaded run (everything kept; outputs copied back): 123.41 ms (123.01 ms..126.08 ms, n=7)
+loaded totals (reduced on the device): 122.14 ms (121.79 ms..123.41 ms, n=7)
+replace every input on the device: 2.11 ms (2.02 ms..2.21 ms, n=7)
+cpu plan: 6.975 s (6.963 s..6.992 s, n=3)
+# 14:36:38 gpu: 4 %, 577 MiB | other compute apps: | load: 22.43
+# samples with another GPU compute process: 0 of 28

@@ -1,0 +1,14 @@
+# hetero_probe crossover 8 12
+# 14:34:08 gpu: 4 %, 580 MiB | other compute apps: | load: 4.69
+gpu ready in 225.16 ms (n=1)
+kinds=8 months=12: graph 362 nodes built in 192.0 us; plan 324 nodes, 39 levels, 10 shapes, 248 bytes a scenario, made in 2.19 ms
+S=1: cpu 6.2 us (6.1 us..6.4 us, n=7) [19.074 ns/node-scenario]; gpu 1.08 ms (1.03 ms..1.34 ms, n=7) [3342.071]; gpu parts: up 497.4 us compute 566.3 us down 29.9 us; faster: cpu
+S=4: cpu 292.7 us (255.2 us..472.7 us, n=7) [225.845 ns/node-scenario]; gpu 1.31 ms (1.23 ms..1.40 ms, n=7) [1013.217]; gpu parts: up 483.9 us compute 505.0 us down 292.7 us; faster: cpu
+S=16: cpu 934.1 us (789.3 us..1.13 ms, n=7) [180.192 ns/node-scenario]; gpu 1.97 ms (1.71 ms..2.16 ms, n=7) [380.195]; gpu parts: up 526.3 us compute 582.4 us down 740.2 us; faster: cpu
+S=64: cpu 1.91 ms (1.40 ms..2.37 ms, n=7) [92.026 ns/node-scenario]; gpu 3.14 ms (2.83 ms..3.73 ms, n=7) [151.572]; gpu parts: up 587.1 us compute 547.3 us down 1.98 ms; faster: cpu
+S=256: cpu 146.5 us (131.5 us..2.39 ms, n=7) [1.766 ns/node-scenario]; gpu 3.53 ms (3.29 ms..4.53 ms, n=7) [42.503]; gpu parts: up 748.8 us compute 540.4 us down 2.22 ms; faster: cpu
+S=1024: cpu 419.8 us (389.1 us..460.2 us, n=7) [1.265 ns/node-scenario]; gpu 3.68 ms (2.35 ms..5.78 ms, n=7) [11.097]; gpu parts: up 942.4 us compute 567.8 us down 2.32 ms; faster: cpu
+S=4096: cpu 2.29 ms (1.56 ms..3.38 ms, n=7) [1.725 ns/node-scenario]; gpu 4.56 ms (2.40 ms..4.98 ms, n=7) [3.438]; gpu parts: up 968.0 us compute 560.8 us down 3.08 ms; faster: cpu
+S=16384: cpu 6.48 ms (6.40 ms..7.66 ms, n=7) [1.221 ns/node-scenario]; gpu 3.09 ms (2.80 ms..4.18 ms, n=7) [0.582]; gpu parts: up 1.32 ms compute 748.5 us down 1.03 ms; faster: gpu
+# 14:34:08 gpu: 6 %, 572 MiB | other compute apps: | load: 4.69
+# samples with another GPU compute process: 0 of 1
