@@ -20,6 +20,9 @@ use std::ops::Range;
 use rayon::prelude::*;
 use watershed_core::{BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
 
+mod file;
+pub use file::LoadError;
+
 // The instruction codes. `kernel.cu` has the same numbers; the two must be
 // changed together. An instruction is one `u32`: the code in the low five
 // bits, and a slot, shared value or constant number in the rest. A bool is
