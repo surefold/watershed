@@ -61,7 +61,8 @@ struct Cluster {
 /// level and instructions, in the plan's order; a load's number is a slot of
 /// a varied input if below `vary`, and otherwise `node_of` says which node
 /// it reads. `kept` are the nodes that are outputs. Bands are `band` levels
-/// deep and a cluster has at most `most` nodes.
+/// deep, a cluster has at most `most` nodes, and there are at most
+/// `shapes_most` shapes of cluster of more than one node.
 pub(crate) fn fuse<'o>(
     vary: usize,
     level: &[u32],
@@ -70,6 +71,7 @@ pub(crate) fn fuse<'o>(
     kept: &[usize],
     band: u32,
     most: usize,
+    shapes_most: usize,
 ) -> Option<Fused> {
     let nodes = level.len();
     let reads = |n: usize| {
@@ -127,82 +129,120 @@ pub(crate) fn fuse<'o>(
         }
     }
 
-    // The clusters that have nodes, each with its nodes in the plan's order
-    // (so a node comes after what it reads), in order of their last node: a
-    // cluster comes after every cluster it reads.
-    let mut order: Vec<u32> = (0..clusters.len() as u32)
-        .filter(|&c| !clusters[c as usize].members.is_empty())
-        .collect();
-    for &c in &order {
-        clusters[c as usize].members.sort_unstable();
-    }
-    order.sort_unstable_by_key(|&c| *clusters[c as usize].members.last().expect("a node"));
+    // Twice at most: the second time with the clusters of the rarer shapes
+    // taken apart into nodes on their own, so that no more than `shapes_most`
+    // shapes of cluster are left to compile kernels for. A node on its own
+    // has one of the plan's few shapes of node.
+    let mut again = false;
+    let (mut order, stage, last_read, shapes, shape_of) = loop {
+        // The clusters that have nodes, each with its nodes in the plan's order
+        // (so a node comes after what it reads), in order of their last node: a
+        // cluster comes after every cluster it reads.
+        let mut order: Vec<u32> = (0..clusters.len() as u32)
+            .filter(|&c| !clusters[c as usize].members.is_empty())
+            .collect();
+        for &c in &order {
+            clusters[c as usize].members.sort_unstable();
+        }
+        order.sort_unstable_by_key(|&c| *clusters[c as usize].members.last().expect("a node"));
 
-    // The stage of each cluster: one more than the highest it reads. And
-    // which nodes are read from outside their cluster, and in which stage
-    // last.
-    let mut stage = vec![0u32; clusters.len()];
-    let mut last_read: Vec<Option<u32>> = vec![None; nodes];
-    for &c in &order {
-        let mut highest = None;
-        for &m in &clusters[c as usize].members {
-            for r in reads(m as usize) {
-                let from = cluster_of[r];
-                if from != c {
-                    highest = highest.max(Some(stage[from as usize]));
+        // The stage of each cluster: one more than the highest it reads. And
+        // which nodes are read from outside their cluster, and in which stage
+        // last.
+        let mut stage = vec![0u32; clusters.len()];
+        let mut last_read: Vec<Option<u32>> = vec![None; nodes];
+        for &c in &order {
+            let mut highest = None;
+            for &m in &clusters[c as usize].members {
+                for r in reads(m as usize) {
+                    let from = cluster_of[r];
+                    if from != c {
+                        highest = highest.max(Some(stage[from as usize]));
+                    }
+                }
+            }
+            stage[c as usize] = highest.map_or(0, |s| s + 1);
+            for &m in &clusters[c as usize].members {
+                for r in reads(m as usize) {
+                    if cluster_of[r] != c {
+                        last_read[r] = last_read[r].max(Some(stage[c as usize]));
+                    }
                 }
             }
         }
-        stage[c as usize] = highest.map_or(0, |s| s + 1);
-        for &m in &clusters[c as usize].members {
-            for r in reads(m as usize) {
-                if cluster_of[r] != c {
-                    last_read[r] = last_read[r].max(Some(stage[c as usize]));
+        for &n in kept {
+            last_read[n] = Some(u32::MAX);
+        }
+
+        // Each cluster's shape: its nodes' instructions, with a load of a node
+        // of the cluster naming it by its place in the cluster.
+        let mut shapes: Vec<Vec<u32>> = Vec::new();
+        let mut known: HashMap<Vec<u32>, u32> = HashMap::new();
+        let mut shape_of = vec![0u32; clusters.len()];
+        let mut place: HashMap<u32, u32> = HashMap::new();
+        let mut shape: Vec<u32> = Vec::new();
+        for &c in &order {
+            let members = &clusters[c as usize].members;
+            place.clear();
+            shape.clear();
+            for (k, &m) in members.iter().enumerate() {
+                place.insert(m, k as u32);
+                let ops = ops(m as usize);
+                shape.push(ops.len() as u32);
+                shape.push(u32::from(last_read[m as usize].is_some()));
+                for &op in ops {
+                    let local = match op & CODE {
+                        LOAD => node_of(op >> CODE_BITS).and_then(|r| place.get(&(r as u32))),
+                        _ => None,
+                    };
+                    shape.push(match local {
+                        Some(&at) => LOCAL | at << CODE_BITS,
+                        None => op & CODE,
+                    });
+                }
+            }
+            shape_of[c as usize] = match known.get(&shape) {
+                Some(&s) => s,
+                None => {
+                    let s = shapes.len() as u32;
+                    shapes.push(shape.clone());
+                    known.insert(shape.clone(), s);
+                    s
+                }
+            };
+        }
+
+        let several = |c: u32| clusters[c as usize].members.len() > 1;
+        let mut covers = vec![0usize; shapes.len()];
+        for &c in &order {
+            if several(c) {
+                covers[shape_of[c as usize] as usize] += clusters[c as usize].members.len();
+            }
+        }
+        let mut most_first: Vec<usize> = (0..shapes.len()).filter(|&s| covers[s] > 0).collect();
+        if again || most_first.len() <= shapes_most {
+            break (order, stage, last_read, shapes, shape_of);
+        }
+        again = true;
+        most_first.sort_by_key(|&s| Reverse(covers[s]));
+        let mut stays = vec![false; shapes.len()];
+        for &s in &most_first[..shapes_most] {
+            stays[s] = true;
+        }
+        for &c in &order {
+            if clusters[c as usize].members.len() > 1 && !stays[shape_of[c as usize] as usize] {
+                let members = std::mem::take(&mut clusters[c as usize].members);
+                clusters[c as usize].members = vec![members[0]];
+                for &m in &members[1..] {
+                    cluster_of[m as usize] = u32::try_from(clusters.len()).ok()?;
+                    clusters.push(Cluster {
+                        members: vec![m],
+                        sealed: true,
+                    });
                 }
             }
         }
-    }
-    for &n in kept {
-        last_read[n] = Some(u32::MAX);
-    }
-
-    // Each cluster's shape: its nodes' instructions, with a load of a node
-    // of the cluster naming it by its place in the cluster.
-    let mut shapes: Vec<Vec<u32>> = Vec::new();
-    let mut known: HashMap<Vec<u32>, u32> = HashMap::new();
-    let mut shape_of = vec![0u32; clusters.len()];
-    let mut place: HashMap<u32, u32> = HashMap::new();
-    let mut shape: Vec<u32> = Vec::new();
-    for &c in &order {
-        let members = &clusters[c as usize].members;
-        place.clear();
-        shape.clear();
-        for (k, &m) in members.iter().enumerate() {
-            place.insert(m, k as u32);
-            let ops = ops(m as usize);
-            shape.push(ops.len() as u32);
-            shape.push(u32::from(last_read[m as usize].is_some()));
-            for &op in ops {
-                let local = match op & CODE {
-                    LOAD => node_of(op >> CODE_BITS).and_then(|r| place.get(&(r as u32))),
-                    _ => None,
-                };
-                shape.push(match local {
-                    Some(&at) => LOCAL | at << CODE_BITS,
-                    None => op & CODE,
-                });
-            }
-        }
-        shape_of[c as usize] = match known.get(&shape) {
-            Some(&s) => s,
-            None => {
-                let s = shapes.len() as u32;
-                shapes.push(shape.clone());
-                known.insert(shape.clone(), s);
-                s
-            }
-        };
-    }
+    };
 
     // Work the clusters out a stage at a time, and within a stage a shape
     // at a time.

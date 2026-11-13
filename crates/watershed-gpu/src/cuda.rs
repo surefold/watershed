@@ -514,15 +514,33 @@ impl Gpu {
         if let Some(known) = self.compiled.lock().expect("no panic while held").get(&key) {
             return Ok(known.clone());
         }
-        let source = match clusters {
-            true => source_for_clusters(shapes),
-            false => source_for(shapes),
+        let shapes = match clusters {
+            // A cluster's kernel can be long, and the compiler takes much
+            // longer over a long one: each is compiled on its own, on every
+            // core at once.
+            true => {
+                let compiled: Vec<_> = shapes
+                    .par_iter()
+                    .map(|shape| {
+                        compile_ptx_with_opts(
+                            source_for_clusters(std::slice::from_ref(shape)),
+                            options(),
+                        )
+                    })
+                    .collect::<Result<_, _>>()?;
+                compiled
+                    .into_iter()
+                    .map(|ptx| Ok(self.ctx.load_module(ptx)?.load_function("shape0")?))
+                    .collect::<Result<Vec<_>, GpuError>>()?
+            }
+            false => {
+                let ptx = compile_ptx_with_opts(source_for(shapes), options())?;
+                let module = self.ctx.load_module(ptx)?;
+                (0..shapes.len())
+                    .map(|k| module.load_function(&format!("shape{k}")))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
         };
-        let ptx = compile_ptx_with_opts(source, options())?;
-        let module = self.ctx.load_module(ptx)?;
-        let shapes = (0..shapes.len())
-            .map(|k| module.load_function(&format!("shape{k}")))
-            .collect::<Result<Vec<_>, _>>()?;
         let shapes = Arc::new(shapes);
         self.compiled
             .lock()

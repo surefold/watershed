@@ -969,6 +969,7 @@ impl Scenarios {
             &kept,
             setting("WATERSHED_BAND", 32) as u32,
             setting("WATERSHED_CLUSTER", 256),
+            setting("WATERSHED_SHAPES", 96),
         );
 
         let mut sorted = Vec::with_capacity(ops.len());
