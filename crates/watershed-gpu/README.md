@@ -258,6 +258,39 @@ the CPU they differ by up to 1.3e-15 of themselves. A change that reaches most o
 mortality table, gains nothing. The small plan ran on the CPU; on the GPU it
 took 32 to 248 ms.
 
+### Running a batch somewhere else
+
+EXPERIMENTAL. A plan can be written to a file and read back by another
+process or another machine, and gives the same answers to the last bit:
+
+```rust,ignore
+plan.save(BufWriter::new(File::create("book.plan")?))?;
+let plan = Scenarios::load(BufReader::new(File::open("book.plan")?))?;
+```
+
+A file that was cut short or changed is refused; it is not checked for
+being well meant, so load only plans you saved. The insurance book's plan,
+19.9 million nodes, is a 2 GB file that takes 4 to 5 s to write and 6 to 8 s
+to read.
+
+Scenarios do not depend on one another, so a run can be cut into lots that
+separate processes work out from the plan's file. The `split` example does
+that and checks the answers put together against one run: for the insurance
+book on 10,000 paths they were the same to the last bit with two and with
+four workers (one run of each). The workers there share one GPU, so it took
+longer, 24.4 s and 41.2 s against 11.2 to 11.7 s: it shows the answers
+agree, not a speed-up. Nothing here has been run on more than one machine
+or more than one GPU.
+
+`Kept::patch` does the same for bringing a run up to date. It gives the
+small plan and which kept values it reads and replaces, without the values,
+and a `Patch` can be saved and loaded too. Whoever holds some of the
+scenarios' kept values calls `patch.inputs`, runs `patch.plan`, and
+`patch.apply`; the tests check that scenarios held in two parts and patched
+from a file match running everything again.
+[watershed-jvm](https://github.com/surefold/watershed-jvm) builds a cluster
+of workers on these.
+
 ### What the models found
 
 The books, the economies and the rules in these examples are made up, apart
