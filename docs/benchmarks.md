@@ -158,6 +158,32 @@ section says which inputs are real and which are made up, and
 ["Running the examples"](../crates/watershed-gpu/README.md#running-the-examples)
 gives the commands, including the reference scripts.
 
+## Updating a scenario batch after a change
+
+Experimental (`Kept`, `examples/rerun.rs`). The insurance model, 20,000 model
+points × 10,000 scenarios, keeping the sums over groups of eight model points
+and the sums above them: 11,436 values per scenario, 915 MB. One model
+point's guarantee changes and all 10,000 results are wanted. Five runs in
+fresh processes on 13 November 2026 at `ba7b414`, machine otherwise idle;
+medians with ranges.
+
+| Model point (months left) | Nodes in the small plan | Compile | Run, CPU threads | Run, GPU | Whole refresh, CPU |
+|---|---|---|---|---|---|
+| 12099 (9) | 9,327 | 13 ms | 207 ms (206–209) | 248 ms (227–255) | 222 ms (220–223) |
+| 11073 (44) | 5,771 | 10 ms | 127 ms (127–129) | 220 ms (202–225) | 140 ms (137–146) |
+| 17041 (88) | 7,151 | 9 ms | 160 ms (158–161) | 43 ms (41–45) | 170 ms (168–175) |
+| 2770 (136) | 7,426 | 10 ms | 171 ms (171–173) | 32 ms (29–56) | 184 ms (182–191) |
+| 19912 (240) | 8,559 | 10 ms | 192 ms (191–196) | 34 ms (34–55) | 203 ms (202–209) |
+
+The first run, returning the kept values, took 11.2 s (11.2–11.3). Compiling
+the whole plan again took 17.8 s (17.6–18.1) and running it again 11.2 s
+(11.1–11.3). In all ten checks every kept value on every scenario was
+identical to the last bit. The GPU timings of the small plan include
+compiling kernels not yet compiled in the process, which was not separated
+out.
+
+    cargo run --release --features cuda -p watershed-gpu --example rerun -- export 20000 10000 1
+
 ## Figures not re-measured
 
 These appear in the documentation and come from earlier measurements that

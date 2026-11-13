@@ -255,6 +255,27 @@ the device dominates and the plan on CPU threads is as fast, unless the data
 is kept resident on the GPU. On two other models, hand-written parallel CPU
 loops were 3 to 8 times faster than the plan on the CPU.
 
+**Updating a scenario batch after a change** (experimental)
+
+The two patterns can be combined. `Kept` holds the values of chosen nodes for
+every scenario of a run. After an input compiled into the plan changes, it
+finds the kept nodes the change can reach and compiles a small plan for those
+alone, reading the unaffected kept values as inputs.
+
+| Updating 10,000 scenarios after one model point changes | Time | Basis |
+|---|---|---|
+| `Kept` refresh: small plan, run on CPU threads, store | 0.14 to 0.22 s | measured; medians of five runs for five model points |
+| Hand-written JAX program, whole portfolio again | 6.2 s | the figure above; no update path was written for it |
+| Watershed plan on the GPU, whole portfolio again | 11.2 s | measured; five runs |
+| Compile the plan again, then run it | 29.0 s | measured: 17.8 s and 11.2 s |
+
+The refreshed values are identical, to the last bit, to compiling and running
+the whole plan again. The run kept 11,436 values per scenario (915 MB): the
+sums over groups of eight model points and the sums above them. Limits: the
+caller chooses what to keep; a change that reaches most of the model gains
+nothing; and the same shortcut can be written by hand for one model in any
+framework. What the graph adds is deriving it from the model's dependencies.
+
 Methodology, the remaining examples, what each was checked against, and how
 to reproduce them: [docs/benchmarks.md](docs/benchmarks.md) and the
 [watershed-gpu README](crates/watershed-gpu/README.md#what-it-has-been-tried-on).
