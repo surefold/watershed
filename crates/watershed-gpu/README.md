@@ -52,10 +52,21 @@ test, a changed tax rule, a shuffled price history.
 ## What it handles
 
 Numbers (`f64`) and yes-or-no values: arithmetic, `min`, `max`, `abs`, `exp`,
-`ln`, `sqrt`, `pow`, comparisons, `&`, `|`, `!`, and conditions. A node that
-depends on a varied or shared input and holds a choice, a total, or work on
+`ln`, `sqrt`, `pow`, comparisons, `&`, `|`, `!`, and conditions. Both
+branches of a condition are worked out and one is kept, which gives the
+same answer as the graph because none of these can fail.
+
+A node that depends on a varied or shared input and holds a choice
+(`choose`), a list, a total (a collection's `sum` and the like), or work on
 text, whole numbers or decimals is refused when the plan is made, with its
-name.
+name. So is a node that reads one holding an error, and an expression that
+needs a stack deeper than 32. A model that uses collections, decimals or
+`choose` therefore has to be written without them to run as scenarios; the
+examples here add up with their own trees of sums.
+
+That results match the graph is established by tests
+([docs/testing.md](../../docs/testing.md#scenario-plans-against-the-graph)),
+not by a proof.
 
 ## Building
 
@@ -81,7 +92,7 @@ Where a time is scaled up from a smaller run, it says so.
 
 | Example | What it is | Checked against | GPU | Plan on the CPU | Something else |
 |---|---|---|---|---|---|
-| `liabilities` | An insurer's savings policies with guarantees: 1,009,152 policies (20,000 kinds) on 10,000 market paths | lifelib's `savings.CashValue_ME_EX2`: 3 million answers, largest difference 3×10⁻¹³ | 10 s | about 7 minutes (scaled) | the reference, Python on one core: about 4.9 hours (scaled) |
+| `liabilities` | An insurer's savings policies with guarantees: 20,000 kinds of policy (model points, standing for 1,009,152 policies) on 10,000 market paths | lifelib's `savings.CashValue_ME_EX2`: 3 million answers, largest difference 3×10⁻¹³ | 10 s | about 7 minutes (scaled) | the reference, Python on one core: about 4.9 hours (scaled) |
 | `capital` | The same book valued over 1,000 paths in each of 1,000 possible next years: a million whole-book valuations | the model above | 3 minutes (4,000 kinds) | not measured | the reference: about 98 hours (scaled) |
 | `loans` | Expected losses on 20,000 mortgages over 10,000 paths of the economy | the same sums written out by hand: 3×10⁻¹⁷ | 6.6 s | about 2 minutes (scaled) | by hand, 32 threads: 17.7 s (scaled) |
 | `pensions` | A pension scheme of 299,562 members over 5,000 paths and 75 years | the same sums by hand: 5×10⁻¹³ | 0.9 s | 15.1 s (scaled) | by hand, 32 threads: 5.0 s (scaled) |
@@ -114,16 +125,19 @@ Where a time is scaled up from a smaller run, it says so.
   than the plan on the CPU, and the GPU beats that loop by 3 to 6 times.
   The plan's case is that nobody had to write that program, and that the
   same graph still updates in microseconds when one input changes.
-- **Making a plan costs.** A 20-million-node graph takes 22 s to build and
-  17 s to make a plan from, once. Every run after that, and every
+- **Making a plan costs.** A 20-million-node graph takes 23 s to build and
+  18 s to make a plan from, once. The times in the table leave both out. Every run after that, and every
   `set_shared`, skips it.
 
 ### Against a model that works a column at a time
 
 The usual way to make such a model fast is to hold every policy as a row
 and work on whole columns at once, as lifelib does with NumPy and as the
-GPU versions of it do with JAX or PyTorch. That is quick to value a book
-and has to value all of it again when one policy changes. The `amendments`
+GPU versions of it do with JAX or PyTorch. That is quick to value a book,
+and a model written that way values all of it again when one policy
+changes. (lifelib's engine, modelx, does track which formulas depend on
+which; it works the whole column out again because each formula covers
+every policy at once.) The `amendments`
 example puts the two side by side, with no GPU: the same model
 (`savings.CashValue_ME_EX2`), the same 1,009,152 policies in 20,000 kinds,
 one market path, both timed on this machine. They agree on the book's
@@ -131,17 +145,21 @@ value, before and after an amendment, to 4×10⁻¹⁵.
 
 | | lifelib | The graph |
 |---|---|---|
-| Valuing the book the first time | 3.6 s | 26.9 s, of which 22.2 s is building the graph |
-| After a new market path, when everything changes | 3.6 s | 4.7 s |
-| After one policy changes | 2.3 s | 54 µs |
+| Valuing the book the first time | 3.6 s | 27.7 s, of which 22.5 s is building the graph |
+| After a new market path, when everything changes | 3.6 s | 5.2 s |
+| After one policy changes | 2.3 s | 56 µs |
 | The same, valuing only the changed policy by hand and adjusting the total | 0.29 s | |
 
+Every figure in this table is measured. The graph's 56 µs is the mean of
+1,000 amendments, and lifelib's 2.3 s and 0.29 s are medians of five; an
+earlier run of the whole example gave 26.9 s, 4.7 s and 54 µs.
+
 After one policy changes the graph works out about 570 of its 19.9 million
-nodes again: 42,600 times faster than lifelib valuing the book again, and
-5,400 times faster than valuing just that policy with it. A day of 100,000
-amendments is 5.4 s against about 64 hours. Valuing the whole book from
-nothing, lifelib is seven times faster, and a version of it written for
-speed would be faster still.
+nodes again: 41,600 times faster than lifelib valuing the book again, and
+5,300 times faster than valuing just that policy with it. A day of 100,000
+amendments is 5.6 s against about 64 hours (both scaled from the figures
+above). Valuing the whole book from nothing, lifelib is nearly eight times
+faster, and a version of it written for speed would be faster still.
 
 This is one kind of problem, chosen because it is the one a graph is for:
 a large model of which a little changes at a time. It says nothing about
@@ -149,7 +167,7 @@ valuing a book from nothing, where the graph loses, and it is a comparison
 with one tool. Nor is the graph the fastest thing that could do it. Code
 written for this model, valuing the one changed policy in a loop and
 adjusting a running total, would be quicker: on the loan example such a
-loop takes about 3 µs for a loan on a path, against 54 µs here. And other
+loop takes about 3 µs for a loan on a path, against 56 µs here. And other
 engines are built on the same idea (Jane Street's Incremental, Salsa,
 differential dataflow, a spreadsheet's own recalculation) and should be in
 the same range; none of them was measured.
