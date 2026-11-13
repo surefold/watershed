@@ -187,6 +187,54 @@ run can reveal, not facts about any insurer, bank or scheme.
   tended to catch up, far beyond what shuffled histories gave (fewer than 1
   in 100 did as well), by about as much as it costs to trade on it.
 
+## What each example rests on
+
+What is taken from somewhere, and what is made up.
+
+- **`liabilities`, `capital`, `amendments`.** The model, its mortality table
+  and its charges are lifelib's
+  [`savings.CashValue_ME_EX2`](https://lifelib.io/libraries/savings/index.html),
+  and the graph is checked against it. The policies are made up, as are the
+  swings in the funds and how far markets and rates move in a year. The
+  worst year in two hundred is Solvency II's measure
+  ([Directive 2009/138/EC](https://eur-lex.europa.eu/eli/dir/2009/138/oj),
+  Article 101). That the run inside a run is not done in practice is from a
+  Milliman paper: "This brute force approach is too time-consuming to be
+  used in a real insurance business case"
+  ([Boumezoued, Cherchali and Truc, 2022](https://ae.milliman.com/-/media/milliman/pdfs/2022-articles/11-8-22_efficient_computation-of-scr-using-mlmc.ashx)).
+  The 39% fall in funds is the size of the standard formula's shock for
+  shares; the one-point move in rates and the way the two are added up are
+  simplifications, not that formula.
+- **`loans`.** Banks set money aside for expected losses under IFRS 9,
+  weighting several economic scenarios; the European Banking Authority's
+  [2023 monitoring report](https://www.eba.europa.eu/sites/default/files/2023-11/25b12d35-9c28-4335-a589-166c77198920/Final%20Report%20on%20IFRS9%20implementation%20by%20EU%20institutions.pdf)
+  says "the most common approach is to envisage three scenarios". The
+  loans, how defaults respond to unemployment and house prices, and the
+  economy are made up and follow no published model.
+- **`pensions`.** Capped increases are how United Kingdom schemes work:
+  pensions earned since 1997 must rise with prices up to 5% a year, and
+  2.5% for service since 2005
+  ([limited price indexation](https://en.wikipedia.org/wiki/Limited_price_indexation);
+  [Pensions Act 2004, section 278](https://www.legislation.gov.uk/ukpga/2004/35/section/278/notes)).
+  The scheme, its members, the death rates and the economy are made up.
+- **`dosing`.** The aim of 400 to 600 mg·h/L is from the 2020 consensus
+  guideline ([Rybak and others](https://doi.org/10.1093/ajhp/zxaa036)). The
+  model of how the drug moves is from
+  [Goti and others (2018)](https://doi.org/10.1097/FTD.0000000000000490),
+  with its numbers from memory and unchecked. Kidney function is estimated
+  as [Cockcroft and Gault (1976)](https://doi.org/10.1159/000180580) did.
+  The protocol is made up to resemble common practice, and the patients
+  are made up. None of it was reviewed by anyone with medical training.
+- **`spreadsheet`.** `fcffsimpleginzu.xlsx` is from Aswath Damodaran's
+  [page of valuation spreadsheets](https://pages.stern.nyu.edu/~adamodar/New_Home_Page/spreadsh.htm),
+  as downloaded. The ranges the inputs were varied over are made up.
+- **`backtest`, `experts`.** Daily prices from 2010 to 2025 for shares with
+  a price throughout, from the FINSABER data set on Hugging Face
+  (`finsaber-team/FINSABER-V2-Data`), which does not say where its prices
+  come from. Shares that stopped trading are missing, which flatters the
+  market and every rule alike.
+- **`tax_benefit`, `insurance`, `monte_carlo`.** Made up throughout.
+
 ## Running the examples
 
 ```bash

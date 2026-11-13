@@ -2,9 +2,8 @@
 //!
 //! Someone has built a model in Excel: a valuation, a budget, a project's
 //! finances. Some of its inputs are guesses, and they want to know how the
-//! answer is spread when the guesses are. The usual way is an add-in that
-//! puts new numbers in the input cells and recalculates the workbook,
-//! thousands of times over.
+//! answer is spread when the guesses are. One way is to put new numbers in
+//! the input cells and recalculate the workbook, thousands of times over.
 //!
 //! This reads the workbook, turns the formulas between the chosen inputs and
 //! the chosen outputs into a watershed graph, and runs the graph for every
