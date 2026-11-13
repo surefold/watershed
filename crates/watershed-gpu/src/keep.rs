@@ -11,6 +11,11 @@
 //! at the kept nodes that are still right, which it is given as it is given
 //! the varied inputs.
 //!
+//! Run the small plan where the whole one was run. A GPU and a CPU give the
+//! same bits except for the last digits of `exp`, `ln` and `pow`, so a
+//! model that uses those, refreshed on the other device, is right to about
+//! 1e-15 and not to the last bit.
+//!
 //! Which nodes to keep is the caller's choice: more of them means less to
 //! work out after a change and more memory. The outputs are always kept.
 
