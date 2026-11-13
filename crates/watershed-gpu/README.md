@@ -251,6 +251,36 @@ the CPU they differ by up to 1.3e-15 of themselves. A change that reaches most o
 mortality table, gains nothing. The small plan ran on the CPU; on the GPU it
 took 32 to 248 ms.
 
+### Working nodes out in clusters
+
+EXPERIMENTAL, and off unless asked for. `Scenarios::with_clusters` (or
+setting `WATERSHED_CLUSTERS` for `with_shared`) groups nodes that feed one
+another across a band of levels into a cluster that one GPU thread works out
+in one go, keeping what only the cluster reads in registers instead of
+writing it to memory and reading it back. The tests check a clustered plan
+against the graph in the same way as a plain one.
+
+It helps one of the three models tried, and only on runs after the first:
+
+| 20,000 kinds of policy or loans on 10,000 paths; 5,000 paths for pensions | Plain | Clustered |
+|---|---|---|
+| Insurance, run again in the same process | 9.40 s (9.30 to 9.72) | 6.22 s (median of 40, 6.13 to 6.87) |
+| Insurance, making the plan | 17.8 s | 30.9 s |
+| Insurance, the same model by hand in JAX, run again | 6.09 s (ten runs, 6.05 to 6.10) | |
+| Loans, first run | 6.3 s | 7.1 s (two runs) |
+| Pensions, first run | 0.7 s | 2.8 s (seven runs, 2.7 to 2.8) |
+| Pensions, 30 runs in one process | 13.4 s (one run) | 13.7 s (one run) |
+
+A clustered plan takes longer to make, and its kernels are bigger and take
+1.2 to 2.4 s to compile the first time a process runs it, against about
+15 ms for a plain plan's. That is all of the gap on a first run of pensions;
+run again, the two take the same. So it pays only where a big plan is made
+once and run many times, and of these models only for the insurance one,
+where it brings the plan level with the hand-written program. Compiled
+kernels are not kept between processes. Two clustered first runs, one of
+loans and one of pensions, took 43 s and 48 s; seven later runs of pensions did not
+repeat it and the cause was not found.
+
 ### What the models found
 
 The books, the economies and the rules in these examples are made up, apart
@@ -413,10 +443,10 @@ detail, with the slot allocation worked through.
 
 ## Not done yet
 
-- A level's nodes are still written to memory one by one and read back by
-  the next level. Working a chain of nodes out in one go, keeping what only
-  the chain reads off the table, would move less memory, which is what the
-  big graphs wait for.
+- Unless clusters are asked for, a level's nodes are written to memory one
+  by one and read back by the next level. Clusters (above) avoid that, but
+  cost more to plan and compile and have helped one model of three, so they
+  are not the default.
 - A table cannot be looked up by a varied input, so a model where each row
   reads a rate for its own age has to be built with the rates fixed in.
 - `Loaded` needs every scenario to fit on the card at once.
