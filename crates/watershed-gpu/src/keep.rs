@@ -22,7 +22,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
-use watershed_core::{Graph, NodeId};
+use watershed_core::{Graph, NodeId, Type};
 
 use crate::plan::{PlanError, Scenarios};
 
@@ -163,10 +163,15 @@ impl Kept {
                     }
                 }
             }
-            if next.is_empty() || keep.len() + next.len() > most {
+            // Only numbers can be kept; anything else is passed through.
+            let numbers = next
+                .iter()
+                .filter(|&&id| g.node_type(id) == Type::F64)
+                .count();
+            if next.is_empty() || keep.len() + numbers > most {
                 return keep;
             }
-            keep.extend(&next);
+            keep.extend(next.iter().filter(|&&id| g.node_type(id) == Type::F64));
             step = next;
         }
     }
@@ -390,6 +395,13 @@ mod tests {
         near.sort();
         assert_eq!(near, keep);
         assert!(Kept::nearest(&g, &[total.id()], 4).is_empty());
+        // With room for more it goes on into the accounts, past the
+        // conditions, which are not numbers and are not kept.
+        let more = Kept::nearest(&g, &[total.id()], 1_000);
+        assert!(more.len() > 25);
+        assert!(more.iter().all(|&id| g.node_type(id) == Type::F64));
+        let deep = Kept::new(&g, &vary, &[], &[total.id()], &more).unwrap();
+        assert_eq!(deep.plan().run_cpu(&inputs).len(), 50 * deep.width());
 
         // An input nothing kept uses.
         let aside = g.input("aside", 1.0).unwrap();
