@@ -45,6 +45,11 @@ extern "C" __global__ void level(
             case 10: stack[sp++] = shared[arg]; break;
             case 8: stack[sp - 1] = -stack[sp - 1]; break;
             case 9: stack[sp - 1] = fabs(stack[sp - 1]); break;
+            // These are not rounded the same way on every machine: see the
+            // crate's documentation.
+            case 21: stack[sp - 1] = exp(stack[sp - 1]); break;
+            case 22: stack[sp - 1] = log(stack[sp - 1]); break;
+            case 23: stack[sp - 1] = sqrt(stack[sp - 1]); break;
             case 19: stack[sp - 1] = (stack[sp - 1] == 0.0) ? 1.0 : 0.0; break;
             // Otherwise, then, condition: keep the one the condition picks.
             case 20: sp -= 2; stack[sp - 1] = (stack[sp - 1] != 0.0) ? stack[sp] : stack[sp + 1]; break;
@@ -55,6 +60,7 @@ extern "C" __global__ void level(
                     case 3: a = a - b; break;
                     case 4: a = a * b; break;
                     case 5: a = a / b; break;
+                    case 24: a = pow(a, b); break;
                     // Min and max as Rust's `f64::min` and `f64::max` come
                     // out on x86-64: a NaN gives the other side, and of two
                     // equal values (0.0 and -0.0) the second.

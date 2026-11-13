@@ -268,6 +268,24 @@ macro_rules! methods {
             }
         }
 
+        impl $handle<f64> {
+            /// `e` to the power of this.
+            pub fn exp(self) -> Expr<f64> {
+                unary(UnOp::Exp, self.into_expr())
+            }
+            /// The natural logarithm.
+            pub fn ln(self) -> Expr<f64> {
+                unary(UnOp::Ln, self.into_expr())
+            }
+            pub fn sqrt(self) -> Expr<f64> {
+                unary(UnOp::Sqrt, self.into_expr())
+            }
+            /// This to the power of `exponent`.
+            pub fn pow(self, exponent: impl IntoExpr<f64>) -> Expr<f64> {
+                binary(BinOp::Pow, self.into_expr(), exponent.into_expr())
+            }
+        }
+
         impl<T: Numeric> $handle<T> {
             pub fn min(self, rhs: impl IntoExpr<T>) -> Expr<T> {
                 binary(BinOp::Min, self.into_expr(), rhs.into_expr())

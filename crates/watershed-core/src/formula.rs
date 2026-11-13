@@ -379,6 +379,23 @@ impl Parser<'_> {
                         let mut args = self.arguments("abs", 1)?.into_iter();
                         Ok(Ir::Unary(UnOp::Abs, Arc::new(args.next().unwrap())))
                     }
+                    ("exp" | "ln" | "sqrt", true) => {
+                        let mut args = self.arguments(&name, 1)?.into_iter();
+                        let op = match name.as_str() {
+                            "exp" => UnOp::Exp,
+                            "ln" => UnOp::Ln,
+                            _ => UnOp::Sqrt,
+                        };
+                        Ok(Ir::Unary(op, Arc::new(args.next().unwrap())))
+                    }
+                    ("pow", true) => {
+                        let mut args = self.arguments("pow", 2)?.into_iter();
+                        Ok(binary(
+                            BinOp::Pow,
+                            args.next().unwrap(),
+                            args.next().unwrap(),
+                        ))
+                    }
                     ("text", true) => {
                         let mut args = self.arguments("text", 1)?.into_iter();
                         Ok(Ir::Unary(UnOp::ToText, Arc::new(args.next().unwrap())))

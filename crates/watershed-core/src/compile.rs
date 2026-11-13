@@ -656,7 +656,12 @@ impl Compiler<'_> {
                 let ty = self.ty(a);
                 let float = ty == Type::F64;
                 self.emit(a);
-                if ty == Type::Decimal || matches!(op, UnOp::ToDecimal | UnOp::ToFloat) {
+                if ty == Type::Decimal
+                    || matches!(
+                        op,
+                        UnOp::ToDecimal | UnOp::ToFloat | UnOp::Exp | UnOp::Ln | UnOp::Sqrt
+                    )
+                {
                     self.ops.push(Op::Un(*op));
                     return;
                 }
@@ -667,14 +672,16 @@ impl Compiler<'_> {
                     (UnOp::Abs, false) => Op::AbsI,
                     (UnOp::Not, _) => Op::Not,
                     (UnOp::ToText, _) => Op::ToText,
-                    (UnOp::ToDecimal | UnOp::ToFloat, _) => unreachable!("handled above"),
+                    (UnOp::ToDecimal | UnOp::ToFloat | UnOp::Exp | UnOp::Ln | UnOp::Sqrt, _) => {
+                        unreachable!("handled above")
+                    }
                 });
             }
             Ir::Binary(op, a, b) => {
                 let ty = self.ty(a);
                 self.emit(a);
                 self.emit(b);
-                if ty == Type::Decimal {
+                if ty == Type::Decimal || *op == BinOp::Pow {
                     self.ops.push(Op::Bin(*op));
                     return;
                 }
@@ -741,6 +748,7 @@ impl Compiler<'_> {
                     BinOp::Concat => Op::Concat,
                     BinOp::Join => Op::Join,
                     BinOp::Round(_) => unreachable!("only a decimal is rounded"),
+                    BinOp::Pow => unreachable!("handled above"),
                 });
             }
             Ir::List(items) => {

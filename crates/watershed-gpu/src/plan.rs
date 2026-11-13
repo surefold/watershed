@@ -47,6 +47,10 @@ const OR: u32 = 18;
 const NOT: u32 = 19;
 /// Pops otherwise, then, condition; pushes the one the condition picks.
 const SELECT: u32 = 20;
+const EXP: u32 = 21;
+const LN: u32 = 22;
+const SQRT: u32 = 23;
+const POW: u32 = 24;
 
 /// The most slots, shared values or constants a plan can number: what fits
 /// beside the code.
@@ -330,6 +334,9 @@ impl Builder<'_> {
                 match (op, kind) {
                     (UnOp::Neg, Kind::Float) => p.apply(NEG, 1),
                     (UnOp::Abs, Kind::Float) => p.apply(ABS, 1),
+                    (UnOp::Exp, Kind::Float) => p.apply(EXP, 1),
+                    (UnOp::Ln, Kind::Float) => p.apply(LN, 1),
+                    (UnOp::Sqrt, Kind::Float) => p.apply(SQRT, 1),
                     (UnOp::Not, Kind::Bool) => p.apply(NOT, 1),
                     (other, _) => return Err(self.unsupported(p.node, format!("a {other:?}"))),
                 }
@@ -345,6 +352,7 @@ impl Builder<'_> {
                     BinOp::Div => (DIV, Kind::Float),
                     BinOp::Min => (MIN, Kind::Float),
                     BinOp::Max => (MAX, Kind::Float),
+                    BinOp::Pow => (POW, Kind::Float),
                     BinOp::Lt => (LT, Kind::Bool),
                     BinOp::Le => (LE, Kind::Bool),
                     BinOp::Gt => (GT, Kind::Bool),
@@ -407,6 +415,9 @@ fn eval(ops: &[u32], consts: &[f64], shared: &[f64], vals: &[f64]) -> f64 {
             }
             NEG => stack[sp - 1] = -stack[sp - 1],
             ABS => stack[sp - 1] = stack[sp - 1].abs(),
+            EXP => stack[sp - 1] = stack[sp - 1].exp(),
+            LN => stack[sp - 1] = stack[sp - 1].ln(),
+            SQRT => stack[sp - 1] = stack[sp - 1].sqrt(),
             NOT => stack[sp - 1] = truth(stack[sp - 1] == 0.0),
             SELECT => {
                 sp -= 2;
@@ -423,6 +434,7 @@ fn eval(ops: &[u32], consts: &[f64], shared: &[f64], vals: &[f64]) -> f64 {
                     SUB => a - b,
                     MUL => a * b,
                     DIV => a / b,
+                    POW => a.powf(b),
                     MIN => a.min(b),
                     MAX => a.max(b),
                     // As the graph compares: with a NaN on either side,

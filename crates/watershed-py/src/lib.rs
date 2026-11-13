@@ -234,7 +234,9 @@ impl Expr {
             UnOp::Not => a.ty == Type::Bool,
             UnOp::Neg | UnOp::Abs => a.ty.is_numeric(),
             // Python has no way to ask for these yet.
-            UnOp::ToText | UnOp::ToDecimal | UnOp::ToFloat => false,
+            UnOp::ToText | UnOp::ToDecimal | UnOp::ToFloat | UnOp::Exp | UnOp::Ln | UnOp::Sqrt => {
+                false
+            }
         };
         if !ok {
             return Err(PyTypeError::new_err(format!(
@@ -271,6 +273,7 @@ fn symbol(op: BinOp) -> &'static str {
         BinOp::Concat => "+",
         BinOp::Join => "join",
         BinOp::Round(_) => "round",
+        BinOp::Pow => "pow",
     }
 }
 

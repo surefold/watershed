@@ -239,6 +239,34 @@ fn a_condition_takes_the_branch_the_graph_takes() {
     assert_eq!(got, [3.0, 2.0, 2.0, 2.0]);
 }
 
+/// A graph that uses every maths function, its varied input, and the
+/// scenarios to try it on.
+fn with_maths() -> (Scenarios, Graph, Input<f64>, Node<f64>, Vec<f64>) {
+    let mut g = Graph::new();
+    let x = g.input("x", 1.0).unwrap();
+    let rate = g.input("rate", 0.05).unwrap();
+    let grown = g.define("grown", (1.0 + rate).pow(x)).unwrap();
+    let curve = g
+        .define("curve", (x * rate).exp() - (x + 1.0).ln() + x.sqrt())
+        .unwrap();
+    let both = g.define("both", grown / curve).unwrap();
+    g.stabilize();
+    let plan = Scenarios::new(&g, &[x.id()], &[both.id()]).unwrap();
+    let inputs = (0..200).map(|k| k as f64 * 0.37).collect();
+    (plan, g, x, both, inputs)
+}
+
+#[test]
+fn maths_functions_give_what_the_graph_gives() {
+    let (plan, mut g, x, both, inputs) = with_maths();
+    let got = plan.run_cpu(&inputs);
+    for (&value, &got) in inputs.iter().zip(&got) {
+        g.set(x, value).unwrap();
+        g.stabilize();
+        assert_eq!(g.get(both).unwrap().to_bits(), got.to_bits(), "x = {value}");
+    }
+}
+
 #[test]
 fn what_cannot_be_done_is_refused_by_name() {
     let mut g = Graph::new();
@@ -302,6 +330,17 @@ mod on_the_gpu {
     fn the_gpu_gives_what_the_graph_gives() {
         let gpu = Gpu::new().unwrap();
         gives_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());
+    }
+
+    #[test]
+    fn maths_functions_are_within_a_few_last_digits_of_the_cpu() {
+        let gpu = Gpu::new().unwrap();
+        let (plan, _, _, _, inputs) = with_maths();
+        let on_cpu = plan.run_cpu(&inputs);
+        let on_gpu = gpu.run(&plan, &inputs).unwrap();
+        for (cpu, gpu) in on_cpu.iter().zip(&on_gpu) {
+            assert!((cpu - gpu).abs() <= 1e-14 * cpu.abs(), "{cpu} and {gpu}");
+        }
     }
 
     #[test]
