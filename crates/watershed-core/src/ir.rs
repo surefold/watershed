@@ -18,6 +18,13 @@ pub enum UnOp {
     Neg,
     Not,
     Abs,
+    /// `e` to the power of an `f64`.
+    Exp,
+    /// The natural logarithm of an `f64`. Of zero it is negative infinity,
+    /// and of a negative number it is not a number: an `f64` never fails.
+    Ln,
+    /// The square root of an `f64`. Of a negative number it is not a number.
+    Sqrt,
     /// Any value as text: `3` as `"3"`, `2.0` as `"2.0"`, `true` as `"true"`.
     /// Text stays as it is.
     ToText,
@@ -43,6 +50,8 @@ pub enum BinOp {
     Ne,
     And,
     Or,
+    /// `Pow(base, exponent)`: an `f64` to the power of another.
+    Pow,
     /// Two strings joined, or two lists, one after the other. A result over
     /// [`MAX_TEXT_BYTES`] or [`MAX_LIST_ITEMS`] is an error.
     Concat,
@@ -196,6 +205,7 @@ impl Ir {
                 let a = a.type_check(type_of_node)?;
                 match op {
                     UnOp::Neg | UnOp::Abs if a.is_numeric() => Ok(a),
+                    UnOp::Exp | UnOp::Ln | UnOp::Sqrt if a == Type::F64 => Ok(a),
                     UnOp::Not if a == Type::Bool => Ok(Type::Bool),
                     UnOp::ToText => Ok(Type::Str),
                     UnOp::ToDecimal if a == Type::I64 => Ok(Type::Decimal),
@@ -234,6 +244,7 @@ impl Ir {
                 use BinOp::*;
                 match op {
                     Add | Sub | Mul | Div | Min | Max if a.is_numeric() => Ok(a),
+                    Pow if a == Type::F64 => Ok(a),
                     Lt | Le | Gt | Ge if a.is_ordered() => Ok(Type::Bool),
                     Eq | Ne => Ok(Type::Bool),
                     And | Or if a == Type::Bool => Ok(Type::Bool),
@@ -418,6 +429,9 @@ impl Ir {
             Ir::Unary(UnOp::Neg, a) => format!("-{}", a.render_operand(name)),
             Ir::Unary(UnOp::Not, a) => format!("!{}", a.render_operand(name)),
             Ir::Unary(UnOp::Abs, a) => format!("abs({})", a.render(name)),
+            Ir::Unary(UnOp::Exp, a) => format!("exp({})", a.render(name)),
+            Ir::Unary(UnOp::Ln, a) => format!("ln({})", a.render(name)),
+            Ir::Unary(UnOp::Sqrt, a) => format!("sqrt({})", a.render(name)),
             Ir::Unary(UnOp::ToText, a) => format!("text({})", a.render(name)),
             Ir::Unary(UnOp::ToDecimal, a) => format!("decimal({})", a.render(name)),
             Ir::Unary(UnOp::ToFloat, a) => format!("float({})", a.render(name)),
@@ -432,6 +446,7 @@ impl Ir {
             }
             Ir::Binary(BinOp::Min, a, b) => format!("min({}, {})", a.render(name), b.render(name)),
             Ir::Binary(BinOp::Max, a, b) => format!("max({}, {})", a.render(name), b.render(name)),
+            Ir::Binary(BinOp::Pow, a, b) => format!("pow({}, {})", a.render(name), b.render(name)),
             Ir::Binary(BinOp::Join, a, b) => {
                 format!("join({}, {})", a.render(name), b.render(name))
             }
@@ -458,7 +473,12 @@ impl Ir {
                     BinOp::Ne => "!=",
                     BinOp::And => "&&",
                     BinOp::Or => "||",
-                    BinOp::Min | BinOp::Max | BinOp::Concat | BinOp::Join | BinOp::Round(_) => {
+                    BinOp::Min
+                    | BinOp::Max
+                    | BinOp::Pow
+                    | BinOp::Concat
+                    | BinOp::Join
+                    | BinOp::Round(_) => {
                         unreachable!("handled above")
                     }
                 };
@@ -488,7 +508,9 @@ impl Ir {
 
     fn render_operand(&self, name: &dyn Fn(NodeId) -> String) -> String {
         match self {
-            Ir::Binary(op, ..) if !matches!(op, BinOp::Min | BinOp::Max | BinOp::Join) => {
+            Ir::Binary(op, ..)
+                if !matches!(op, BinOp::Min | BinOp::Max | BinOp::Pow | BinOp::Join) =>
+            {
                 format!("({})", self.render(name))
             }
             _ => self.render(name),
@@ -515,6 +537,9 @@ pub(crate) fn unary(op: UnOp, a: Value) -> Value {
             .checked_neg()
             .map_or_else(|| Value::error("integer overflow"), Value::I64),
         (UnOp::Abs, Value::F64(x)) => Value::F64(x.abs()),
+        (UnOp::Exp, Value::F64(x)) => Value::F64(x.exp()),
+        (UnOp::Ln, Value::F64(x)) => Value::F64(x.ln()),
+        (UnOp::Sqrt, Value::F64(x)) => Value::F64(x.sqrt()),
         (UnOp::Abs, Value::I64(x)) => x
             .checked_abs()
             .map_or_else(|| Value::error("integer overflow"), Value::I64),
@@ -545,6 +570,7 @@ pub(crate) fn binary(op: BinOp, a: Value, b: Value) -> Value {
         (Div, Value::F64(x), Value::F64(y)) => Value::F64(x / y),
         (Min, Value::F64(x), Value::F64(y)) => Value::F64(x.min(y)),
         (Max, Value::F64(x), Value::F64(y)) => Value::F64(x.max(y)),
+        (Pow, Value::F64(x), Value::F64(y)) => Value::F64(x.powf(y)),
 
         (Add, Value::I64(x), Value::I64(y)) => checked(x.checked_add(y)),
         (Sub, Value::I64(x), Value::I64(y)) => checked(x.checked_sub(y)),

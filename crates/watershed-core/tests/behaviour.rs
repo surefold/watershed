@@ -1632,3 +1632,23 @@ fn explain_writes_lists_the_way_they_were_built() -> Result {
     );
     Ok(())
 }
+
+#[test]
+fn maths_functions_work_on_floats_typed_and_as_formulas() {
+    let mut g = Graph::new();
+    let x = g.input("x", 4.0).unwrap();
+    let typed = g
+        .define("typed", x.sqrt() + x.ln().exp() + x.pow(0.5))
+        .unwrap();
+    let written = g
+        .define_formula("written", "sqrt(x) + exp(ln(x)) + pow(x, 0.5)")
+        .unwrap();
+    g.stabilize();
+    let want = 4.0f64.sqrt() + 4.0f64.ln().exp() + 4.0f64.powf(0.5);
+    assert_eq!(g.get(typed).unwrap(), want);
+    assert!(matches!(g.value(written), Value::F64(x) if *x == want));
+
+    // They are for floats only.
+    g.input("whole", 4i64).unwrap();
+    assert!(g.define_formula("bad", "sqrt(whole)").is_err());
+}

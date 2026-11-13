@@ -8,7 +8,9 @@ recalculated, and an update stops spreading wherever a recalculated value comes
 out the same as before.
 
 This is the core only: one process, one thread. Distribution, parallelism,
-Python and JVM bindings, and GPUs come later and build on it.
+Python and JVM bindings, and GPUs build on it. For running a graph for many
+sets of inputs at once, on every core or on a GPU, see
+[`crates/watershed-gpu`](crates/watershed-gpu/README.md).
 
 ```rust
 use watershed_core::prelude::*;
@@ -250,7 +252,8 @@ line = orders.column("line", orders.formula("qty * price * fx"))
 ```
 
 It has `+ - * /`, comparisons, `&&`, `||`, `!`, `if(c, a, b)`, `min`, `max`,
-`abs`, `text`, `concat`, `join`, `choose` and lists of strings. A name is a
+`abs`, `exp`, `ln`, `sqrt`, `pow`, `text`, `concat`, `join`, `choose` and
+lists of strings. A name is a
 node (in a collection, a field or column first); a name with spaces or
 punctuation goes between backticks. A number is an `f64`, unless it ends in
 `d` (`19.99d`, a decimal) or `i` (`3i`, a whole number, an `i64`). The grid's
@@ -552,6 +555,7 @@ crates/watershed-py/    the engine as a Python package (PyO3, maturin, uv)
 crates/watershed-web/   the engine as WebAssembly, with three example models
 crates/watershed-parquet/ an update's changes written to Parquet files
 crates/watershed-grid/  a data grid as WebAssembly: rows, formulas, totals, filter, sort, group
+crates/watershed-gpu/   a graph run for many sets of inputs at once, on the CPU's cores or a GPU
 web/                    the interactive page and its build script
 web/grid/               the grid's page, the script that draws it, and the chart of group totals
 ```
