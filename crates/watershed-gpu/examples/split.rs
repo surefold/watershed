@@ -161,6 +161,25 @@ fn main() -> Result<()> {
         std::fs::metadata(&inputs_at)?.len() as f64 / 1e6
     );
     println!();
+    // Set WATERSHED_KEEP to a folder to have the plan, the paths and the
+    // answers of the one run written there for another program to use,
+    // and stop.
+    if let Some(keep) = std::env::var_os("WATERSHED_KEEP") {
+        let keep = PathBuf::from(keep);
+        std::fs::create_dir_all(&keep)?;
+        std::fs::rename(&plan_at, keep.join("plan"))
+            .or_else(|_| std::fs::copy(&plan_at, keep.join("plan")).map(|_| ()))?;
+        write(&keep.join("paths"), &inputs)?;
+        write(&keep.join("whole"), &whole)?;
+        std::fs::remove_dir_all(&folder)?;
+        println!(
+            "kept in {}: plan, paths ({} numbers a path), whole ({} numbers a path)",
+            keep.display(),
+            MONTHS,
+            totals.len()
+        );
+        return Ok(());
+    }
 
     let me = std::env::current_exe()?;
     let cores = std::thread::available_parallelism()?.get();
