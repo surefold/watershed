@@ -145,14 +145,15 @@ value, before and after an amendment, to 4×10⁻¹⁵.
 
 | | lifelib | The graph |
 |---|---|---|
-| Valuing the book the first time | 3.6 s | 27.7 s, of which 22.5 s is building the graph |
-| After a new market path, when everything changes | 3.6 s | 5.2 s |
-| After one policy changes | 2.3 s | 56 µs |
+| Valuing the book the first time | 3.6 s | 26.4 s, of which 21.2 s is building the graph |
+| After a new market path, when everything changes | 3.6 s | 5.3 s |
+| After one policy changes | 2.3 s | 58 µs |
 | The same, valuing only the changed policy by hand and adjusting the total | 0.29 s | |
 
-Every figure in this table is measured. The graph's 56 µs is the mean of
-1,000 amendments, and lifelib's 2.3 s and 0.29 s are medians of five; an
-earlier run of the whole example gave 26.9 s, 4.7 s and 54 µs.
+Every figure in this table is measured. The graph's figures are medians of
+five runs of the example (its 58 µs is the mean of 1,000 amendments in each),
+and lifelib's 2.3 s and 0.29 s are medians of five; single earlier runs gave
+27.7 s, 5.2 s and 56 µs, and 26.9 s, 4.7 s and 54 µs.
 
 After one policy changes the graph works out about 570 of its 19.9 million
 nodes again: 41,600 times faster than lifelib valuing the book again, and
@@ -167,7 +168,7 @@ valuing a book from nothing, where the graph loses, and it is a comparison
 with one tool. Nor is the graph the fastest thing that could do it. Code
 written for this model, valuing the one changed policy in a loop and
 adjusting a running total, would be quicker: on the loan example such a
-loop takes about 3 µs for a loan on a path, against 56 µs here. And other
+loop takes about 3 µs for a loan on a path, against 58 µs here. And other
 engines are built on the same idea (Jane Street's Incremental, Salsa,
 differential dataflow, a spreadsheet's own recalculation) and should be in
 the same range; none of them was measured.
@@ -184,7 +185,7 @@ each measured in full:
 | | Time |
 |---|---|
 | JAX, every policy stepped for all 241 months | 13.1 s (five runs, 13.11 to 13.12) |
-| The plan | 10.0 s first run; eight more at 9.4 to 9.9 |
+| The plan | 10.2 s (median of five runs, 10.1 to 10.3) |
 | JAX, policies sorted so each lot stops at its longest policy | 6.2 s (five runs, 6.10 to 6.32) |
 
 So a program written for this one model, with the obvious tuning, is about
