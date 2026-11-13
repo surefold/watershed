@@ -116,6 +116,39 @@ Where a time is scaled up from a smaller run, it says so.
   17 s to make a plan from, once. Every run after that, and every
   `set_shared`, skips it.
 
+### Against a model that works a column at a time
+
+The usual way to make such a model fast is to hold every policy as a row
+and work on whole columns at once, as lifelib does with NumPy and as the
+GPU versions of it do with JAX or PyTorch. That is quick to value a book
+and has to value all of it again when one policy changes. The `amendments`
+example puts the two side by side, with no GPU: the same model
+(`savings.CashValue_ME_EX2`), the same 1,009,152 policies in 20,000 kinds,
+one market path, both timed on this machine. They agree on the book's
+value, before and after an amendment, to 4×10⁻¹⁵.
+
+| | lifelib | The graph |
+|---|---|---|
+| Valuing the book the first time | 3.6 s | 26.9 s, of which 22.2 s is building the graph |
+| After a new market path, when everything changes | 3.6 s | 4.7 s |
+| After one policy changes | 2.3 s | 54 µs |
+| The same, valuing only the changed policy by hand and adjusting the total | 0.29 s | |
+
+After one policy changes the graph works out about 570 of its 19.9 million
+nodes again: 42,600 times faster than lifelib valuing the book again, and
+5,400 times faster than valuing just that policy with it. A day of 100,000
+amendments is 5.4 s against about 64 hours. Valuing the whole book from
+nothing, lifelib is seven times faster, and a version of it written for
+speed would be faster still.
+
+On the GPU the comparison goes the other way. The Actuarial Open Source
+benchmarks run lifelib's term-life model for 100 million policies in 3.4 s
+on an A100 with JAX, which is something like 5 to 7 billion policy-months a
+second; the plan here manages about 2 billion a second on an RTX 3090, for
+a model with more in it. That is an estimate from their published time and
+not a run of their benchmark, which needs a table looked up by a varied
+input, and the plan cannot do that yet.
+
 ### What the models found
 
 The books, the economies and the rules in these examples are made up, apart
@@ -164,6 +197,13 @@ pip install lifelib pandas openpyxl scipy
 mkdir export && python crates/watershed-gpu/examples/shared/liabilities_reference.py
 cargo run --release --features cuda --example liabilities -- export
 cargo run --release --features cuda --example capital -- export
+```
+
+`amendments` needs lifelib's times for the same book:
+
+```bash
+python crates/watershed-gpu/examples/shared/amendments_reference.py export
+cargo run --release --example amendments -- export
 ```
 
 `dosing` needs a few hundred patients worked by an independent solver:
@@ -216,6 +256,8 @@ random.
   the next level. Working a chain of nodes out in one go, keeping what only
   the chain reads off the table, would move less memory, which is what the
   big graphs wait for.
+- A table cannot be looked up by a varied input, so a model where each row
+  reads a rate for its own age has to be built with the rates fixed in.
 - `Loaded` needs every scenario to fit on the card at once.
 - `Loaded::totals` adds up; a count above a threshold, or a percentile,
   still needs every scenario's answer copied back.

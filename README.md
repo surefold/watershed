@@ -535,6 +535,21 @@ prices then feeds more trades.)
 cargo run --release --example benchmark -- 25000000   # 25 million trades, ~50 million nodes
 ```
 
+Against a model that holds every row and works on whole columns at once,
+this is the trade. On an insurer's book of a million policies, valued by
+[lifelib](https://lifelib.io) and by a watershed graph of the same model on
+the same machine, with the same answers:
+
+| | lifelib | watershed |
+|---|---|---|
+| Valuing the book the first time | 3.6 s | 26.9 s, of which 22.2 s is building the graph |
+| After everything changes | 3.6 s | 4.7 s |
+| After one policy changes | 2.3 s | 54 µs |
+
+About 570 of the graph's 19.9 million nodes are worked out again. The
+`amendments` example in [`crates/watershed-gpu`](crates/watershed-gpu/README.md)
+has both sides.
+
 How it is fast and small:
 
 - **Expressions are compiled** to a flat list of instructions chosen for the
