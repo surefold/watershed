@@ -88,13 +88,24 @@ fn main() -> Result<()> {
             .collect()
     };
     let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
+    // On the GPU the plan is loaded once and stays there: each year changes
+    // the paths and a few shared numbers, and nothing else is copied.
+    #[cfg(feature = "cuda")]
+    let mut loaded = runner.gpu.load(&plan, &paths_for(GROWTH))?;
     // What the book is worth after the funds are multiplied by `funds` and
     // rates move by `rates`: on every inner path, and on the first tenth.
     let mut worth = |funds: f64, rates: f64| -> Result<(f64, f64)> {
         let mut a = Assumptions::best_estimate(&tables, rates);
         a.fund = funds;
         plan.set_shared(&a.values());
-        let results = runner.run(&plan, &paths_for(GROWTH + rates))?;
+        let paths = paths_for(GROWTH + rates);
+        #[cfg(feature = "cuda")]
+        let results = {
+            loaded.set_inputs(&plan, &paths)?;
+            loaded.run(&plan)?
+        };
+        #[cfg(not(feature = "cuda"))]
+        let results = runner.run(&plan, &paths)?;
         Ok((mean(&results), mean(&results[..(inner / 10).max(1)])))
     };
 

@@ -376,6 +376,44 @@ rows instead, which adds nothing to the graph. Sharing one membership node
 per row between a column's groupings, in the engine, would bring the cost
 down enough to lift this.
 
+## Many sets of inputs at once, on a GPU
+
+The graph answers "what is the value now?". For "what would it be in each
+of ten thousand futures?" (a risk run, a stress test, a Monte Carlo
+simulation), [`crates/watershed-gpu`](crates/watershed-gpu/README.md) takes
+a copy of the part of a graph the answers depend on and runs every set of
+inputs through it at once: on all CPU cores, or with the `cuda` feature on
+an NVIDIA GPU. The graph is not touched, and each result is the same as
+setting those inputs on the graph and updating it.
+
+```rust
+use watershed_gpu::Scenarios;
+
+let mut plan = Scenarios::with_shared(&g, &vary, &shared, &outputs)?;
+let today = plan.run_cpu(&paths);          // every path, on every core
+let gpu = watershed_gpu::Gpu::new()?;      // with --features cuda
+let mut loaded = gpu.load(&plan, &paths)?; // the paths stay on the card
+plan.set_shared(&stressed);                // a few assumptions change
+let totals = loaded.totals(&plan)?;        // every path again, added up there
+```
+
+On one desktop (Ryzen 9 5950X, RTX 3090):
+
+| | GPU | The same plan, 32 CPU threads |
+|---|---|---|
+| An insurer's guarantees: a million policies on 10,000 market paths, agreeing with [lifelib](https://lifelib.io)'s reference model to 3×10⁻¹³ | 10 s | about 7 minutes |
+| That book valued a million times over, for the capital to hold (4,000 kinds of policy) | 3 minutes | |
+| Expected losses on 20,000 mortgages over 10,000 paths of the economy | 6.6 s | about 2 minutes |
+| A dosing protocol for an antibiotic on 5 million patients, agreeing with SciPy's solver to 10⁻¹⁰ | 60 ms | 1.8 s |
+| A public Excel valuation workbook, read as it is, 10 million trials, every cell agreeing with Excel | 0.5 s | 1.8 s |
+
+A big, deep graph run for many scenarios is where the GPU pays: 20 to 40
+times the same plan on the CPU. Small rules over a big population need the
+population to stay on the card, or the CPU is as fast. A program written by
+hand for one model still beats the plan on the CPU by 3 to 8 times. The
+crate's README has every example, how each was checked, and what is not
+done.
+
 ## Seeing what it does
 
 ```bash
@@ -496,6 +534,24 @@ prices then feeds more trades.)
 ```bash
 cargo run --release --example benchmark -- 25000000   # 25 million trades, ~50 million nodes
 ```
+
+Against a model that holds every row and works on whole columns at once,
+this is the trade. On an insurer's book of a million policies, valued by
+[lifelib](https://lifelib.io) and by a watershed graph of the same model on
+the same machine, with the same answers:
+
+| | lifelib | watershed |
+|---|---|---|
+| Valuing the book the first time | 3.6 s | 26.9 s, of which 22.2 s is building the graph |
+| After everything changes | 3.6 s | 4.7 s |
+| After one policy changes | 2.3 s | 54 µs |
+
+About 570 of the graph's 19.9 million nodes are worked out again. That is
+the one kind of problem a graph is for, a big model of which a little
+changes at a time; valuing the book from nothing, it loses, and code
+written by hand for one model would beat it at either. The
+`amendments` example in [`crates/watershed-gpu`](crates/watershed-gpu/README.md)
+has both sides.
 
 How it is fast and small:
 

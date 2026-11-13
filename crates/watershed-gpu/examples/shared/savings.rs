@@ -445,9 +445,17 @@ impl Runner {
 
     pub fn run(&self, plan: &Scenarios, inputs: &[f64]) -> Result<Vec<f64>> {
         #[cfg(feature = "cuda")]
-        return Ok(self.gpu.run(plan, inputs)?);
+        {
+            let allowed = self.gpu.free_memory()? / 5 * 4;
+            let (results, timing) = self.gpu.run_within(plan, inputs, allowed)?;
+            // Set TIMING to see where a run's time went.
+            if std::env::var_os("TIMING").is_some() {
+                eprintln!("{timing:?}");
+            }
+            Ok(results)
+        }
         #[cfg(not(feature = "cuda"))]
-        return Ok(plan.run_cpu(inputs));
+        Ok(plan.run_cpu(inputs))
     }
 }
 

@@ -268,6 +268,30 @@ fn maths_functions_give_what_the_graph_gives() {
 }
 
 #[test]
+fn a_chain_needs_room_for_a_few_nodes_at_once_not_all_of_them() {
+    // Each node reads only the one before, so its slot is free two levels on.
+    let mut g = Graph::new();
+    let x = g.input("x", 1.0).unwrap();
+    let mut last = g.define("n0", x + 1.0).unwrap();
+    for k in 1..1000 {
+        last = g.define(&format!("n{k}"), last * 1.0001 + 1.0).unwrap();
+    }
+    g.stabilize();
+    let plan = Scenarios::new(&g, &[x.id()], &[last.id()]).unwrap();
+    assert_eq!((plan.nodes(), plan.levels()), (1000, 1000));
+    assert!(
+        plan.bytes_per_scenario() <= 4 * 8,
+        "{}",
+        plan.bytes_per_scenario()
+    );
+    // Two shapes: the first node's and the rest's.
+    assert_eq!(plan.shapes(), 2);
+    g.set(x, 3.0).unwrap();
+    g.stabilize();
+    assert_eq!(plan.run_cpu(&[3.0]), [g.get(last).unwrap()]);
+}
+
+#[test]
 fn what_cannot_be_done_is_refused_by_name() {
     let mut g = Graph::new();
     let a = g.input("a", 1.0).unwrap();
@@ -330,6 +354,48 @@ mod on_the_gpu {
     fn the_gpu_gives_what_the_graph_gives() {
         let gpu = Gpu::new().unwrap();
         gives_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());
+    }
+
+    #[test]
+    fn the_general_kernel_gives_what_the_graph_gives() {
+        let gpu = Gpu::new().unwrap().without_compiling();
+        gives_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());
+    }
+
+    #[test]
+    fn loaded_scenarios_give_the_same_again_and_with_other_shared_values() {
+        let gpu = Gpu::new().unwrap();
+        let mut rng = Rng(11);
+        let r = random_graph(&mut rng, 14, 300);
+        let outputs: Vec<NodeId> = r.nodes[280..].iter().map(|n| n.id()).collect();
+        let mut plan =
+            Scenarios::with_shared(&r.g, &ids(&r.inputs[..8]), &ids(&r.inputs[8..12]), &outputs)
+                .unwrap();
+        let inputs: Vec<f64> = (0..3000 * 8).map(|_| rng.value()).collect();
+        let mut loaded = gpu.load(&plan, &inputs).unwrap();
+        for _ in 0..3 {
+            assert_same(
+                "loaded",
+                &loaded.run(&plan).unwrap(),
+                &plan.run_cpu(&inputs),
+            );
+            // Added up on the GPU as on the CPU, to the last bit.
+            assert_same(
+                "totals",
+                &loaded.totals(&plan).unwrap(),
+                &plan.totals_cpu(&inputs),
+            );
+            let shared: Vec<f64> = (0..4).map(|_| rng.value()).collect();
+            plan.set_shared(&shared);
+        }
+        // Other inputs for the same scenarios.
+        let others: Vec<f64> = (0..3000 * 8).map(|_| rng.value()).collect();
+        loaded.set_inputs(&plan, &others).unwrap();
+        assert_same(
+            "other inputs",
+            &loaded.run(&plan).unwrap(),
+            &plan.run_cpu(&others),
+        );
     }
 
     #[test]

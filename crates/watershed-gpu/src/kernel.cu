@@ -1,7 +1,12 @@
-// One level of a scenario plan. Each thread works out one node for one
-// scenario: it runs the node's instructions on a small stack and writes one
-// number. Threads next to each other are the same node in neighbouring
-// scenarios, so they run the same instructions and read neighbouring memory.
+// The kernels every plan uses. `level` works out one level of a plan by
+// reading each node's instructions as it goes; it is used when a plan has too
+// many shapes of node to compile a kernel for each (see `cuda.rs`, which
+// writes those). `total` adds up a row.
+//
+// In `level` each thread works out one node for one scenario: it runs the
+// node's instructions on a small stack and writes one number. Threads next
+// to each other are the same node in neighbouring scenarios, so they run the
+// same instructions and read neighbouring memory.
 //
 // `vals` holds one row per slot and one column per scenario. A bool is held
 // as 1.0 or 0.0. The instruction codes are those of `plan.rs`; the two must
@@ -16,13 +21,12 @@
 
 extern "C" __global__ void level(
     const unsigned* ops,       // every node's instructions, one after another
-    const unsigned* programs,  // per calculated node: where its instructions start, and how many
+    const unsigned* programs,  // per calculated node: where its instructions start, how many, and its slot
     const double* consts,
     const double* shared,      // values that are the same for every scenario of this run
     double* vals,
     unsigned first,            // the first calculated node of this level
     unsigned nodes,            // how many nodes the level has
-    unsigned vary,             // slots taken by the varied inputs, which come first
     unsigned scenarios)
 {
     unsigned long long thread = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -31,8 +35,8 @@ extern "C" __global__ void level(
     unsigned s = (unsigned)(thread - n * scenarios);
     unsigned node = first + (unsigned)n;
 
-    unsigned at = programs[2 * node];
-    unsigned end = at + programs[2 * node + 1];
+    unsigned at = programs[3 * node];
+    unsigned end = at + programs[3 * node + 1];
     double stack[DEPTH];
     int sp = 0;
     for (; at < end; at++) {
@@ -79,5 +83,25 @@ extern "C" __global__ void level(
                 stack[sp - 1] = a;
         }
     }
-    vals[(unsigned long long)(vary + node) * scenarios + s] = stack[0];
+    vals[(unsigned long long)programs[3 * node + 2] * scenarios + s] = stack[0];
+}
+
+// Adds up one slot's row a block of scenarios at a time: thread `b` adds
+// scenarios `b * block` onwards, in order, and writes one number. The blocks
+// are added up on the CPU, so the order is one the CPU can repeat exactly.
+extern "C" __global__ void total(
+    const double* vals,
+    double* out,
+    unsigned slot,
+    unsigned scenarios,
+    unsigned block)
+{
+    unsigned long long b = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long from = b * block;
+    if (from >= scenarios) return;
+    unsigned long long to = from + block < scenarios ? from + block : scenarios;
+    const double* row = vals + (unsigned long long)slot * scenarios;
+    double sum = 0.0;
+    for (unsigned long long s = from; s < to; s++) sum += row[s];
+    out[b] = sum;
 }
