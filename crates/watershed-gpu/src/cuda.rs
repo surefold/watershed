@@ -26,7 +26,10 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc::{CompileError, CompileOptions, compile_ptx_with_opts};
 
-use crate::plan::{BLOCK, Output, Scenarios, Source, arity, in_c, source_of, total};
+use crate::fuse::{Fused, LOCAL};
+use crate::plan::{
+    BLOCK, CODE, CODE_BITS, Output, Scenarios, Source, arity, in_c, source_of, total,
+};
 
 const THREADS_PER_BLOCK: u32 = 256;
 
@@ -97,6 +100,8 @@ pub struct Gpu {
     total: CudaFunction,
     /// Whether to compile a kernel for each shape of a plan.
     compiles: bool,
+    /// Whether to work nodes out in clusters, where a plan has them.
+    fuses: bool,
     /// The kernels compiled so far, by what they were compiled from.
     compiled: Mutex<HashMap<u64, Arc<Vec<CudaFunction>>>>,
 }
@@ -111,9 +116,12 @@ enum Program {
     /// By a kernel for each shape.
     Compiled {
         operands: CudaSlice<u32>,
-        /// Per node: where its operands start, and its slot.
+        /// Per node: where its operands start, and its slot. Or, when the
+        /// nodes are in clusters, per cluster: where its operands start.
         nodes: CudaSlice<u32>,
         shapes: Arc<Vec<CudaFunction>>,
+        /// Whether these are clusters.
+        fused: bool,
     },
 }
 
@@ -123,8 +131,21 @@ struct Device {
     consts: CudaSlice<f64>,
     shared: CudaSlice<f64>,
     vals: CudaSlice<f64>,
-    /// How many scenarios `vals` has room for.
+    /// How many scenarios `vals` has room for, and how many slots each has.
     room: usize,
+    slots: usize,
+    /// Whether the nodes are worked out in clusters, which decides where
+    /// the outputs are.
+    fused: bool,
+}
+
+impl Device {
+    fn outputs<'p>(&self, plan: &'p Scenarios) -> &'p [Output] {
+        match self.fused {
+            true => &plan.fused_outputs,
+            false => &plan.outputs,
+        }
+    }
 }
 
 /// A plan and its scenarios held on the GPU, to run again and again without
@@ -214,6 +235,89 @@ fn source_for(shapes: &[Vec<u32>]) -> String {
     source
 }
 
+/// The source of a kernel for each shape of cluster. A thread works out
+/// every node of one cluster for one scenario, one after another, and writes
+/// to memory only the values something outside the cluster reads.
+fn source_for_clusters(shapes: &[Vec<u32>]) -> String {
+    let mut source = String::new();
+    for (k, shape) in shapes.iter().enumerate() {
+        writeln!(
+            source,
+            "extern \"C\" __global__ void shape{k}(const unsigned* operands, const unsigned* starts, \
+             const double* consts, const double* shared, double* vals, unsigned first, \
+             unsigned count, unsigned scenarios) {{\n\
+             unsigned long long thread = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;\n\
+             unsigned long long c = thread / scenarios;\n\
+             if (c >= count) return;\n\
+             unsigned long long s = thread - c * scenarios;\n\
+             const unsigned* o = operands + starts[first + c];"
+        )
+        .expect("writing to a string");
+        let pop = |stack: &mut Vec<String>| stack.pop().expect("a well-formed shape");
+        let (mut made, mut read, mut at, mut node) = (0, 0, 0, 0);
+        let mut written = Vec::new();
+        while at < shape.len() {
+            let (ops, goes_to_memory) = (shape[at] as usize, shape[at + 1] == 1);
+            let mut stack: Vec<String> = Vec::new();
+            for &op in &shape[at + 2..at + 2 + ops] {
+                let code = op & CODE;
+                if code == LOCAL {
+                    stack.push(format!("n{}", op >> CODE_BITS));
+                    continue;
+                }
+                let value = match arity(code) {
+                    0 => {
+                        let from = match source_of(code) {
+                            Source::Slot => {
+                                format!("vals[(unsigned long long)o[{read}] * scenarios + s]")
+                            }
+                            Source::Const => format!("consts[o[{read}]]"),
+                            Source::Shared => format!("shared[o[{read}]]"),
+                        };
+                        read += 1;
+                        from
+                    }
+                    1 => {
+                        let a = pop(&mut stack);
+                        in_c(code, &[&a])
+                    }
+                    2 => {
+                        let b = pop(&mut stack);
+                        let a = pop(&mut stack);
+                        in_c(code, &[&a, &b])
+                    }
+                    _ => {
+                        let otherwise = pop(&mut stack);
+                        let then = pop(&mut stack);
+                        let condition = pop(&mut stack);
+                        in_c(code, &[&condition, &then, &otherwise])
+                    }
+                };
+                writeln!(source, "double t{made} = {value};").expect("writing to a string");
+                stack.push(format!("t{made}"));
+                made += 1;
+            }
+            let result = pop(&mut stack);
+            writeln!(source, "double n{node} = {result};").expect("writing to a string");
+            if goes_to_memory {
+                written.push(node);
+            }
+            node += 1;
+            at += 2 + ops;
+        }
+        for (k, node) in written.iter().enumerate() {
+            writeln!(
+                source,
+                "vals[(unsigned long long)o[{}] * scenarios + s] = n{node};",
+                read + k
+            )
+            .expect("writing to a string");
+        }
+        source.push_str("}\n");
+    }
+    source
+}
+
 impl Gpu {
     /// Opens the first GPU and compiles the general kernels for it.
     ///
@@ -233,6 +337,7 @@ impl Gpu {
             level,
             total,
             compiles: true,
+            fuses: true,
             compiled: Mutex::new(HashMap::new()),
         })
     }
@@ -242,6 +347,14 @@ impl Gpu {
     /// comparing the two.
     pub fn without_compiling(mut self) -> Gpu {
         self.compiles = false;
+        self
+    }
+
+    /// The same GPU, working out a node at a time and never a cluster of
+    /// them in one go. The answers are the same; this is for comparing the
+    /// two.
+    pub fn without_fusing(mut self) -> Gpu {
+        self.fuses = false;
         self
     }
 
@@ -278,7 +391,7 @@ impl Gpu {
         let at_a_time = self.fit(plan, scenarios, allowed);
         if at_a_time == 0 {
             return Err(GpuError::TooLittleMemory {
-                needed: self.fixed(plan) + plan.bytes_per_scenario(),
+                needed: self.fixed(plan) + self.slots(plan) * size_of::<f64>(),
                 allowed,
             });
         }
@@ -331,7 +444,7 @@ impl Gpu {
         let allowed = self.free_memory()? / 5 * 4;
         if self.fit(plan, scenarios, allowed) < scenarios {
             return Err(GpuError::TooLittleMemory {
-                needed: self.fixed(plan) + scenarios * plan.bytes_per_scenario(),
+                needed: self.fixed(plan) + scenarios * self.slots(plan) * size_of::<f64>(),
                 allowed,
             });
         }
@@ -351,11 +464,25 @@ impl Gpu {
         self.compiles && plan.shapes.len() <= MOST_SHAPES
     }
 
+    /// The plan's clusters, if its nodes are to be worked out in them: it
+    /// has them, and few enough shapes of them to compile a kernel for each.
+    fn clusters<'p>(&self, plan: &'p Scenarios) -> Option<&'p Fused> {
+        plan.fused
+            .as_ref()
+            .filter(|f| self.compiles && self.fuses && f.shapes.len() <= MOST_SHAPES)
+    }
+
+    /// How many slots a scenario takes on this GPU.
+    fn slots(&self, plan: &Scenarios) -> usize {
+        self.clusters(plan).map_or(plan.slots(), |f| f.slots)
+    }
+
     /// The memory a plan takes on the GPU whatever the number of scenarios.
     fn fixed(&self, plan: &Scenarios) -> usize {
-        let program = match self.compiles(plan) {
-            true => size_of_val(&plan.operands[..]) + 2 * size_of_val(&plan.operand_at[..]),
-            false => size_of_val(&plan.ops[..]) + size_of_val(&plan.programs[..]),
+        let program = match (self.clusters(plan), self.compiles(plan)) {
+            (Some(f), _) => size_of_val(&f.operands[..]) + size_of_val(&f.operand_at[..]),
+            (None, true) => size_of_val(&plan.operands[..]) + 2 * size_of_val(&plan.operand_at[..]),
+            (None, false) => size_of_val(&plan.ops[..]) + size_of_val(&plan.programs[..]),
         };
         program + size_of_val(&plan.consts[..]) + size_of_val(&plan.shared[..])
     }
@@ -363,9 +490,12 @@ impl Gpu {
     /// How many of `scenarios` fit at once: in memory, and in one launch,
     /// which can have at most 2^31 - 1 blocks of threads.
     fn fit(&self, plan: &Scenarios, scenarios: usize, allowed: usize) -> usize {
-        let widest = plan.levels.iter().map(|l| l.len()).max().unwrap_or(1);
+        let widest = match self.clusters(plan) {
+            Some(f) => f.widest,
+            None => plan.levels.iter().map(|l| l.len()).max().unwrap_or(1),
+        };
         let most_threads = (i32::MAX as usize) * THREADS_PER_BLOCK as usize;
-        (allowed.saturating_sub(self.fixed(plan)) / plan.bytes_per_scenario())
+        (allowed.saturating_sub(self.fixed(plan)) / (self.slots(plan) * size_of::<f64>()))
             .min(most_threads / widest)
             .min(u32::MAX as usize)
             .min(scenarios)
@@ -373,16 +503,24 @@ impl Gpu {
 
     /// The kernels for a plan's shapes, compiled now if no plan with these
     /// shapes has been run before.
-    fn shapes(&self, plan: &Scenarios) -> Result<Arc<Vec<CudaFunction>>, GpuError> {
+    fn shapes(
+        &self,
+        shapes: &[Vec<u32>],
+        clusters: bool,
+    ) -> Result<Arc<Vec<CudaFunction>>, GpuError> {
         let mut hasher = DefaultHasher::new();
-        plan.shapes.hash(&mut hasher);
+        (clusters, shapes).hash(&mut hasher);
         let key = hasher.finish();
         if let Some(known) = self.compiled.lock().expect("no panic while held").get(&key) {
             return Ok(known.clone());
         }
-        let ptx = compile_ptx_with_opts(source_for(&plan.shapes), options())?;
+        let source = match clusters {
+            true => source_for_clusters(shapes),
+            false => source_for(shapes),
+        };
+        let ptx = compile_ptx_with_opts(source, options())?;
         let module = self.ctx.load_module(ptx)?;
-        let shapes = (0..plan.shapes.len())
+        let shapes = (0..shapes.len())
             .map(|k| module.load_function(&format!("shape{k}")))
             .collect::<Result<Vec<_>, _>>()?;
         let shapes = Arc::new(shapes);
@@ -400,9 +538,27 @@ impl Gpu {
         room: usize,
         timing: &mut Timing,
     ) -> Result<Device, GpuError> {
-        let program = if self.compiles(plan) {
+        let program = if let Some(f) = self.clusters(plan) {
             let started = Instant::now();
-            let shapes = self.shapes(plan)?;
+            let shapes = self.shapes(&f.shapes, true)?;
+            timing.compile += started.elapsed();
+            let started = Instant::now();
+            // An empty allocation is refused, and a plan may read nothing.
+            let operands = match f.operands.is_empty() {
+                true => self.stream.clone_htod(&[0u32])?,
+                false => self.stream.clone_htod(&f.operands)?,
+            };
+            let program = Program::Compiled {
+                operands,
+                nodes: self.stream.clone_htod(&f.operand_at)?,
+                shapes,
+                fused: true,
+            };
+            timing.upload += started.elapsed();
+            program
+        } else if self.compiles(plan) {
+            let started = Instant::now();
+            let shapes = self.shapes(&plan.shapes, false)?;
             timing.compile += started.elapsed();
             let started = Instant::now();
             let nodes: Vec<u32> = plan
@@ -420,6 +576,7 @@ impl Gpu {
                 operands,
                 nodes: self.stream.clone_htod(&nodes)?,
                 shapes,
+                fused: false,
             };
             timing.upload += started.elapsed();
             program
@@ -433,12 +590,16 @@ impl Gpu {
             program
         };
         let started = Instant::now();
+        let slots = self.slots(plan);
+        let fused = self.clusters(plan).is_some();
         let device = Device {
             program,
             consts: self.some(&plan.consts)?,
             shared: self.some(&plan.shared)?,
-            vals: self.stream.alloc_zeros::<f64>(plan.slots() * room)?,
+            vals: self.stream.alloc_zeros::<f64>(slots * room)?,
             room,
+            slots,
+            fused,
         };
         self.stream.synchronize()?;
         timing.upload += started.elapsed();
@@ -506,8 +667,13 @@ impl Gpu {
                 operands,
                 nodes,
                 shapes,
+                fused,
             } => {
-                for group in &plan.groups {
+                let groups = match (fused, &plan.fused) {
+                    (true, Some(f)) => &f.groups,
+                    _ => &plan.groups,
+                };
+                for group in groups {
                     self.launch_shape(
                         &shapes[group.shape as usize],
                         operands,
@@ -538,7 +704,7 @@ impl Gpu {
         // The outputs come back an output at a time, and are wanted a
         // scenario at a time.
         let mut back = vec![0.0; outputs * count];
-        for (output, column) in plan.outputs.iter().zip(back.chunks_mut(count)) {
+        for (output, column) in device.outputs(plan).iter().zip(back.chunks_mut(count)) {
             match *output {
                 Output::Slot(slot) => {
                     let row = slot as usize * count;
@@ -698,7 +864,7 @@ impl Loaded<'_> {
     /// they are now.
     fn work_out(&mut self, plan: &Scenarios) -> Result<(), GpuError> {
         assert_eq!(
-            plan.slots() * self.scenarios,
+            self.device.slots * self.scenarios,
             self.device.vals.len(),
             "the plan this was loaded with"
         );
@@ -724,7 +890,7 @@ impl Loaded<'_> {
         self.work_out(plan)?;
         let mut blocks = vec![0.0; self.scenarios.div_ceil(BLOCK)];
         let mut totals = Vec::with_capacity(plan.outputs.len());
-        for output in &plan.outputs {
+        for output in self.device.outputs(plan) {
             totals.push(match *output {
                 Output::Slot(slot) => {
                     self.gpu.launch_total(

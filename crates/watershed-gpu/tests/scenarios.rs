@@ -357,6 +357,12 @@ mod on_the_gpu {
     }
 
     #[test]
+    fn a_kernel_for_each_node_shape_gives_what_the_graph_gives() {
+        let gpu = Gpu::new().unwrap().without_fusing();
+        gives_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());
+    }
+
+    #[test]
     fn the_general_kernel_gives_what_the_graph_gives() {
         let gpu = Gpu::new().unwrap().without_compiling();
         gives_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());

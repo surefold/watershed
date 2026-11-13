@@ -248,6 +248,16 @@ fn main() -> Result<()> {
         time(plan_took)
     );
 
+    if let (Some((clusters, shapes)), Some(bytes)) =
+        (plan.clusters(), plan.bytes_per_scenario_in_clusters())
+    {
+        println!(
+            "  on the GPU: {} clusters of {} shapes, {} bytes a path",
+            commas(clusters as f64),
+            shapes,
+            commas(bytes as f64)
+        );
+    }
     // The market paths: the same draws serve every growth rate.
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let draws: Vec<f64> = (0..scenarios * MONTHS).map(|_| rng.normal()).collect();
