@@ -9,10 +9,14 @@
 //!   for each of a thousand ways the next year could go (outer scenarios)
 //!     → value the whole book over a thousand market paths from there (inner)
 //!
-//! A million valuations of the whole book. This is "nested stochastic", and
-//! it is expensive enough that insurers mostly do not do it: they use a
-//! handful of prescribed stresses added up by formula, or fit a curve
-//! through a few hundred valuations and read the bad year off the curve.
+//! A million valuations of the whole book. This is "nested stochastic". A
+//! Milliman paper says of it: "This brute force approach is too
+//! time-consuming to be used in a real insurance business case" (Boumezoued,
+//! Cherchali and Truc, "Efficient computation of Solvency Capital
+//! Requirement using multilevel Monte Carlo methods", 2022). The capital is
+//! typically worked out by the standard formula instead, which adds up
+//! prescribed stresses, or by fitting a curve through far fewer valuations
+//! and reading the bad year off the curve.
 //!
 //! Here it is done outright. An outer scenario is a fall or rise in the
 //! funds and a move in interest rates, which are shared inputs of the plan,

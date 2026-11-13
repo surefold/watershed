@@ -6,14 +6,15 @@
 //! kidneys, which are also what remove it, so a patient with poor kidneys
 //! keeps it for much longer. Hospitals dose it by a protocol: so many
 //! milligrams for each kilogram of weight, given more or less often
-//! according to kidney function. The guideline's aim is an exposure (the
-//! area under the curve of concentration against time, over a day) of 400
-//! to 600 mg·h/L.
+//! according to kidney function. The aim, from the 2020 consensus guideline
+//! (Rybak and others, American Journal of Health-System Pharmacy 77:835,
+//! doi 10.1093/ajhp/zxaa036), is an exposure (the area under the curve of
+//! concentration against time, over a day) of 400 to 600 mg·h/L.
 //!
 //! Whether a protocol meets that aim is found by simulation: make up
 //! thousands of patients as varied as real ones, dose each by the protocol,
 //! follow the drug through each body, and count how many land in the range.
-//! Pharmacologists call this a probability of target attainment study.
+//! This kind of study is called probability of target attainment.
 //!
 //! The graph is one patient for three days, an hour at a time: kidney
 //! function from age, weight, sex and a blood test; how fast this patient

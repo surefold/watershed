@@ -7,10 +7,10 @@
 //! the losses would be in a slump. Both depend on where unemployment, house
 //! prices and interest rates go, quarter by quarter, for decades.
 //!
-//! Projecting every loan along one such path is heavy enough that banks
-//! mostly use three to five hand-written economic scenarios and weight
-//! them. This example does that, and then does what the rule is really
-//! asking for: thousands of paths the economy could take.
+//! Banks weight a few economic scenarios: "the most common approach is to
+//! envisage three scenarios" (European Banking Authority, IFRS 9
+//! implementation by EU institutions, 2023 monitoring report). This example
+//! does that, and then runs thousands of paths the economy could take.
 //!
 //! The graph is the loan book. Every loan's every quarter is four or five
 //! nodes: what is still owed (for a loan whose rate moves), the chance of

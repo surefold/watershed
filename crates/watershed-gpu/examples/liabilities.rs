@@ -6,8 +6,7 @@
 //! much that will cost depends on the path the markets take, on who dies and
 //! who cashes in early, and on fees, so there is no formula: the insurer
 //! projects every policy month by month to its end, along thousands of
-//! possible market paths. Regulators require it, and it is what an
-//! actuarial department's overnight runs are.
+//! possible market paths.
 //!
 //! The model here is `savings.CashValue_ME_EX2` from lifelib
 //! (<https://lifelib.io>, MIT licence), an open-source reference model, built
