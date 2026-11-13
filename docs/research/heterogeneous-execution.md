@@ -2,6 +2,8 @@
 
 13 November 2026. Code examined: `surefold/watershed`, `main` at `8045417`. Branch for this note: `research/heterogeneous-execution`. Nothing in the library was changed; two experimental examples were added (`crates/watershed-gpu/examples/hetero_probe.rs`, `hetero_cones.rs`).
 
+> **Since this note.** Its recommendation was followed. `Kept` in `watershed-gpu` (`src/keep.rs`) keeps chosen nodes' values from a batch run and, after a change, re-runs only the kept nodes the change can reach; plans can now be cut at interior nodes for that purpose. On the real insurance book the refresh took 0.14 to 0.22 s against 11.2 s for a full re-run, and on the loan book about 30 ms against 7.2 s, both bit-identical when run on the same device ([docs/benchmarks.md](../benchmarks.md#updating-a-scenario-batch-after-a-change)). The estimates in section 5.3 for the real book (10 to 30 ms) were for keeping more than those runs kept. Everything below is the note as written, before that work; where it says a plan cannot start at interior nodes or that intermediates are not retained, that described the code at the time.
+
 Machine: Ryzen 9 5950X (16 cores, 32 threads), 47 GB, one RTX 3090 24 GB, WSL2, CUDA 13.1, rustc 1.99. Everything is double precision.
 
 Labels: **measured** (run here for this note; median, range and sample count given), **earlier** (measured on this machine on the same day, in `measurements.md` of the earlier investigation; not re-run), **source** (read in the code or a primary document), **reported** (from a literature search; "opened" means the primary text was read, "snippet" means only a search result was seen), **estimated** (arithmetic on measured constants), **judgement**.
