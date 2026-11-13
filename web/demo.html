@@ -235,7 +235,7 @@ footer { color: var(--muted); font-size: 0.85rem; }
 
   <div class="tabs views" role="tablist" aria-label="Views">
     <button class="tab" type="button" role="tab" id="view-tab-playground" aria-controls="view-playground" aria-selected="true">Playground</button>
-    <button class="tab" type="button" role="tab" id="view-tab-grid" aria-controls="view-grid" aria-selected="false">Data grid</button>
+    <button class="tab" type="button" role="tab" id="view-tab-grid" aria-controls="view-grid" aria-selected="false" tabindex="-1">Data grid</button>
   </div>
 
   <div class="view view-grid" id="view-grid" role="tabpanel" aria-labelledby="view-tab-grid" hidden>
@@ -250,7 +250,7 @@ footer { color: var(--muted); font-size: 0.85rem; }
       <div class="tabs" role="tablist" aria-label="Example models" id="tabs"></div>
     </div>
 
-    <div class="workbench">
+    <div class="workbench" id="example-panel" role="tabpanel" aria-labelledby="tab-crypto">
       <div class="panel">
         <h3>Inputs</h3>
         <div class="live" id="live" data-state="connecting" hidden>
@@ -414,6 +414,30 @@ footer { color: var(--muted); font-size: 0.85rem; }
 </div>
 
 <script>
+// Arrow keys move focus; the buttons activate on Enter, Space or click.
+function enableTabKeys(tablist) {
+  tablist.addEventListener("keydown", (event) => {
+    if (!event.target.matches('[role="tab"]') || event.altKey || event.ctrlKey || event.metaKey) return;
+    const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
+    const index = tabs.indexOf(event.target);
+    let next;
+    switch (event.key) {
+      case "ArrowLeft": next = (index - 1 + tabs.length) % tabs.length; break;
+      case "ArrowRight": next = (index + 1) % tabs.length; break;
+      case "Home": next = 0; break;
+      case "End": next = tabs.length - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    tabs[next].focus();
+  });
+}
+
+function selectTab(tab, selected) {
+  tab.setAttribute("aria-selected", String(selected));
+  tab.tabIndex = selected ? 0 : -1;
+}
+
 // The two views. `#grid` in the address opens the grid, so it can be linked to.
 // The grid's page and its engine load the first time its tab is opened.
 (() => {
@@ -421,7 +445,7 @@ footer { color: var(--muted); font-size: 0.85rem; }
   const show = (name) => {
     for (const view of views) {
       document.getElementById(`view-${view}`).hidden = view !== name;
-      document.getElementById(`view-tab-${view}`).setAttribute("aria-selected", String(view === name));
+      selectTab(document.getElementById(`view-tab-${view}`), view === name);
     }
     const frame = document.getElementById("grid-frame");
     if (name === "grid" && !frame.getAttribute("src")) frame.src = "grid/?embed";
@@ -433,6 +457,7 @@ footer { color: var(--muted); font-size: 0.85rem; }
     });
   }
   const fromAddress = () => show(location.hash === "#grid" ? "grid" : "playground");
+  enableTabKeys(document.querySelector(".tabs.views"));
   addEventListener("hashchange", fromAddress);
   fromAddress();
 })();
@@ -475,7 +500,9 @@ let engineMs = 0;
 function load(name) {
   stopFeed();
   preset = name;
-  for (const b of $("tabs").children) b.setAttribute("aria-selected", String(b.id === "tab-" + name));
+  const tabId = "tab-" + name;
+  for (const tab of $("tabs").children) selectTab(tab, tab.id === tabId);
+  $("example-panel").setAttribute("aria-labelledby", tabId);
   model?.free();
   model = new Model(name);
   nodes = JSON.parse(model.nodes());
@@ -1094,9 +1121,11 @@ async function start() {
     const b = document.createElement("button");
     b.className = "tab"; b.type = "button"; b.role = "tab"; b.id = "tab-" + p.id;
     b.textContent = p.label;
+    b.setAttribute("aria-controls", "example-panel");
     b.addEventListener("click", () => load(p.id));
     $("tabs").append(b);
   }
+  enableTabKeys($("tabs"));
   load("crypto");
 
   $("live-toggle").addEventListener("click", () => {
