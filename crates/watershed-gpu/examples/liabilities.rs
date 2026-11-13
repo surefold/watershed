@@ -239,9 +239,11 @@ fn main() -> Result<()> {
         commas(book.policy_months as f64)
     );
     println!(
-        "  the graph: {} nodes in {} levels (built in {}; plan made in {})",
+        "  the graph: {} nodes in {} levels, of {} shapes, {} bytes a path while it runs (built in {}; plan made in {})",
         commas(plan.nodes() as f64),
         commas(plan.levels() as f64),
+        plan.shapes(),
+        commas(plan.bytes_per_scenario() as f64),
         time(graph_took),
         time(plan_took)
     );
