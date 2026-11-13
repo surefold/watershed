@@ -140,6 +140,11 @@ fn ids(inputs: &[Input<f64>]) -> Vec<NodeId> {
 /// again after the shared inputs are given new values, twice, on the same
 /// plan.
 fn gives_what_the_graph_gives(run: impl Fn(&Scenarios, &[f64]) -> Vec<f64>) {
+    gives_what_the_graph_gives_in(false, run);
+}
+
+/// As above, with the plan's nodes in clusters if `clusters`.
+fn gives_what_the_graph_gives_in(clusters: bool, run: impl Fn(&Scenarios, &[f64]) -> Vec<f64>) {
     for seed in 1..=40u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut r = random_graph(&mut rng, 14, 300);
@@ -151,7 +156,11 @@ fn gives_what_the_graph_gives(run: impl Fn(&Scenarios, &[f64]) -> Vec<f64>) {
         outputs.push(r.nodes.last().unwrap().id());
         outputs.extend([r.inputs[0].id(), r.inputs[9].id(), r.inputs[13].id()]);
 
-        let mut plan = Scenarios::with_shared(&r.g, &ids(&vary), &ids(&shared), &outputs).unwrap();
+        let make = match clusters {
+            true => Scenarios::with_clusters,
+            false => Scenarios::with_shared,
+        };
+        let mut plan = make(&r.g, &ids(&vary), &ids(&shared), &outputs).unwrap();
         for round in 0..3 {
             if round > 0 {
                 let values: Vec<f64> = shared.iter().map(|_| rng.value()).collect();
@@ -357,9 +366,13 @@ mod on_the_gpu {
     }
 
     #[test]
-    fn a_kernel_for_each_node_shape_gives_what_the_graph_gives() {
-        let gpu = Gpu::new().unwrap().without_fusing();
-        gives_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());
+    fn clusters_give_what_the_graph_gives() {
+        let gpu = Gpu::new().unwrap();
+        gives_what_the_graph_gives_in(true, |plan, inputs| gpu.run(plan, inputs).unwrap());
+        // And on the CPU, and worked out a node at a time on the GPU.
+        gives_what_the_graph_gives_in(true, |plan, inputs| plan.run_cpu(inputs));
+        let gpu = gpu.without_fusing();
+        gives_what_the_graph_gives_in(true, |plan, inputs| gpu.run(plan, inputs).unwrap());
     }
 
     #[test]

@@ -650,7 +650,26 @@ impl Scenarios {
         shared: &[NodeId],
         outputs: &[NodeId],
     ) -> Result<Scenarios, PlanError> {
-        Scenarios::cut_at(g, vary, &[], shared, outputs)
+        // EXPERIMENTAL: set WATERSHED_CLUSTERS to make every plan as
+        // `with_clusters` does, to try it without changing a program.
+        let clusters = std::env::var_os("WATERSHED_CLUSTERS").is_some();
+        Scenarios::build(g, vary, &[], shared, outputs, clusters)
+    }
+
+    /// EXPERIMENTAL. As [`with_shared`](Self::with_shared), and also puts
+    /// the nodes into clusters that a GPU thread works out in one go,
+    /// keeping to itself what only the cluster reads. On a big graph run
+    /// for many scenarios the GPU is then faster, by half as much again on
+    /// the one it was measured on. The plan takes longer to make, and the
+    /// first run in a program longer still, while a kernel is compiled for
+    /// each shape of cluster. The answers are the same.
+    pub fn with_clusters(
+        g: &Graph,
+        vary: &[NodeId],
+        shared: &[NodeId],
+        outputs: &[NodeId],
+    ) -> Result<Scenarios, PlanError> {
+        Scenarios::build(g, vary, &[], shared, outputs, true)
     }
 
     /// As [`with_shared`](Self::with_shared), with calculated nodes `cut`
@@ -662,6 +681,17 @@ impl Scenarios {
         cut: &[NodeId],
         shared: &[NodeId],
         outputs: &[NodeId],
+    ) -> Result<Scenarios, PlanError> {
+        Scenarios::build(g, vary, cut, shared, outputs, false)
+    }
+
+    fn build(
+        g: &Graph,
+        vary: &[NodeId],
+        cut: &[NodeId],
+        shared: &[NodeId],
+        outputs: &[NodeId],
+        clusters: bool,
     ) -> Result<Scenarios, PlanError> {
         let inputs = vary.len();
         let vary = &[vary, cut].concat()[..];
@@ -961,18 +991,21 @@ impl Scenarios {
                 .and_then(|x| x.parse().ok())
                 .unwrap_or(otherwise)
         };
-        let fused = fuse(
-            vary.len(),
-            &levels_now,
-            &|n| &ops[drafts[by_level[n] as usize].ops.clone()],
-            &node_of,
-            &kept,
-            crate::fuse::Limits {
-                band: setting("WATERSHED_BAND", 32) as u32,
-                most: setting("WATERSHED_CLUSTER", 256),
-                shapes_most: setting("WATERSHED_SHAPES", 96),
-            },
-        );
+        let fused = match clusters {
+            true => fuse(
+                vary.len(),
+                &levels_now,
+                &|n| &ops[drafts[by_level[n] as usize].ops.clone()],
+                &node_of,
+                &kept,
+                crate::fuse::Limits {
+                    band: setting("WATERSHED_BAND", 32) as u32,
+                    most: setting("WATERSHED_CLUSTER", 256),
+                    shapes_most: setting("WATERSHED_SHAPES", 96),
+                },
+            ),
+            false => None,
+        };
 
         let mut sorted = Vec::with_capacity(ops.len());
         let mut programs = Vec::with_capacity(3 * drafts.len());
