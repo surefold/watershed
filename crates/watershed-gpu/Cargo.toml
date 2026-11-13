@@ -1,0 +1,32 @@
+[package]
+name = "watershed-gpu"
+version = "0.1.0"
+description = "Runs a watershed graph for many sets of inputs at once, on the CPU or an NVIDIA GPU"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Run scenarios on an NVIDIA GPU. Off by default, so the workspace builds and
+# tests on machines with no CUDA. The CUDA libraries are found when the program
+# runs, not when it is built.
+cuda = ["dep:cudarc"]
+
+[dependencies]
+watershed-core = { path = "../watershed-core" }
+rayon = "1.12.0"
+cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
+    "std",
+    "driver",
+    "nvrtc",
+    "dynamic-loading",
+    "cuda-13010",
+] }
+
+# The workspace forbids `unsafe`, and starting a GPU kernel needs it. This crate
+# denies it instead, and allows it in the one function that does that.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
