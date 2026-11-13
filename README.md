@@ -640,3 +640,8 @@ web/grid/               the grid's page, the script that draws it, and the chart
   28 digits; nothing holds more.
 - **Bindings:** the Python package is not published, and there is no
   cluster. (The JVM ones are in their own repository, with their own list.)
+
+## Licence
+
+Apache License 2.0: see [`LICENSE`](LICENSE). Work derived from other
+projects is listed in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

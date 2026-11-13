@@ -73,7 +73,9 @@ The crate allows `unsafe` in one place, the kernel launch.
 
 ## What it has been tried on
 
-Every figure below is from one machine: a Ryzen 9 5950X (16 cores, 32
+Every figure below is from one machine, mostly from a single run; a second
+run of everything moved the measured GPU times by up to a fifth and the
+scaled CPU and by-hand times by up to a third. It is a Ryzen 9 5950X (16 cores, 32
 threads) and one RTX 3090 (24 GB). "The plan on the CPU" is the same plan on all 32 threads.
 Where a time is scaled up from a smaller run, it says so.
 
@@ -152,13 +154,33 @@ engines are built on the same idea (Jane Street's Incremental, Salsa,
 differential dataflow, a spreadsheet's own recalculation) and should be in
 the same range; none of them was measured.
 
-On the GPU the comparison goes the other way. The Actuarial Open Source
-benchmarks run lifelib's term-life model for 100 million policies in 3.4 s
-on an A100 with JAX, which is something like 5 to 7 billion policy-months a
-second; the plan here manages about 2 billion a second on an RTX 3090, for
-a model with more in it. That is an estimate from their published time and
-not a run of their benchmark, which needs a table looked up by a varied
-input, and the plan cannot do that yet.
+### Against the same model written by hand for a GPU
+
+`examples/shared/savings_jax.py` is the insurance model written by hand as
+an array program in JAX: every kind of policy a row, every path a column,
+stepped a month at a time, in double precision. It takes the same inputs and
+gives the same outputs as the plan, and agrees with lifelib to the same
+3.1×10⁻¹³. On the same card, for 20,000 kinds of policy on 10,000 paths,
+each measured in full:
+
+| | Time |
+|---|---|
+| JAX, every policy stepped for all 241 months | 13.1 s (five runs, 13.11 to 13.12) |
+| The plan | 10.0 s first run; eight more at 9.4 to 9.9 |
+| JAX, policies sorted so each lot stops at its longest policy | 6.2 s (five runs, 6.10 to 6.32) |
+
+So a program written for this one model, with the obvious tuning, is about
+1.6 times faster than the plan, and without it is slower. The plan does not
+need the tuning because the graph only has nodes for the months each policy
+runs. The array program keeps what it is working on in registers within a
+month, where the plan writes every node to memory and reads it back; that
+is most of the difference. Nothing here says how either would do against a
+program tuned further, in single precision, or on another model.
+
+The Actuarial Open Source benchmarks run lifelib's term-life model for 100
+million policies in 3.4 s on an A100 with JAX. That has not been run here:
+it needs a table looked up by a varied input, and the plan cannot do that
+yet.
 
 ### What the models found
 
@@ -265,6 +287,13 @@ python crates/watershed-gpu/examples/shared/amendments_reference.py export
 cargo run --release --example amendments -- export
 ```
 
+The JAX version of the insurance model, for comparison on the same card:
+
+```bash
+pip install "jax[cuda12]" numpy
+python crates/watershed-gpu/examples/shared/savings_jax.py export 20000 10000 2500 sorted
+```
+
 `dosing` needs a few hundred patients worked by an independent solver:
 
 ```bash
@@ -295,8 +324,9 @@ random.
   whole level is worked out at once.
 - **Slots.** A node's value is kept only until the last level that reads it
   has been worked out, and its slot is then used again. A scenario of the
-  20-million-node insurance book needs room for about 200,000 numbers, not
-  20 million, so 10,000 scenarios fit on the card at once.
+  20-million-node insurance book needs room for 344,124 numbers (2.75 MB),
+  not 20 million, so about 6,800 scenarios fit on a 24 GB card at once and
+  10,000 are run in two parts.
 - **Shapes.** Nodes whose formulas differ only in what they read have one
   shape. A plan with up to 256 shapes gets a kernel written and compiled
   for each, the first time it is run; the insurance book has a few dozen. A
