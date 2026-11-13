@@ -514,6 +514,7 @@ impl Gpu {
         if let Some(known) = self.compiled.lock().expect("no panic while held").get(&key) {
             return Ok(known.clone());
         }
+        let started = Instant::now();
         let shapes = match clusters {
             // A cluster's kernel can be long, and the compiler takes much
             // longer over a long one: each is compiled on its own, on every
@@ -542,6 +543,14 @@ impl Gpu {
             }
         };
         let shapes = Arc::new(shapes);
+        // Set TIMING to see how long the kernels took to compile.
+        if std::env::var_os("TIMING").is_some() {
+            eprintln!(
+                "compiled {} kernels (clusters: {clusters}) in {:?}",
+                shapes.len(),
+                started.elapsed()
+            );
+        }
         self.compiled
             .lock()
             .expect("no panic while held")
