@@ -184,6 +184,28 @@ out.
 
     cargo run --release --features cuda -p watershed-gpu --example rerun -- export 20000 10000 1
 
+The loans model, 20,000 loans × 10,000 scenarios (5.2 million nodes), with
+the kept nodes chosen by `Kept::nearest` from a budget of 12,000: 8,577
+values per scenario, 686 MB. One loan's house is revalued, five loans in
+turn, and the small plan is run on the GPU. Five runs in fresh processes on
+13 November 2026 at `a8d2198`; medians with ranges.
+
+| | Time |
+|---|---|
+| First refresh in a process | 167 ms (157–249) |
+| Each of the next four | 29 to 36 ms (29–49) |
+| Run the whole plan again on the GPU | 7.2 s (7.1–7.5) |
+| Compile the whole plan again | 5.3 s (5.2–5.4) |
+
+Each refresh recomputed 15 kept values per scenario. In all five runs every
+kept value on every scenario was identical to the last bit to compiling and
+running the whole plan again. This model uses `exp`, so that holds only when
+the small plan runs on the GPU as the whole one did: run on CPU threads, its
+values differed by up to 1.3×10⁻¹⁵ of themselves. The first refresh is
+slower, most likely from compiling kernels; that was not separated out.
+
+    cargo run --release --features cuda -p watershed-gpu --example loans -- 20000 10000
+
 ## Figures not re-measured
 
 These appear in the documentation and come from earlier measurements that

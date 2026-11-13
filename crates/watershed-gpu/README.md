@@ -241,8 +241,8 @@ you, taking the calculated nodes nearest the outputs up to a number; given
 suits a model that ends by adding many things up. The `loans` example uses
 it too: 20,000 loans on 10,000 paths, 8,577 values kept a path, and after
 one house is revalued every path is up to date in about 30 ms on the GPU
-(0.5 s the first time, while kernels are compiled) against 7 s to run the
-book again; one run.
+(about 170 ms the first time in a process) against 7.2 s to run the book
+again; medians of five runs.
 
 Run the small plan where the whole one was run. `loans` uses `exp`, whose
 last digits differ between a GPU and a CPU: refreshed on the GPU its values
