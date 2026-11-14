@@ -57,6 +57,7 @@
 //! plan is made, with its name. So is one that reads a node holding an
 //! error, even in a branch that is not taken.
 
+mod fuse;
 mod keep;
 mod plan;
 

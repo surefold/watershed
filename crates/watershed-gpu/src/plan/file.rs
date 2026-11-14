@@ -150,6 +150,8 @@ impl Scenarios {
     /// Writes the plan out, to be read back by [`Scenarios::load`].
     ///
     /// EXPERIMENTAL. The shared inputs' values go with it as they are now.
+    /// Clusters (see [`Scenarios::with_clusters`]) are not written: a plan
+    /// read back runs plain.
     /// A plan of 20 million nodes is about 2 GB; give this a
     /// `BufWriter`.
     pub fn save(&self, to: impl Write) -> io::Result<()> {
@@ -265,6 +267,9 @@ impl Scenarios {
             groups,
             operands,
             operand_at,
+            // A file holds the plain plan only: clusters are not written.
+            fused: None,
+            fused_outputs: Vec::new(),
             outputs,
             shared_inputs,
             shared,
