@@ -458,7 +458,7 @@ struct Runner {
     /// Of the last run, how long the GPU spent calculating: the rest was
     /// copying policies to it and answers back.
     calculating: std::cell::Cell<Option<Duration>>,
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     gpu: watershed_gpu::Gpu,
 }
 
@@ -466,13 +466,13 @@ impl Runner {
     fn new() -> Result<Runner, Box<dyn std::error::Error>> {
         Ok(Runner {
             calculating: std::cell::Cell::new(None),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "gpu")]
             gpu: watershed_gpu::Gpu::new()?,
         })
     }
 
     fn name(&self) -> &'static str {
-        if cfg!(feature = "cuda") { "GPU" } else { "CPU" }
+        if cfg!(feature = "gpu") { "GPU" } else { "CPU" }
     }
 
     fn run(
@@ -480,14 +480,14 @@ impl Runner {
         plan: &Scenarios,
         inputs: &[f64],
     ) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         {
             let allowed = self.gpu.free_memory()? / 5 * 4;
             let (results, timing) = self.gpu.run_within(plan, inputs, allowed)?;
             self.calculating.set(Some(timing.compute));
             Ok(results)
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         Ok(plan.run_cpu(inputs))
     }
 }
@@ -610,7 +610,7 @@ type Review = Box<dyn Fn(&mut Prices)>;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n: usize = match std::env::args().nth(1) {
         Some(n) => n.replace('_', "").parse().expect("a number of policies"),
-        None if cfg!(feature = "cuda") => 5_000_000,
+        None if cfg!(feature = "gpu") => 5_000_000,
         None => 1_000_000,
     };
 
@@ -676,7 +676,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The same on the CPU for some, and on the graph itself for fewer: they
     // must agree to the last bit.
     let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
-    if cfg!(feature = "cuda") {
+    if cfg!(feature = "gpu") {
         let some = n.min(1_000_000);
         let started = Instant::now();
         let on_cpu = plan.run_cpu(&policies[..some * FACTS.len()]);
@@ -786,18 +786,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // On the GPU the policies are loaded once and stay there: a review
     // changes a few shared numbers, and only the totals come back, so every
     // review is tried on the whole book. On the CPU, on a part of it.
-    let part = match cfg!(feature = "cuda") {
+    let part = match cfg!(feature = "gpu") {
         true => &policies[..],
         false => &policies[..n.min(500_000) * FACTS.len()],
     };
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     let mut loaded = runner.gpu.load(&plan, part)?;
     // Only the GPU's way changes anything it holds.
-    #[cfg_attr(not(feature = "cuda"), allow(unused_mut))]
+    #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
     let mut book_under = |plan: &Scenarios| -> Result<Book, Box<dyn std::error::Error>> {
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         let totals = loaded.totals(plan)?;
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         let totals = plan.totals_cpu(part);
         Ok(Book::of_totals(&totals, part.len() / FACTS.len()))
     };
@@ -829,7 +829,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time(took),
         time(took / tries as u32)
     );
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     drop(loaded);
     plan.set_shared(&best.0);
     let results = runner.run(&plan, &policies)?;

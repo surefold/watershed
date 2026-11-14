@@ -60,11 +60,11 @@
 mod keep;
 mod plan;
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 mod cuda;
 
-pub use keep::{Kept, Refresh};
-pub use plan::{MAX_STACK, PlanError, Scenarios};
+pub use keep::{Kept, Patch, Refresh};
+pub use plan::{LoadError, MAX_STACK, PlanError, Scenarios};
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 pub use cuda::{Gpu, GpuError, Loaded, Timing};
