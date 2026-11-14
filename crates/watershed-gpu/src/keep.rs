@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use rayon::prelude::*;
 use watershed_core::{Graph, NodeId, Type};
 
-use crate::plan::{PlanError, Scenarios};
+use crate::plan::{LoadError, PlanError, Scenarios};
 
 /// A run whose kept values can be brought up to date after a change.
 #[derive(Debug)]
@@ -60,6 +60,157 @@ impl Refresh {
     /// How many kept nodes are worked out again.
     pub fn stale(&self) -> usize {
         self.stale.len()
+    }
+}
+
+/// What to run to bring kept values up to date after a change, apart from
+/// the values themselves: a small plan, which kept values it is given, and
+/// which it works out again.
+///
+/// EXPERIMENTAL. A [`Kept`] makes one with [`Kept::patch`]. It can be
+/// written to a file and read back, so that whoever holds the values of some
+/// of the scenarios, in another process or on another machine, can bring
+/// those up to date: [`inputs`](Self::inputs) makes the small plan's inputs
+/// from them, the plan is run, and [`apply`](Self::apply) puts its answers
+/// in.
+#[derive(Debug, Clone)]
+pub struct Patch {
+    /// The plan to run: its inputs are the varied inputs and then the kept
+    /// values it reads, and its outputs are the kept values it replaces.
+    pub plan: Scenarios,
+    /// How many values are kept for a scenario.
+    width: usize,
+    /// The kept values the plan reads, in the order it takes them.
+    reads: Vec<u32>,
+    /// The kept values the plan's outputs replace, in their order.
+    writes: Vec<u32>,
+}
+
+/// The first bytes of a patch's file. The last is the layout's version.
+const PATCH: [u8; 8] = *b"WSPATCH\x01";
+
+impl Patch {
+    /// How many kept values a scenario has.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// How many of them the plan works out again.
+    pub fn stale(&self) -> usize {
+        self.writes.len()
+    }
+
+    /// How many inputs each scenario varies.
+    fn vary(&self) -> usize {
+        self.plan.inputs() - self.reads.len()
+    }
+
+    /// The small plan's inputs for some scenarios: each one's varied
+    /// `inputs`, then the kept `values` the plan reads.
+    ///
+    /// # Panics
+    /// If `inputs` and `values` are not those of the same whole number of
+    /// scenarios.
+    pub fn inputs(&self, inputs: &[f64], values: &[f64]) -> Vec<f64> {
+        let (vary, width, row) = (self.vary(), self.width, self.plan.inputs());
+        assert_eq!(inputs.len() % vary, 0, "a part of a scenario");
+        assert_eq!(
+            inputs.len() / vary * width,
+            values.len(),
+            "the values are not those kept for these inputs"
+        );
+        let mut all = vec![0.0; inputs.len() / vary * row];
+        all.par_chunks_mut(row)
+            .zip(inputs.par_chunks(vary))
+            .zip(values.par_chunks(width))
+            .for_each(|((row, varied), kept)| {
+                row[..vary].copy_from_slice(varied);
+                for (x, &at) in row[vary..].iter_mut().zip(&self.reads) {
+                    *x = kept[at as usize];
+                }
+            });
+        all
+    }
+
+    /// Puts what the small plan gave for some scenarios into their kept
+    /// `values`.
+    ///
+    /// # Panics
+    /// If `results` is not the plan's outputs for those scenarios.
+    pub fn apply(&self, values: &mut [f64], results: &[f64]) {
+        assert_eq!(values.len() % self.width, 0, "a part of a scenario");
+        assert_eq!(
+            results.len(),
+            values.len() / self.width * self.writes.len(),
+            "the results are not the plan's for these scenarios"
+        );
+        values
+            .par_chunks_mut(self.width)
+            .zip(results.par_chunks(self.writes.len()))
+            .for_each(|(row, new)| {
+                for (&at, &x) in self.writes.iter().zip(new) {
+                    row[at as usize] = x;
+                }
+            });
+    }
+
+    /// Writes the patch out, to be read back by [`Patch::load`].
+    pub fn save(&self, mut to: impl std::io::Write) -> std::io::Result<()> {
+        to.write_all(&PATCH)?;
+        to.write_all(&(self.width as u64).to_le_bytes())?;
+        for list in [&self.reads, &self.writes] {
+            to.write_all(&(list.len() as u64).to_le_bytes())?;
+            for at in list {
+                to.write_all(&at.to_le_bytes())?;
+            }
+        }
+        self.plan.save(to)
+    }
+
+    /// Reads a patch written by [`Patch::save`]. As with a plan, load only
+    /// what you saved.
+    pub fn load(mut from: impl std::io::Read) -> Result<Patch, LoadError> {
+        let mut magic = [0; 8];
+        from.read_exact(&mut magic)
+            .map_err(|_| LoadError::NotAPlan)?;
+        if magic != PATCH {
+            return Err(LoadError::NotAPlan);
+        }
+        let number = |from: &mut dyn std::io::Read| -> Result<usize, LoadError> {
+            let mut bytes = [0; 8];
+            from.read_exact(&mut bytes)?;
+            usize::try_from(u64::from_le_bytes(bytes)).map_err(|_| LoadError::Damaged)
+        };
+        let width = number(&mut from)?;
+        let mut lists = [Vec::new(), Vec::new()];
+        for list in &mut lists {
+            let count = number(&mut from)?;
+            // No more than there are kept values, so a damaged count
+            // cannot ask for more memory than that.
+            if count > width {
+                return Err(LoadError::Damaged);
+            }
+            for _ in 0..count {
+                let mut bytes = [0; 4];
+                from.read_exact(&mut bytes)?;
+                let at = u32::from_le_bytes(bytes);
+                if at as usize >= width {
+                    return Err(LoadError::Damaged);
+                }
+                list.push(at);
+            }
+        }
+        let [reads, writes] = lists;
+        let plan = Scenarios::load(from)?;
+        if plan.outputs() != writes.len() || plan.inputs() < reads.len() {
+            return Err(LoadError::Damaged);
+        }
+        Ok(Patch {
+            plan,
+            width,
+            reads,
+            writes,
+        })
     }
 }
 
@@ -222,12 +373,16 @@ impl Kept {
         &self.values
     }
 
-    /// What to run now that the inputs `changed` have other values in `g`
-    /// than when the plan was made (or the last refresh). `None` if nothing
-    /// kept uses them. Inputs that are varied or shared are not meant here:
-    /// they are not built into the plan.
-    pub fn refresh(&self, g: &Graph, changed: &[NodeId]) -> Result<Option<Refresh>, PlanError> {
-        // The kept nodes the change can reach.
+    /// The kept values' places among a scenario's, for each output.
+    pub fn output_columns(&self) -> &[u32] {
+        &self.outputs
+    }
+
+    /// What to run after `changed` inputs of the graph have new values, for
+    /// whoever holds the kept values: see [`Patch`]. `None` if no kept
+    /// value uses them. Unlike [`refresh`](Self::refresh) this needs no
+    /// values to have been given to [`hold`](Self::hold).
+    pub fn patch(&self, g: &Graph, changed: &[NodeId]) -> Result<Option<Patch>, PlanError> {
         let mut is_stale = vec![false; self.keep.len()];
         let mut stack: Vec<u32> = changed
             .iter()
@@ -247,7 +402,8 @@ impl Kept {
         }
         stale.sort_unstable();
 
-        // What they read of the kept nodes it cannot reach.
+        // The kept nodes those read that are still right: the plan is cut
+        // there, and given their values.
         let mut right: Vec<u32> = stale
             .iter()
             .flat_map(|&at| &self.below[at as usize])
@@ -265,22 +421,27 @@ impl Kept {
             &self.shared,
             &stale.iter().map(node).collect::<Vec<_>>(),
         )?;
-        let (vary, width) = (self.vary.len(), self.keep.len());
-        let mut inputs = vec![0.0; self.scenarios() * (vary + right.len())];
-        inputs
-            .par_chunks_mut(vary + right.len())
-            .zip(self.inputs.par_chunks(vary))
-            .zip(self.values.par_chunks(width))
-            .for_each(|((row, varied), kept)| {
-                row[..vary].copy_from_slice(varied);
-                for (x, &at) in row[vary..].iter_mut().zip(&right) {
-                    *x = kept[at as usize];
-                }
-            });
-        Ok(Some(Refresh {
+        Ok(Some(Patch {
             plan,
+            width: self.keep.len(),
+            reads: right,
+            writes: stale,
+        }))
+    }
+
+    /// What to run now that the inputs `changed` have other values in `g`
+    /// than when the plan was made (or the last refresh). `None` if nothing
+    /// kept uses them. Inputs that are varied or shared are not meant here:
+    /// they are not built into the plan.
+    pub fn refresh(&self, g: &Graph, changed: &[NodeId]) -> Result<Option<Refresh>, PlanError> {
+        let Some(patch) = self.patch(g, changed)? else {
+            return Ok(None);
+        };
+        let inputs = patch.inputs(&self.inputs, &self.values);
+        Ok(Some(Refresh {
+            plan: patch.plan,
             inputs,
-            stale,
+            stale: patch.writes,
         }))
     }
 
@@ -375,11 +536,45 @@ mod tests {
         let first = kept.plan().run_cpu(&inputs);
         kept.hold(inputs.clone(), first);
 
+        // The same scenarios held in two parts by someone else, who has
+        // only the values and what is read back from a file.
+        let width = kept.width();
+        let cut = 20;
+        let mut parts = [
+            (
+                inputs[..cut * 2].to_vec(),
+                kept.values()[..cut * width].to_vec(),
+            ),
+            (
+                inputs[cut * 2..].to_vec(),
+                kept.values()[cut * width..].to_vec(),
+            ),
+        ];
+
         for (n, to) in [(6, 150.0), (19, 20.0), (6, 96.0)] {
             g.set(floors[n], to).unwrap();
             g.stabilize();
+            let mut file = Vec::new();
+            kept.patch(&g, &[floors[n].id()])
+                .unwrap()
+                .expect("a group uses the floor")
+                .save(&mut file)
+                .unwrap();
+            let patch = Patch::load(&file[..]).unwrap();
+            assert_eq!((patch.width(), patch.stale()), (width, 2));
+            for (inputs, values) in &mut parts {
+                let results = patch.plan.run_cpu(&patch.inputs(inputs, values));
+                patch.apply(values, &results);
+            }
             // One group and the total.
             assert_eq!(kept.refresh_cpu(&g, &[floors[n].id()]).unwrap(), 2);
+            let apart: Vec<f64> = parts.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+            assert!(
+                apart
+                    .iter()
+                    .zip(kept.values())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
             let whole = Kept::new(&g, &vary, &[], &[total.id()], &keep).unwrap();
             let again = whole.plan().run_cpu(&inputs);
             assert!(
@@ -406,5 +601,10 @@ mod tests {
         // An input nothing kept uses.
         let aside = g.input("aside", 1.0).unwrap();
         assert_eq!(kept.refresh_cpu(&g, &[aside.id()]).unwrap(), 0);
+        assert!(kept.patch(&g, &[aside.id()]).unwrap().is_none());
+        assert!(matches!(
+            Patch::load(&b"WSPATCH\x01 and then nothing"[..]),
+            Err(LoadError::Damaged)
+        ));
     }
 }

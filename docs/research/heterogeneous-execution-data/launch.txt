@@ -1,0 +1,9 @@
+# hetero_probe launch 2000
+# 14:33:43 gpu: 4 %, 570 MiB | other compute apps: | load: 0.83
+gpu ready in 219.47 ms (n=1)
+chain: 5999 nodes, 5999 levels, 5 shapes
+S=1: cpu 96.3 us (96.3 us..96.6 us, n=7); gpu end to end 43.03 ms (41.21 ms..60.97 ms, n=7); gpu compute 40.95 ms (37.90 ms..59.79 ms, n=7) = 6.83 us a level
+S=1000: cpu 8.92 ms (8.59 ms..9.21 ms, n=7); gpu end to end 47.23 ms (44.22 ms..56.44 ms, n=7); gpu compute 39.96 ms (38.51 ms..48.01 ms, n=7) = 6.66 us a level
+S=100000: cpu 655.65 ms (650.80 ms..661.67 ms, n=7); gpu end to end 722.68 ms (706.07 ms..807.53 ms, n=7); gpu compute 44.43 ms (40.70 ms..128.82 ms, n=7) = 7.41 us a level
+# 14:33:57 gpu: 34 %, 571 MiB | other compute apps: | load: 5.45
+# samples with another GPU compute process: 0 of 13

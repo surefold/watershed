@@ -140,6 +140,60 @@ fn main() -> Result<()> {
         by_months[kinds * 3 / 4],
         by_months[kinds - 1],
     ];
+    // Set WATERSHED_KEEP to a folder to have written there what another
+    // program needs to do the same with the paths held elsewhere: the plan
+    // and the paths, which of a path's kept values are its outputs, the
+    // outputs as they are now, and then, for the first amendment, the patch
+    // and the outputs it should leave. And stop.
+    if let Some(keep) = std::env::var_os("WATERSHED_KEEP") {
+        let keep = std::path::PathBuf::from(keep);
+        std::fs::create_dir_all(&keep)?;
+        let numbers = |name: &str, values: &[f64]| -> Result<()> {
+            let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            Ok(std::fs::write(keep.join(name), bytes)?)
+        };
+        let file = |name: &str| -> Result<std::io::BufWriter<std::fs::File>> {
+            Ok(std::io::BufWriter::new(std::fs::File::create(
+                keep.join(name),
+            )?))
+        };
+        kept.plan().save(file("plan")?)?;
+        numbers("paths", &inputs)?;
+        let columns: Vec<String> = kept.output_columns().iter().map(u32::to_string).collect();
+        std::fs::write(keep.join("columns"), columns.join(","))?;
+        numbers("whole", &kept.outputs())?;
+
+        let k = chosen[0];
+        book.g
+            .set(book.promised[k], policies[k].sum_assured * 1.1)?;
+        book.g.stabilize();
+        let started = Instant::now();
+        let patch = kept
+            .patch(&book.g, &[book.promised[k].id()])?
+            .ok_or("nothing kept uses the policy")?;
+        let made = started.elapsed();
+        patch.save(file("patch")?)?;
+        let results = runner.run(&patch.plan, &patch.inputs(&inputs, kept.values()))?;
+        let mut values = kept.values().to_vec();
+        patch.apply(&mut values, &results);
+        let after: Vec<f64> = values
+            .chunks(width)
+            .flat_map(|row| kept.output_columns().iter().map(|&at| row[at as usize]))
+            .collect();
+        numbers("whole-after", &after)?;
+        println!(
+            "kept in {}: plan, paths ({} numbers a path), columns, whole ({} numbers a path), and for policy {k} amended: patch (made in {}, working out {} of the {} kept values on {} nodes) and whole-after",
+            keep.display(),
+            MONTHS,
+            roots.len(),
+            time(made),
+            patch.stale(),
+            commas(width as f64),
+            commas(patch.plan.nodes() as f64),
+        );
+        return Ok(());
+    }
+
     println!(
         "{:>8} {:>7} {:>9} {:>10} {:>10} {:>10} {:>10} {:>10}",
         "policy", "months", "nodes", "graph", "plan", "run, CPU", "run, GPU", "put in"
@@ -164,7 +218,7 @@ fn main() -> Result<()> {
         let started = Instant::now();
         let again = refresh.plan.run_cpu(&refresh.inputs);
         let cpu_took = started.elapsed();
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         let gpu_took = {
             let started = Instant::now();
             let on_gpu = runner.gpu.run(&refresh.plan, &refresh.inputs)?;
@@ -178,7 +232,7 @@ fn main() -> Result<()> {
             );
             time(took)
         };
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         let gpu_took = String::from("-");
 
         let started = Instant::now();

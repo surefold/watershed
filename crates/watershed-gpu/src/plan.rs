@@ -21,6 +21,8 @@ use rayon::prelude::*;
 use watershed_core::{BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
 
 use crate::fuse::{Fused, fuse};
+mod file;
+pub use file::LoadError;
 
 // The instruction codes. `kernel.cu` has the same numbers; the two must be
 // changed together. An instruction is one `u32`: the code in the low five
@@ -56,7 +58,7 @@ const SQRT: u32 = 23;
 const POW: u32 = 24;
 
 /// Where a load reads from.
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 pub(crate) enum Source {
     Slot,
     Const,
@@ -64,7 +66,7 @@ pub(crate) enum Source {
 }
 
 /// How many values an instruction takes off the stack.
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 pub(crate) fn arity(code: u32) -> usize {
     match code {
         LOAD | CONST | LOAD_SHARED | crate::fuse::LOCAL => 0,
@@ -75,7 +77,7 @@ pub(crate) fn arity(code: u32) -> usize {
 }
 
 /// Where a load reads from.
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 pub(crate) fn source_of(code: u32) -> Source {
     match code {
         LOAD => Source::Slot,
@@ -86,7 +88,7 @@ pub(crate) fn source_of(code: u32) -> Source {
 
 /// An instruction that is not a load, written in C on the values named. It
 /// must give what `eval` gives and what `kernel.cu` gives for the same code.
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 pub(crate) fn in_c(code: u32, on: &[&str]) -> String {
     let truth = |test: String| format!("({test}) ? 1.0 : 0.0");
     let a = on[0];
@@ -211,7 +213,7 @@ pub(crate) enum Output {
 /// Nodes next to each other in a level whose instructions differ only in
 /// what they read: a kernel compiled for the shape works them all out.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
 pub(crate) struct Group {
     /// Which of the plan's shapes.
     pub(crate) shape: u32,
@@ -229,7 +231,7 @@ pub(crate) const BLOCK: usize = 1024;
 /// that depend on neither a varied nor a shared input are taken as they are
 /// when the plan is made, so call [`Graph::stabilize`] first.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
 pub struct Scenarios {
     /// How many inputs are varied. They take slots `0..vary`.
     pub(crate) vary: usize,

@@ -1,0 +1,20 @@
+# hetero_probe incremental 20000 48 2000
+# 14:36:43 gpu: 4 %, 583 MiB | other compute apps: | load: 20.64
+gpu ready in 227.72 ms (n=1)
+graph: 2943052 nodes; 2000 scenarios
+plan: 2883002 nodes, 151 levels; 157 values kept a scenario (2512000 bytes in all); first run compute 124.61 ms
+plan with 20000 shared floors: 2883002 nodes, 13 shapes
+nodes the graph recalculated per change: [48, 48, 48, 48, 48, 48, 48, 48]
+1a. make the whole plan again: 1.183 s (1.155 s..1.202 s, n=7)
+1b. gpu run of the whole plan: 156.71 ms (156.01 ms..157.60 ms, n=7)
+1c. cpu run of the whole plan: 6.920 s (6.866 s..7.061 s, n=7)
+2. floors shared, loaded: all of it again: 319.52 ms (304.00 ms..359.93 ms, n=7)
+3a. make a plan of the account alone: 1.01 ms (974.0 us..1.06 ms, n=7)
+3b. account alone on the cpu: 1.47 ms (1.42 ms..2.62 ms, n=7)
+3c. account alone on the gpu (inputs copied up): 6.42 ms (5.54 ms..7.78 ms, n=7)
+3d. account alone on the gpu (inputs resident): 3.67 ms (3.13 ms..5.97 ms, n=7)
+3e. the sums above it, from kept values, on the cpu: 57.3 us (51.5 us..104.5 us, n=7)
+graph: set and update (one scenario): 12.2 us (11.8 us..14.0 us, n=7)
+checked: 1, 2 and 3 give every scenario the same total, to the last bit
+# 14:37:58 gpu: 1 %, 575 MiB | other compute apps: | load: 23.60
+# samples with another GPU compute process: 0 of 69

@@ -427,24 +427,24 @@ fn member(k: usize) -> Member {
 }
 
 struct Runner {
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     gpu: watershed_gpu::Gpu,
 }
 
 impl Runner {
     fn new() -> Result<Runner> {
         Ok(Runner {
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "gpu")]
             gpu: watershed_gpu::Gpu::new()?,
         })
     }
     fn name(&self) -> &'static str {
-        if cfg!(feature = "cuda") { "GPU" } else { "CPU" }
+        if cfg!(feature = "gpu") { "GPU" } else { "CPU" }
     }
     fn run(&self, plan: &Scenarios, inputs: &[f64]) -> Result<Vec<f64>> {
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         return Ok(self.gpu.run(plan, inputs)?);
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         return Ok(plan.run_cpu(inputs));
     }
 }

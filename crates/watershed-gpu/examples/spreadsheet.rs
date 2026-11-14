@@ -1175,7 +1175,7 @@ fn main() -> Result<()> {
         time(cpu_took),
         commas(trials as f64 / cpu_took.as_secs_f64())
     );
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     {
         let gpu = watershed_gpu::Gpu::new()?;
         gpu.run(&plan, &inputs[..vary.len()])?;

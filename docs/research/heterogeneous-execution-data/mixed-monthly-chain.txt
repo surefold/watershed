@@ -1,0 +1,24 @@
+# hetero_probe mixed 5000 240 1
+# 14:39:34 gpu: 3 %, 570 MiB | other compute apps: | load: 23.45
+gpu ready in 220.85 ms (n=1)
+whole: 3601436 nodes, 727 levels. chain: 719 nodes, 719 levels. accounts: 3600717 nodes, 725 levels
+S=100:
+  whole on cpu: 479.42 ms (472.30 ms..514.97 ms, n=7)
+  whole on gpu: 32.56 ms (30.17 ms..52.48 ms, n=7)
+  chain on cpu, accounts on gpu: 28.00 ms (26.15 ms..33.15 ms, n=7) [chain 1.26 ms + accounts 26.93 ms] = 0.86x the better single device
+  chain on gpu, accounts on gpu, two plans: 44.54 ms (41.99 ms..56.35 ms, n=7)
+  chain on gpu, accounts on cpu (the wrong way round): 494.50 ms (482.39 ms..543.89 ms, n=7)
+S=1000:
+  whole on cpu: 4.363 s (4.350 s..4.394 s, n=3)
+  whole on gpu: 97.94 ms (96.69 ms..99.49 ms, n=7)
+  chain on cpu, accounts on gpu: 96.74 ms (95.82 ms..97.37 ms, n=7) [chain 1.83 ms + accounts 94.97 ms] = 0.99x the better single device
+  chain on gpu, accounts on gpu, two plans: 120.01 ms (117.60 ms..121.78 ms, n=7)
+  chain on gpu, accounts on cpu (the wrong way round): 4.358 s (4.347 s..4.412 s, n=3)
+S=10000:
+  whole on cpu: 43.315 s (43.315 s..43.315 s, n=1)
+  whole on gpu: 762.06 ms (760.56 ms..763.36 ms, n=7)
+  chain on cpu, accounts on gpu: 773.47 ms (771.49 ms..774.52 ms, n=7) [chain 10.66 ms + accounts 762.53 ms] = 1.01x the better single device
+  chain on gpu, accounts on gpu, two plans: 824.06 ms (822.14 ms..827.11 ms, n=7)
+  chain on gpu, accounts on cpu (the wrong way round): 43.548 s (43.548 s..43.548 s, n=1)
+# 14:42:07 gpu: 5 %, 576 MiB | other compute apps: | load: 25.47
+# samples with another GPU compute process: 0 of 140

@@ -1,0 +1,9 @@
+# hetero_probe concurrent 16384 48 2000
+# 14:42:49 gpu: 3 %, 576 MiB | other compute apps: | load: 19.16
+gpu ready in 218.61 ms (n=1)
+whole book (2361780 nodes): cpu 5.642 s (5.611 s..5.658 s, n=3)
+cpu share 590552 of 2361779 nodes (25.0%): all on gpu 114.45 ms (112.54 ms..115.13 ms, n=7); one on each at once 1.470 s (1.467 s..1.527 s, n=7) [cpu part 1.407 s, gpu part 1.470 s] = 12.845x
+cpu share 73944 of 2361775 nodes (3.1%): all on gpu 114.86 ms (113.01 ms..154.25 ms, n=7); one on each at once 274.56 ms (271.58 ms..277.67 ms, n=7) [cpu part 179.36 ms, gpu part 274.39 ms] = 2.390x
+cpu share 9368 of 2361743 nodes (0.4%): all on gpu 119.74 ms (118.46 ms..134.43 ms, n=7); one on each at once 132.24 ms (131.56 ms..132.79 ms, n=7) [cpu part 25.64 ms, gpu part 131.81 ms] = 1.104x
+# 14:43:33 gpu: 1 %, 576 MiB | other compute apps: | load: 20.61
+# samples with another GPU compute process: 0 of 41

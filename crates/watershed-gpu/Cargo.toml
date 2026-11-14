@@ -10,7 +10,15 @@ rust-version.workspace = true
 # Run scenarios on an NVIDIA GPU. Off by default, so the workspace builds and
 # tests on machines with no CUDA. The CUDA libraries are found when the program
 # runs, not when it is built.
-cuda = ["dep:cudarc"]
+cuda = ["cuda-13"]
+# The same, for a machine whose NVIDIA driver is older: built against CUDA 12.8
+# (driver 570 or later) instead of 13.1 (driver 580 or later). One or the
+# other; both together do not build. The insurance book gave the same answers
+# to the last bit with either.
+cuda-12 = ["gpu", "cudarc/cuda-12080"]
+cuda-13 = ["gpu", "cudarc/cuda-13010"]
+# What the code asks: is there a GPU side at all. Not for choosing directly.
+gpu = ["dep:cudarc"]
 
 [dependencies]
 watershed-core = { path = "../watershed-core" }
@@ -20,7 +28,6 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
     "driver",
     "nvrtc",
     "dynamic-loading",
-    "cuda-13010",
 ] }
 
 # The workspace forbids `unsafe`, and starting a GPU kernel needs it. This crate

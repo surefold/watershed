@@ -1,0 +1,15 @@
+4000 kinds; graph 3991529 nodes; plan 3968948 nodes for every scenario, 966 levels, 69037 slots a scenario
+nodes in the totals' cone that a market path reaches: 3968948
+
+what changes                    affected    share  levels  kept values      graph recalculated
+promise of one policy                262   0.007%     139          275      56 µs          258
+return, last month                  1017   0.026%      82         2739     212 µs          748
+return, month 120                 660139  16.633%     607        18687     110 ms       659471
+return, first month              3968948 100.000%     967          239     681 ms      3968651
+discount rate, month 239             693   0.017%      85         3329      93 µs          546
+discount rate, month 120          191751   4.831%     605       422723      49 ms       157462
+discount rate, month 0           1137126  28.651%     964      2452780     316 ms       975697
+expenses                          383042   9.651%     852      2266820     207 ms       383042
+mortality                        2273108  57.272%     965      1321370     533 ms      2276811
+lapses                           2269108  57.172%     965      1325370     534 ms      2268811
+fee                              3968948 100.000%     967          240     694 ms      3976654

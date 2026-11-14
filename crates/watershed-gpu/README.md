@@ -80,6 +80,13 @@ cargo test -p watershed-gpu                    # the plan, on the CPU
 cargo test -p watershed-gpu --features cuda    # and on the GPU
 ```
 
+`cuda` is built against CUDA 13.1, which needs NVIDIA driver 580 or later.
+For a machine with an older driver, `--features cuda-12` in its place builds
+against CUDA 12.8 (driver 570 or later); the two cannot be on together. The
+tests pass with either, and the insurance book of 20,000 kinds of policy on
+10,000 paths gave the same answers to the last bit with both (one run of
+each, on one RTX 3090).
+
 The crate allows `unsafe` in one place, the kernel launch.
 
 ## What it has been tried on
@@ -258,7 +265,8 @@ setting `WATERSHED_CLUSTERS` for `with_shared`) groups nodes that feed one
 another across a band of levels into a cluster that one GPU thread works out
 in one go, keeping what only the cluster reads in registers instead of
 writing it to memory and reading it back. The tests check a clustered plan
-against the graph in the same way as a plain one.
+against the graph in the same way as a plain one. Clusters are not
+written to a plan's file: a plan read back runs plain.
 
 It helps one of the three models tried, and only on runs after the first:
 
@@ -280,6 +288,39 @@ where it brings the plan level with the hand-written program. Compiled
 kernels are not kept between processes. Two clustered first runs, one of
 loans and one of pensions, took 43 s and 48 s; seven later runs of pensions did not
 repeat it and the cause was not found.
+
+### Running a batch somewhere else
+
+EXPERIMENTAL. A plan can be written to a file and read back by another
+process or another machine, and gives the same answers to the last bit:
+
+```rust,ignore
+plan.save(BufWriter::new(File::create("book.plan")?))?;
+let plan = Scenarios::load(BufReader::new(File::open("book.plan")?))?;
+```
+
+A file that was cut short or changed is refused; it is not checked for
+being well meant, so load only plans you saved. The insurance book's plan,
+19.9 million nodes, is a 2 GB file that takes 4 to 5 s to write and 6 to 8 s
+to read.
+
+Scenarios do not depend on one another, so a run can be cut into lots that
+separate processes work out from the plan's file. The `split` example does
+that and checks the answers put together against one run: for the insurance
+book on 10,000 paths they were the same to the last bit with two and with
+four workers (one run of each). The workers there share one GPU, so it took
+longer, 24.4 s and 41.2 s against 11.2 to 11.7 s: it shows the answers
+agree, not a speed-up. Nothing here has been run on more than one machine
+or more than one GPU.
+
+`Kept::patch` does the same for bringing a run up to date. It gives the
+small plan and which kept values it reads and replaces, without the values,
+and a `Patch` can be saved and loaded too. Whoever holds some of the
+scenarios' kept values calls `patch.inputs`, runs `patch.plan`, and
+`patch.apply`; the tests check that scenarios held in two parts and patched
+from a file match running everything again.
+[watershed-jvm](https://github.com/surefold/watershed-jvm) builds a cluster
+of workers on these.
 
 ### What the models found
 

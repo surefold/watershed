@@ -1,0 +1,14 @@
+# hetero_probe transfer 2000 48 2000
+# 14:42:11 gpu: 3 %, 576 MiB | other compute apps: | load: 25.47
+gpu ready in 225.32 ms (n=1)
+accounts: 288287 nodes, 148 levels; a cut carries 2000 values a scenario, 32000000 bytes for 2000
+whole on cpu: 682.21 ms (680.27 ms..683.86 ms, n=7)
+whole on gpu: 19.15 ms (17.47 ms..21.02 ms, n=7)
+2 pieces, every piece on the gpu, through the host: 113.15 ms (107.68 ms..121.73 ms, n=7) = 5.91x whole on gpu (laying rows out on the host: 7.25 ms)
+2 pieces, pieces turn about, gpu first: 425.65 ms (417.71 ms..503.44 ms, n=7) = 22.23x whole on gpu (laying rows out on the host: 6.69 ms)
+4 pieces, every piece on the gpu, through the host: 327.58 ms (315.47 ms..336.79 ms, n=7) = 17.10x whole on gpu (laying rows out on the host: 18.87 ms)
+4 pieces, pieces turn about, gpu first: 639.04 ms (625.13 ms..846.59 ms, n=7) = 33.37x whole on gpu (laying rows out on the host: 18.15 ms)
+8 pieces, every piece on the gpu, through the host: 668.91 ms (608.70 ms..901.22 ms, n=7) = 34.93x whole on gpu (laying rows out on the host: 42.89 ms)
+8 pieces, pieces turn about, gpu first: 885.40 ms (879.21 ms..969.85 ms, n=7) = 46.23x whole on gpu (laying rows out on the host: 42.91 ms)
+# 14:42:44 gpu: 10 %, 576 MiB | other compute apps: | load: 20.83
+# samples with another GPU compute process: 0 of 31
