@@ -265,8 +265,8 @@ setting `WATERSHED_CLUSTERS` for `with_shared`) groups nodes that feed one
 another across a band of levels into a cluster that one GPU thread works out
 in one go, keeping what only the cluster reads in registers instead of
 writing it to memory and reading it back. The tests check a clustered plan
-against the graph in the same way as a plain one. Clusters are not
-written to a plan's file: a plan read back runs plain.
+against the graph in the same way as a plain one. A clustered
+plan is written to a file with its clusters, and read back runs with them.
 
 It helps one of the three models tried, and only on runs after the first:
 
