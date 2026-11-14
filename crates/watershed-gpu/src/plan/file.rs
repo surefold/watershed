@@ -7,9 +7,14 @@
 use std::io::{self, Read, Write};
 
 use super::{Group, Output, Scenarios};
+use crate::fuse::Fused;
 
 /// The first bytes of a plan's file. The last is the layout's version.
-const MAGIC: [u8; 8] = *b"WSPLAN\0\x01";
+const MAGIC: [u8; 8] = *b"WSPLAN\0\x02";
+/// The layout before clusters were written: read, and never written.
+const BEFORE_CLUSTERS: [u8; 8] = *b"WSPLAN\0\x01";
+/// A node of a clustered plan that is not written to a slot.
+const NO_SLOT: u32 = u32::MAX;
 
 /// Why a plan could not be read.
 #[derive(Debug)]
@@ -86,6 +91,30 @@ impl<W: Write> Summed<W> {
         }
         Ok(())
     }
+    fn shapes(&mut self, shapes: &[Vec<u32>]) -> io::Result<()> {
+        self.count(shapes.len())?;
+        shapes.iter().try_for_each(|shape| self.u32s(shape))
+    }
+    fn groups(&mut self, groups: &[Group]) -> io::Result<()> {
+        let groups: Vec<u32> = groups
+            .iter()
+            .flat_map(|g| [g.shape, g.first, g.count])
+            .collect();
+        self.u32s(&groups)
+    }
+    fn outputs(&mut self, outputs: &[Output]) -> io::Result<()> {
+        self.count(outputs.len())?;
+        for output in outputs {
+            let (kind, bits) = match *output {
+                Output::Slot(slot) => (0u8, u64::from(slot)),
+                Output::Shared(at) => (1, u64::from(at)),
+                Output::Fixed(value) => (2, value.to_bits()),
+            };
+            self.put(&[kind])?;
+            self.put(&bits.to_le_bytes())?;
+        }
+        Ok(())
+    }
     fn f64s(&mut self, values: &[f64]) -> io::Result<()> {
         self.count(values.len())?;
         let mut bytes = Vec::with_capacity(CHUNK * 8);
@@ -136,6 +165,35 @@ impl<R: Read> Summed<R> {
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect())
     }
+    fn some_shapes(&mut self) -> Result<Vec<Vec<u32>>, LoadError> {
+        (0..self.a_count()?).map(|_| self.some_u32s()).collect()
+    }
+    fn some_groups(&mut self) -> Result<Vec<Group>, LoadError> {
+        Ok(self
+            .some_u32s()?
+            .chunks_exact(3)
+            .map(|g| Group {
+                shape: g[0],
+                first: g[1],
+                count: g[2],
+            })
+            .collect())
+    }
+    fn some_outputs(&mut self) -> Result<Vec<Output>, LoadError> {
+        (0..self.a_count()?)
+            .map(|_| {
+                let [kind] = self.take()?;
+                let bits = u64::from_le_bytes(self.take()?);
+                let at = u32::try_from(bits).map_err(|_| LoadError::Damaged);
+                Ok(match kind {
+                    0 => Output::Slot(at?),
+                    1 => Output::Shared(at?),
+                    2 => Output::Fixed(f64::from_bits(bits)),
+                    _ => return Err(LoadError::Damaged),
+                })
+            })
+            .collect()
+    }
     fn some_f64s(&mut self) -> Result<Vec<f64>, LoadError> {
         let n = self.a_count()?;
         let bytes = self.bytes(n, 8)?;
@@ -150,8 +208,8 @@ impl Scenarios {
     /// Writes the plan out, to be read back by [`Scenarios::load`].
     ///
     /// EXPERIMENTAL. The shared inputs' values go with it as they are now.
-    /// Clusters (see [`Scenarios::with_clusters`]) are not written: a plan
-    /// read back runs plain.
+    /// A plan made with [`Scenarios::with_clusters`] is written with its
+    /// clusters, and read back runs with them.
     /// A plan of 20 million nodes is about 2 GB; give this a
     /// `BufWriter`.
     pub fn save(&self, to: impl Write) -> io::Result<()> {
@@ -165,31 +223,33 @@ impl Scenarios {
         to.f64s(&self.consts)?;
         let levels: Vec<u32> = self.levels.iter().flat_map(|l| [l.start, l.end]).collect();
         to.u32s(&levels)?;
-        to.count(self.shapes.len())?;
-        for shape in &self.shapes {
-            to.u32s(shape)?;
-        }
-        let groups: Vec<u32> = self
-            .groups
-            .iter()
-            .flat_map(|g| [g.shape, g.first, g.count])
-            .collect();
-        to.u32s(&groups)?;
+        to.shapes(&self.shapes)?;
+        to.groups(&self.groups)?;
         to.u32s(&self.operands)?;
         to.u32s(&self.operand_at)?;
-        to.count(self.outputs.len())?;
-        for output in &self.outputs {
-            let (kind, bits) = match *output {
-                Output::Slot(slot) => (0u8, u64::from(slot)),
-                Output::Shared(at) => (1, u64::from(at)),
-                Output::Fixed(value) => (2, value.to_bits()),
-            };
-            to.put(&[kind])?;
-            to.put(&bits.to_le_bytes())?;
-        }
+        to.outputs(&self.outputs)?;
         to.f64s(&self.shared)?;
         to.u32s(&self.shared_programs)?;
         to.u32s(&self.shared_ops)?;
+        match &self.fused {
+            None => to.put(&[0])?,
+            Some(fused) => {
+                to.put(&[1])?;
+                to.count(fused.slots)?;
+                to.shapes(&fused.shapes)?;
+                to.groups(&fused.groups)?;
+                to.u32s(&fused.operand_at)?;
+                to.u32s(&fused.operands)?;
+                to.count(fused.widest)?;
+                let slot_of: Vec<u32> = fused
+                    .slot_of
+                    .iter()
+                    .map(|slot| slot.unwrap_or(NO_SLOT))
+                    .collect();
+                to.u32s(&slot_of)?;
+                to.outputs(&self.fused_outputs)?;
+            }
+        }
         let sum = to.sum;
         to.inner.write_all(&sum.to_le_bytes())?;
         to.inner.flush()
@@ -206,7 +266,7 @@ impl Scenarios {
         from.inner
             .read_exact(&mut magic)
             .map_err(|_| LoadError::NotAPlan)?;
-        if magic != MAGIC {
+        if magic != MAGIC && magic != BEFORE_CLUSTERS {
             return Err(LoadError::NotAPlan);
         }
         let vary = from.a_count()?;
@@ -220,36 +280,38 @@ impl Scenarios {
             .chunks_exact(2)
             .map(|l| l[0]..l[1])
             .collect();
-        let shapes = (0..from.a_count()?)
-            .map(|_| from.some_u32s())
-            .collect::<Result<Vec<_>, _>>()?;
-        let groups = from
-            .some_u32s()?
-            .chunks_exact(3)
-            .map(|g| Group {
-                shape: g[0],
-                first: g[1],
-                count: g[2],
-            })
-            .collect();
+        let shapes = from.some_shapes()?;
+        let groups = from.some_groups()?;
         let operands = from.some_u32s()?;
         let operand_at = from.some_u32s()?;
-        let outputs = (0..from.a_count()?)
-            .map(|_| {
-                let [kind] = from.take()?;
-                let bits = u64::from_le_bytes(from.take()?);
-                let at = u32::try_from(bits).map_err(|_| LoadError::Damaged);
-                Ok(match kind {
-                    0 => Output::Slot(at?),
-                    1 => Output::Shared(at?),
-                    2 => Output::Fixed(f64::from_bits(bits)),
-                    _ => return Err(LoadError::Damaged),
-                })
-            })
-            .collect::<Result<Vec<_>, LoadError>>()?;
+        let outputs = from.some_outputs()?;
         let shared = from.some_f64s()?;
         let shared_programs = from.some_u32s()?;
         let shared_ops = from.some_u32s()?;
+        let clustered = match magic == MAGIC {
+            true => from.take::<1>()?[0],
+            false => 0,
+        };
+        let (fused, fused_outputs) = match clustered {
+            0 => (None, Vec::new()),
+            1 => {
+                let fused = Fused {
+                    slots: from.a_count()?,
+                    shapes: from.some_shapes()?,
+                    groups: from.some_groups()?,
+                    operand_at: from.some_u32s()?,
+                    operands: from.some_u32s()?,
+                    widest: from.a_count()?,
+                    slot_of: from
+                        .some_u32s()?
+                        .into_iter()
+                        .map(|slot| (slot != NO_SLOT).then_some(slot))
+                        .collect(),
+                };
+                (Some(fused), from.some_outputs()?)
+            }
+            _ => return Err(LoadError::Damaged),
+        };
         let sum = from.sum;
         let mut written = [0; 8];
         from.inner.read_exact(&mut written)?;
@@ -267,9 +329,8 @@ impl Scenarios {
             groups,
             operands,
             operand_at,
-            // A file holds the plain plan only: clusters are not written.
-            fused: None,
-            fused_outputs: Vec::new(),
+            fused,
+            fused_outputs,
             outputs,
             shared_inputs,
             shared,
@@ -282,11 +343,19 @@ impl Scenarios {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PlanError;
+    use watershed_core::NodeId;
     use watershed_core::prelude::*;
 
     /// Varied and shared inputs, a condition, a constant output and one
     /// that depends only on a shared input.
     fn plan() -> Scenarios {
+        made_by(Scenarios::with_shared)
+    }
+
+    type Make = fn(&Graph, &[NodeId], &[NodeId], &[NodeId]) -> Result<Scenarios, PlanError>;
+
+    fn made_by(make: Make) -> Scenarios {
         let mut g = Graph::new();
         let rate = g.input("rate", 0.01).unwrap();
         let shock = g.input("shock", 0.0).unwrap();
@@ -318,7 +387,7 @@ mod tests {
         let yearly = g.define("yearly", fee * 12.0).unwrap();
         let fixed = g.define("fixed", (2.0f64).into_expr() * 3.5).unwrap();
         g.stabilize();
-        Scenarios::with_shared(
+        make(
             &g,
             &[rate.id(), shock.id()],
             &[fee.id()],
@@ -356,6 +425,46 @@ mod tests {
         // And it is still a whole plan: its shared inputs can be set.
         plan.set_shared(&[0.01]);
         back.set_shared(&[0.01]);
+        let (was, now) = (plan.run_cpu(&inputs()), back.run_cpu(&inputs()));
+        assert!(
+            was.iter()
+                .zip(&now)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
+
+    #[test]
+    fn a_clustered_plan_is_read_back_with_its_clusters() {
+        let plan = made_by(Scenarios::with_clusters);
+        let mut file = Vec::new();
+        plan.save(&mut file).unwrap();
+        let back = Scenarios::load(&file[..]).unwrap();
+        let (was, now) = (plan.fused.as_ref().unwrap(), back.fused.as_ref().unwrap());
+        assert_eq!(was.slots, now.slots);
+        assert_eq!(was.widest, now.widest);
+        assert_eq!(was.slot_of, now.slot_of);
+        let mut again = Vec::new();
+        back.save(&mut again).unwrap();
+        assert!(again == file);
+        // It has more in it than the plain plan's file.
+        let mut plain = Vec::new();
+        self::plan().save(&mut plain).unwrap();
+        assert!(file.len() > plain.len());
+    }
+
+    #[test]
+    fn a_file_written_before_clusters_were_is_still_read() {
+        let plan = plan();
+        let mut file = Vec::new();
+        plan.save(&mut file).unwrap();
+        // The older layout: its own first bytes, no mark for clusters, and
+        // the sum of what is left.
+        let body = &file[8..file.len() - 9];
+        let mut summed = Summed::new(());
+        summed.add(body);
+        let old = [&BEFORE_CLUSTERS[..], body, &summed.sum.to_le_bytes()].concat();
+        let back = Scenarios::load(&old[..]).unwrap();
+        assert!(back.fused.is_none());
         let (was, now) = (plan.run_cpu(&inputs()), back.run_cpu(&inputs()));
         assert!(
             was.iter()

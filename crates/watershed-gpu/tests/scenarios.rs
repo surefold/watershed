@@ -376,6 +376,17 @@ mod on_the_gpu {
     }
 
     #[test]
+    fn clusters_read_back_from_a_file_give_what_the_graph_gives() {
+        let gpu = Gpu::new().unwrap();
+        gives_what_the_graph_gives_in(true, |plan, inputs| {
+            let mut file = Vec::new();
+            plan.save(&mut file).unwrap();
+            gpu.run(&Scenarios::load(&file[..]).unwrap(), inputs)
+                .unwrap()
+        });
+    }
+
+    #[test]
     fn the_general_kernel_gives_what_the_graph_gives() {
         let gpu = Gpu::new().unwrap().without_compiling();
         gives_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());
