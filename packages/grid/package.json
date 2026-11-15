@@ -1,16 +1,48 @@
 {
-  "name": "@watershed/grid",
+  "name": "@surefold/grid",
   "version": "0.1.0",
-  "private": true,
   "description": "A data grid whose rows, formulas and totals are worked out incrementally by the watershed engine, in WebAssembly.",
+  "license": "Apache-2.0",
+  "homepage": "https://surefold.dev/watershed/grid/",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/surefold/watershed.git",
+    "directory": "packages/grid"
+  },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./demo": "./src/demo.ts",
-    "./grid.css": "./src/grid.css"
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./demo": {
+      "source": "./src/demo.ts",
+      "types": "./dist/demo.d.ts",
+      "default": "./dist/demo.js"
+    },
+    "./grid.css": {
+      "source": "./src/grid.css",
+      "default": "./dist/grid.css"
+    }
   },
-  "sideEffects": ["*.css", "./src/table.ts"],
+  "files": [
+    "dist",
+    "pkg/watershed_grid.js",
+    "pkg/watershed_grid.d.ts",
+    "pkg/watershed_grid_bg.wasm",
+    "pkg/watershed_grid_bg.wasm.d.ts"
+  ],
+  "sideEffects": [
+    "*.css",
+    "./src/table.ts",
+    "./dist/table.js"
+  ],
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp src/view.js src/view.d.ts src/chart.js src/chart.d.ts src/grid.css dist/",
     "check": "tsc --noEmit -p ."
   }
 }

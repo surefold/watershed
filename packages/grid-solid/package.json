@@ -1,11 +1,37 @@
 {
-  "name": "@watershed/grid-solid",
+  "name": "@surefold/grid-solid",
   "version": "0.1.0",
-  "private": true,
   "description": "The watershed grid as a Solid component, and its totals as signals.",
+  "license": "Apache-2.0",
+  "homepage": "https://surefold.dev/watershed/grid/",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/surefold/watershed.git",
+    "directory": "packages/grid-solid"
+  },
   "type": "module",
-  "exports": { ".": "./src/index.tsx" },
-  "peerDependencies": { "solid-js": "^1.8" },
-  "dependencies": { "@watershed/grid": "0.1.0" },
-  "scripts": { "check": "tsc --noEmit -p ." }
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "solid-js": "^1.8"
+  },
+  "dependencies": {
+    "@surefold/grid": "^0.1.0"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit -p ."
+  }
 }

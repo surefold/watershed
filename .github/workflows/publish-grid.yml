@@ -1,0 +1,59 @@
+name: Publish grid packages
+
+# Pushing a tag such as grid-v0.1.0 publishes @surefold/grid, @surefold/grid-solid
+# and @surefold/grid-react at that version to GitHub Packages. Each package's
+# version in its package.json must be the tag's.
+on:
+  push:
+    tags: ["grid-v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish to GitHub Packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://npm.pkg.github.com
+          scope: "@surefold"
+
+      - name: Check the versions match the tag
+        run: |
+          want="${GITHUB_REF_NAME#grid-v}"
+          for p in grid grid-solid grid-react; do
+            have=$(node -p "require('./packages/$p/package.json').version")
+            if [ "$have" != "$want" ]; then
+              echo "packages/$p is at $have, but the tag is for $want" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build the engine
+        run: |
+          cargo build --locked --release --target wasm32-unknown-unknown -p watershed-grid
+          wasm-bindgen --target web --weak-refs --out-dir packages/grid/pkg \
+            target/wasm32-unknown-unknown/release/watershed_grid.wasm
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:packages
+      - run: npm run check --workspace packages/grid --workspace packages/grid-solid --workspace packages/grid-react
+
+      - name: Publish
+        run: npm publish --workspace packages/grid --workspace packages/grid-solid --workspace packages/grid-react
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

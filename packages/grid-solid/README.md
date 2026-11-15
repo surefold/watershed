@@ -1,12 +1,12 @@
-# @watershed/grid-solid
+# @surefold/grid-solid
 
-The [watershed grid](../grid) in Solid: a `<Grid>` component, and signals that
+The [watershed grid](https://github.com/surefold/watershed/tree/main/packages/grid) in Solid: a `<Grid>` component, and signals that
 follow a table. The table holds the rows; the component only draws it.
 
 ```tsx
-import { Table } from "@watershed/grid";
-import "@watershed/grid/grid.css";
-import { Grid, createTotal } from "@watershed/grid-solid";
+import { Table } from "@surefold/grid";
+import "@surefold/grid/grid.css";
+import { Grid, createTotal } from "@surefold/grid-solid";
 
 const trades = new Table({
   fields: { symbol: "text", qty: "number", price: "number", mark: "number" },
@@ -28,9 +28,27 @@ trades.put("T-1", { symbol: "OAKS", qty: 500, price: 101.2, mark: 101.5 });
 trades.set("T-1", "mark", 102);   // the grid and pnl() follow
 ```
 
+## Install
+
+The packages are on GitHub Packages. Tell npm where `@surefold` packages
+come from, with a GitHub token that can read packages (a classic token with
+`read:packages`; GitHub asks for one even for public packages), in a
+`.npmrc` beside your `package.json`:
+
+```
+@surefold:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+Then:
+
+```bash
+npm install @surefold/grid @surefold/grid-solid
+```
+
 ## Grid
 
-Takes the table and every option of [`drawGrid`](../grid#drawgrid), plus
+Takes the table and every option of [`drawGrid`](https://github.com/surefold/watershed/tree/main/packages/grid#drawgrid), plus
 `class`, `style` and `ref`. `ref` is called with the view, for its methods
 (grouping, looking back, explaining the focused cell).
 
@@ -48,4 +66,4 @@ when they are called, so a new one is used without drawing again.
 Each follows the table from its first recalculation after it is made, and
 stops when its owner is cleaned up.
 
-The site's grid page, [`web/grid`](../../web/grid), is built with this.
+The site's grid page, [`web/grid`](https://github.com/surefold/watershed/tree/main/web/grid), is built with this.

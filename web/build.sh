@@ -27,7 +27,7 @@ wasm-bindgen --target web --no-typescript --out-dir web/dist/pkg \
   printf '\n</body>\n</html>\n'
 } > web/dist/index.html
 
-# The grid's engine goes into the @watershed/grid package, with its types and
+# The grid's engine goes into the @surefold/grid package, with its types and
 # with memory freed when a table is garbage collected (--weak-refs). Then Vite
 # builds the Solid page into dist/grid and the React example into dist/grid/react.
 wasm-bindgen --target web --weak-refs --out-dir packages/grid/pkg \

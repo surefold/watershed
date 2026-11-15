@@ -1,17 +1,17 @@
-# @watershed/grid
+# @surefold/grid
 
 A data grid whose rows, formulas and totals are worked out by the watershed
 engine, in WebAssembly. Changing a cell recalculates only the cells and
-totals that depend on it. No framework: [`@watershed/grid-solid`](../grid-solid)
-and [`@watershed/grid-react`](../grid-react) put it in a component.
+totals that depend on it. No framework: [`@surefold/grid-solid`](https://github.com/surefold/watershed/tree/main/packages/grid-solid)
+and [`@surefold/grid-react`](https://github.com/surefold/watershed/tree/main/packages/grid-react) put it in a component.
 
 It has two parts. A **`Table`** holds the rows and works them out. **`drawGrid`**
 draws a table and redraws it whenever it is recalculated. Data goes in and
 out through the table; the grid only draws.
 
 ```ts
-import { Table, drawGrid } from "@watershed/grid";
-import "@watershed/grid/grid.css";
+import { Table, drawGrid } from "@surefold/grid";
+import "@surefold/grid/grid.css";
 
 const orders = new Table({
   fields: { region: "text", qty: "number", price: "number" },
@@ -29,6 +29,24 @@ drawGrid(document.querySelector("#grid")!, orders, {
 orders.set("o-1", "qty", 5);   // o-1's line and two totals are recalculated; the grid redraws
 orders.total("line");           // 60
 orders.why("o-1", "line");      // what line was worked out from
+```
+
+## Install
+
+The packages are on GitHub Packages. Tell npm where `@surefold` packages
+come from, with a GitHub token that can read packages (a classic token with
+`read:packages`; GitHub asks for one even for public packages), in a
+`.npmrc` beside your `package.json`:
+
+```
+@surefold:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+Then:
+
+```bash
+npm install @surefold/grid
 ```
 
 ## Table
@@ -93,14 +111,30 @@ the column layout (`getLayout`, `setLayout`), and `destroy()` it.
 
 People can sort, filter, group, pin, hide, move and resize columns, edit,
 undo, copy and paste to and from a spreadsheet, and pick out a block of cells,
-from the grid itself. [The grid's README](../../crates/watershed-grid/README.md#what-it-does)
+from the grid itself. [The grid's README](https://github.com/surefold/watershed/blob/main/crates/watershed-grid/README.md#what-it-does)
 says what each does and how it is worked out.
 
 `GroupChart` draws each group's total as a bar, from `table.groups()`.
 
 ## Using it
 
-The engine loads when the package is imported (a top-level `await`), so a
-bundler needs to target ES2022 or later. The package is not on npm yet: it is
-used from this repository's workspaces, and `web/build.sh` builds the engine
-into `pkg/` first.
+The engine loads when the package is imported (a top-level `await`), and
+Vite, webpack 5 and Rollup pick up its `.wasm` file as an asset. Target
+ES2022 or later; with Vite, also for dependencies:
+
+```ts
+export default defineConfig({
+  build: { target: "es2022" },
+  optimizeDeps: { esbuildOptions: { target: "es2022" } },
+});
+```
+
+It runs in the browser only: drawing needs a page, and the engine is loaded
+the way a page loads it.
+
+## Publishing
+
+Pushing a tag such as `grid-v0.2.0` publishes all three packages at that
+version (`.github/workflows/publish-grid.yml`). First set `version` in each
+package's `package.json`, and the dependency on `@surefold/grid` in the
+other two, to match.

@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import "@watershed/grid/grid.css";
+import "@surefold/grid/grid.css";
 import "./page.css";
 import { App } from "./App";
 

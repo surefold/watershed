@@ -8,7 +8,7 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
-import { drawGrid, type AnyTable, type Change, type GridOptions, type GridView } from "@watershed/grid";
+import { drawGrid, type AnyTable, type Change, type GridOptions, type GridView } from "@surefold/grid";
 
 export interface GridProps extends Omit<GridOptions, "theme"> {
   table: AnyTable;
@@ -54,7 +54,13 @@ export const Grid = forwardRef<GridView | null, GridProps>(function Grid(props, 
   useEffect(() => view?.setTheme(props.theme ?? ""), [view, props.theme]);
   useImperativeHandle(ref, () => view!, [view]);
 
-  return <div ref={root} className={props.className} style={props.style} />;
+  // The view puts classes of its own on the element it draws into, so that is
+  // an inner one: React's className and style go on the outer one.
+  return (
+    <div className={props.className} style={props.style}>
+      <div ref={root} style={{ height: "100%" }} />
+    </div>
+  );
 });
 
 /**
