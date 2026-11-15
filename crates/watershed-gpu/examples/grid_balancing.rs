@@ -66,6 +66,8 @@ const NO_PARTY: usize = 499; // the operator read the point; the party's reading
 const DISAGREE: usize = 211; // the two meters are well apart
 const DRIFT: usize = 97; // the two meters differ a little: within their tolerance
 const BATCHES: usize = 20;
+/// How many readings are kept out of the batches, to arrive one at a time.
+const STREAMED: usize = 10_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Fault {
@@ -351,7 +353,9 @@ fn main() -> Result<()> {
 
     // ---- the day: each side's readings arrive in batches, in turn
     let started = Instant::now();
-    let per_batch = count.div_ceil(BATCHES);
+    // The last readings are kept back, to arrive one at a time afterwards.
+    let batched = count - STREAMED.min(count / 10);
+    let per_batch = batched.div_ceil(BATCHES);
     let mut slowest = 0.0f64;
     let mut cover: Option<Cover> = None;
     for batch in 0..BATCHES {
@@ -361,7 +365,7 @@ fn main() -> Result<()> {
                 true => Fault::NoParty,
                 false => Fault::NoOperator,
             };
-            for i in (batch * per_batch..((batch + 1) * per_batch).min(count))
+            for i in (batch * per_batch..((batch + 1) * per_batch).min(batched))
                 .filter(|&i| fault(i) != absent)
             {
                 reading(&mut g, &mut readings, &f, i, &points[i], from_party)?;
@@ -418,12 +422,42 @@ fn main() -> Result<()> {
     let (total_uncovered, parties_uncovered, system, uncovered) =
         cover.ok_or("some party was never heard of")?;
     println!(
-        "{count} readings for {parties} parties, from both meters in {} batches: {:.1} s in all, {:.0} ms for the slowest batch; {} nodes",
+        "{batched} readings for {parties} parties, from both meters in {} batches: {:.1} s in all, {:.0} ms for the slowest batch; {} nodes",
         2 * BATCHES,
         started.elapsed().as_secs_f64(),
         slowest * 1e3,
         g.len()
     );
+
+    // ---- the rest arrive one at a time, and everything is brought up to
+    // date after each: the reading's state, the counts, its party's
+    // imbalance and cover, and the system's
+    let mut took = Vec::with_capacity(2 * (count - batched));
+    for (i, point) in points.iter().enumerate().skip(batched) {
+        for from_party in [true, false] {
+            let absent = match from_party {
+                true => Fault::NoParty,
+                false => Fault::NoOperator,
+            };
+            if fault(i) != absent {
+                let began = Instant::now();
+                reading(&mut g, &mut readings, &f, i, point, from_party)?;
+                g.stabilize();
+                took.push(began.elapsed().as_secs_f64() * 1e6);
+            }
+        }
+    }
+    took.sort_by(f64::total_cmp);
+    if let Some(&worst) = took.last() {
+        println!(
+            "{} more arrive one at a time, each brought up to date before the next: {:.0} µs each on average, {:.0} µs for 99 in 100, {:.0} µs at the worst; {:.0} a second",
+            took.len(),
+            took.iter().sum::<f64>() / took.len() as f64,
+            took[took.len() * 99 / 100],
+            worst,
+            took.len() as f64 / (took.iter().sum::<f64>() / 1e6)
+        );
+    }
 
     // ---- the end of the day: both answers are already there to read
     let began = Instant::now();
