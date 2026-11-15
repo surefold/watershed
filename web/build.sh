@@ -8,7 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --locked --release --target wasm32-unknown-unknown -p watershed-web -p watershed-grid
+# One at a time: built together, the grid would take on what only the demo's scenario plans need.
+cargo build --locked --release --target wasm32-unknown-unknown -p watershed-grid
+cargo build --locked --release --target wasm32-unknown-unknown -p watershed-web
 rm -rf web/dist
 mkdir -p web/dist/pkg
 wasm-bindgen --target web --no-typescript --out-dir web/dist/pkg \
