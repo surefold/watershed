@@ -1,0 +1,57 @@
+/* The React example's page. Its colours come from the grid's theme tokens
+   (grid.css), so a chosen theme restyles the page with the grid. */
+:root {
+  --display: "Bricolage Grotesque", system-ui, sans-serif;
+  --body: "Figtree", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+#root { display: contents; }
+:root {
+  --paper: var(--wg-backdrop, #f2f5f4); --surface: var(--wg-surface, #fff); --ink: var(--wg-ink, #13242c);
+  --muted: var(--wg-muted, #56676e); --rule: var(--wg-line, #d3dcdc); --water: var(--wg-accent, #1d6c88);
+  --bad: var(--wg-bad, #b9541f); --wash: color-mix(in srgb, var(--ink) 5%, var(--surface));
+}
+body {
+  display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 12px;
+  padding: 18px 16px 12px; background: var(--paper); color: var(--ink); font: 14px/1.5 var(--body);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-wg-theme]) {
+    --paper: #0e161a; --surface: #142026; --ink: #e2eaeb; --muted: #94a4a9; --rule: #2a3c43; --water: #63b4d0; --bad: #f0894a;
+    color-scheme: dark;
+  }
+}
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+h1 { font: 700 1.5rem/1.1 var(--display); letter-spacing: -0.02em; margin: 0; }
+h1 span { color: var(--water); }
+header p { margin: 0; flex: 1 1 50ch; max-width: 100ch; color: var(--muted); font-size: 13px; }
+a { color: var(--water); }
+code { font: 12.5px var(--mono); }
+h2 { font: 600 0.7rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
+.figures { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.figure { display: grid; padding: 8px 16px; background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; min-width: 180px; }
+.figure span { font: 600 0.66rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.figure strong { font: 600 1.4rem/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.figure strong.neg { color: var(--bad); }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-left: auto; }
+.controls label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; }
+input, select, button { height: 30px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); color: var(--ink); font: 13px var(--body); }
+input[type="number"] { width: 84px; font-family: var(--mono); }
+button { cursor: pointer; font-weight: 600; background: var(--water); color: var(--surface); border-color: transparent; }
+.cost { margin: 0; color: var(--muted); font-size: 12.5px; }
+.cost b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 12px; min-height: 0; }
+.grid { min-height: 320px; }
+aside { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-height: 0; }
+aside > * { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 14px 16px; }
+form { display: grid; gap: 8px; }
+.note { margin: 0; min-height: 1.3em; font-size: 12.5px; color: var(--muted); }
+.why { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 8px; min-height: 0; }
+.why pre { margin: 0; overflow: auto; font: 12px/1.55 var(--mono); white-space: pre-wrap; }
+@media (max-width: 900px) {
+  html, body { height: auto; }
+  main { grid-template-columns: minmax(0, 1fr); }
+  .grid { height: 70vh; }
+}

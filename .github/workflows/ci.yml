@@ -116,3 +116,24 @@ jobs:
       # Builds the extension with maturin into a fresh environment, then tests it.
       - run: uv run --locked pytest -q
         working-directory: crates/watershed-py
+
+  grid-js:
+    name: Grid packages and pages (TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Builds the engine into packages/grid/pkg and both pages with Vite.
+      - run: web/build.sh
+      - run: npm run check

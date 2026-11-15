@@ -28,29 +28,72 @@ python3 -m http.server -d web/dist 8000
 
 - http://localhost:8000 is the interactive page; its "Data grid" tab
   (http://localhost:8000/#grid) shows the grid.
-- http://localhost:8000/grid/ is the grid on a page of its own.
+- http://localhost:8000/grid/ is the grid on a page of its own, in Solid.
+- http://localhost:8000/grid/react/ is a smaller example in React.
 
-The Rust side is tested natively: `cargo test -p watershed-grid`.
+The Rust side is tested natively: `cargo test -p watershed-grid`. The
+JavaScript is type-checked with `npm run check` (after `web/build.sh` has
+put the engine in `packages/grid/pkg`).
 
 ## Using it from JavaScript
 
-```js
-import init, { Grid } from "./pkg/watershed_grid.js";
-import { WatershedGrid } from "./grid.js";
+Three packages in [`packages/`](../../packages), used by the pages in `web/`:
 
-await init();
-const grid = new Grid();
-grid.add_field("region", "text", "none");
-grid.add_field("qty", "number", "sum");
-grid.add_field("price", "number", "none");
-grid.add_formula("line", "qty * price", "sum");
-grid.upsert("o-1", ["EU", "2", "10"]);
+- `@watershed/grid`: a `Table` that holds the rows and works out formulas
+  and totals, and `drawGrid`, which draws a table. No framework.
+- `@watershed/grid-solid`: `<Grid table={…} />`, and `createTotal` and
+  `createReading`, which follow a table as signals.
+- `@watershed/grid-react`: `<Grid table={…} />`, and the hooks `useTable`,
+  `useTotal`, `useReading` and `useChange`.
 
-const view = new WatershedGrid(document.querySelector("#grid"), grid);
-grid.set_cell("o-1", 1, "5");
-view.refresh();                 // recalculates o-1's line and two totals
-grid.explain("o-1", 3);         // why line is 50
+The table holds the data and the grid only draws it. Rows never go through
+props or component state: change them on the table, and every grid and
+total that shows them follows.
+
+```ts
+import { Table, drawGrid } from "@watershed/grid";
+import "@watershed/grid/grid.css";
+
+const orders = new Table({
+  fields: { region: "text", qty: "number", price: "number" },
+  formulas: { line: "qty * price" },
+  totals: { qty: "sum", line: "sum" },
+});
+orders.put("o-1", { region: "EU", qty: 2, price: 10 });
+
+const view = drawGrid(document.querySelector("#grid")!, orders, {
+  columns: { qty: { decimals: 0 }, line: { signed: true } },
+});
+orders.set("o-1", "qty", 5);    // recalculates o-1's line and two totals, then the grid redraws
+orders.total("line");           // 50
+orders.why("o-1", "line");      // what line was worked out from
 ```
+
+Field and column names are checked by TypeScript: `orders.set("o-1", "qyt", 5)`
+does not compile, and `put` needs every field, of its kind.
+
+Writes are gathered up and recalculated once, at the end of the current
+task; `table.batch(() => …)` recalculates straight after its edits, and
+makes them one step for undo. Reads (`get`, `total`, `why`) recalculate
+first if anything is waiting, so they always see what was written, except
+inside `batch` and `table.peek(read)`, which see the last recalculation.
+The React hooks read with `peek`, so a render never sets one off.
+
+```tsx
+// Solid
+const pnl = createTotal(trades, "pnl");
+<Grid table={trades} theme="dark" keyColumn={{ title: "trade" }} ref={(view) => …} />
+
+// React
+const trades = useTable(() => new Table({ … }));
+const pnl = useTotal(trades, "pnl");
+<Grid table={trades} theme="dark" ref={viewRef} />
+```
+
+The engine loads when `@watershed/grid` is imported (a top-level `await`),
+so a bundler needs to target ES2022 or later. Below the packages is the
+WebAssembly `Grid` class itself (`grid.add_field`, `grid.upsert`…), which
+is what `Table` wraps.
 
 ## What it does
 
@@ -78,15 +121,15 @@ takes about 1 ms to apply and redraw on 100,000 rows, and about 2 ms when
 the grid is sorted by a calculated column. These are figures from the demo
 page on a desktop browser, not a controlled benchmark.
 
-**History.** With `grid.keep_history(120)`, a column can draw how each cell,
+**History.** With `history: 120` in the table's spec, a column can draw how each cell,
 group total and total moved over recent updates beside its number. This uses
 the engine's [history](../watershed-core/README.md#history-and-change-tracking),
-so the grid stores nothing extra. `grid.set_as_of(update)` shows the whole
+so the grid stores nothing extra. `view.setAsOf(update)` shows the whole
 grid as it was after an earlier update: cells, totals, which rows pass the
 filters, and their order. Nothing can be edited until it is back at the
 present. "Why this value" uses `explain_at` while looking back.
 
-**Charts.** [`web/grid/chart.js`](../../web/grid/chart.js) draws each
+**Charts.** `GroupChart` ([`packages/grid/src/chart.js`](../../packages/grid/src/chart.js)) draws each
 group's total as a bar, read directly from the group nodes.
 
 **Columns and rows.** Columns can be dragged into a new order (dragging onto
@@ -105,11 +148,11 @@ minimum and maximum, kept current as values change.
 **Accessibility.** The grid labels its rows, cells and headers for a screen
 reader and announces the cell the focus moves to.
 
-**Themes.** `new WatershedGrid(el, grid, { theme: "dark" })`, or
-`view.setTheme("paper")` later. `WatershedGrid.themes` lists them (light,
+**Themes.** `drawGrid(el, table, { theme: "dark" })`, or
+`view.setTheme("paper")` later. `themes` lists them (light,
 dark, paper, dusk, terminal, high contrast). With none, the grid takes the
 page's colours. A theme is one rule in
-[`web/grid/grid.css`](../../web/grid/grid.css) that sets the grid's `--wg-`
+[`packages/grid/src/grid.css`](../../packages/grid/src/grid.css) that sets the grid's `--wg-`
 colours, fonts and corners, so a custom theme is one more rule:
 `[data-wg-theme="mine"] { ... }`.
 

@@ -1,0 +1,11 @@
+{
+  "name": "@watershed/grid-react",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The watershed grid as a React component, and hooks that follow its totals.",
+  "type": "module",
+  "exports": { ".": "./src/index.tsx" },
+  "peerDependencies": { "react": "^18.2 || ^19" },
+  "dependencies": { "@watershed/grid": "0.1.0" },
+  "scripts": { "check": "tsc --noEmit -p ." }
+}

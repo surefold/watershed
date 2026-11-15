@@ -262,6 +262,11 @@ impl Grid {
         self.table.rows_json(start as usize, count as usize)
     }
 
+    /// One row's cells, in column order, as JSON; `undefined` if there is no such row.
+    pub fn row(&self, key: &str) -> Option<String> {
+        self.table.row_json(key)
+    }
+
     /// Every group and its totals, in the view's order, as JSON.
     pub fn groups(&self) -> String {
         self.table.groups_json()
