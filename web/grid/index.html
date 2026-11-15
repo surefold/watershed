@@ -289,12 +289,11 @@ let grid = null;
 let view = null;
 let layout = null; // how the columns were arranged, kept when the rows are rebuilt
 let columns = [];
-// In the playground's tab the grid is live from the start: prices stream
-// without being asked, unless the person has asked for less motion. A frame
-// that is not showing gets no animation frames, so it rests while the
-// playground's own tab is open.
-const LIVE =
-  new URLSearchParams(location.search).has("embed") && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+// The grid is live from the start, on its own page and in the playground's
+// tab: prices stream without being asked, unless the person has asked for
+// less motion. A page or frame that is not showing gets no animation frames,
+// so it rests while something else is in front.
+const LIVE = !matchMedia("(prefers-reduced-motion: reduce)").matches;
 let lookingBack = false;
 let streaming = false;
 const chart = new GroupChart($("chart"), { onPick: (key) => view.revealGroup(key) });
