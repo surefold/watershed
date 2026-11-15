@@ -92,6 +92,8 @@ export class GridView {
 
     this.build();
     this.readColumns();
+    // The table may be sorted, filtered or grouped already.
+    this.followView();
     // Whatever changes the table, here or anywhere else, redraws the view.
     this.unwatch = table.watch((change) => this.redraw(change));
     this.refresh();
@@ -308,7 +310,7 @@ export class GridView {
       clearTimeout(timer);
       timer = setTimeout(async () => {
         try {
-          await this.grid.set_filter(col, input.value);
+          await this.table.filter(this.cols[col].name, input.value);
           input.classList.remove("wg-bad");
           input.title = "";
           this.body.scrollTop = 0;
@@ -700,7 +702,7 @@ export class GridView {
   async setFilter(col, text) {
     const input = this.filterInputs[col];
     try {
-      await this.grid.set_filter(col, text);
+      await this.table.filter(this.cols[col].name, text);
       input.value = text;
       input.classList.remove("wg-bad");
       this.body.scrollTop = 0;
@@ -750,7 +752,7 @@ export class GridView {
 
   setSort(sort) {
     this.sort = sort;
-    this.grid.set_sort(sort.map((s) => `${s.col}:${s.desc ? "desc" : "asc"}`).join(","));
+    this.attempt(() => this.table.sort(sort.map((s) => ({ column: this.cols[s.col].name, desc: s.desc }))));
     this.showSort();
     this.refresh();
   }
@@ -766,18 +768,53 @@ export class GridView {
   }
 
   setQuickFilter(text) {
-    this.grid.set_quick_filter(text);
+    this.attempt(() => this.table.search(text));
     this.body.scrollTop = 0;
     this.refresh();
   }
 
   /** Groups by the column at this position, or by nothing if it is negative. */
   setGroup(col) {
-    this.grid.set_group(col);
-    this.groupCol = col;
+    this.attempt(() => this.table.group(col < 0 ? null : this.cols[col].name));
     this.body.scrollTop = 0;
+    // The grid follows the table's grouping when it is redrawn (see followView).
     this.refresh();
-    this.onGroup(col);
+  }
+
+  /** Runs a change to the table, telling the page if it fails, now (in the page) or later (in a worker). */
+  attempt(change) {
+    try {
+      Promise.resolve(change()).catch((error) => this.onError(error.message));
+    } catch (error) {
+      this.onError(error.message);
+    }
+  }
+
+  /**
+   * Takes the sort, filters and grouping from the table, which may have been
+   * set there rather than here: the header arrows, the filter boxes (but not
+   * one being typed in) and `onGroup`.
+   */
+  followView() {
+    const state = this.table.viewState();
+    const col = (name) => this.cols.findIndex((c) => c.name === name);
+    const sort = state.sort.map((s) => ({ col: col(s.column), desc: s.desc })).filter((s) => s.col >= 0);
+    if (JSON.stringify(sort) !== JSON.stringify(this.sort)) {
+      this.sort = sort;
+      this.showSort();
+    }
+    this.filterInputs.forEach((input, c) => {
+      const text = state.filters[this.cols[c]?.name] ?? "";
+      if (input && input !== document.activeElement && input.value !== text) {
+        input.value = text;
+        input.classList.remove("wg-bad");
+      }
+    });
+    const group = state.group === null ? -1 : col(state.group);
+    if (group !== this.groupCol) {
+      this.groupCol = group;
+      this.onGroup(group);
+    }
   }
 
   expandAll(open) {
@@ -838,6 +875,7 @@ export class GridView {
   redraw(report) {
     if (this.destroyed) return;
     if (report.columns) this.readColumns();
+    if (report.view || report.columns) this.followView();
     this.epoch = report.epoch;
     this.draw();
     this.onStatus({

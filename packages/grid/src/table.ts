@@ -17,6 +17,7 @@
 // inside `peek`, reads see the last recalculation.
 
 import init, { Grid } from "../pkg/watershed_grid.js";
+import { viewStateOf } from "./table-view.js";
 
 await init();
 
@@ -78,6 +79,18 @@ export interface Group {
   totals: Record<string, number | null>;
 }
 
+/** How the rows are shaped for showing: by column name. */
+export interface ViewState {
+  /** The columns sorted by, the first mattering most. */
+  sort: { column: string; desc: boolean }[];
+  /** Each filtered column's filter, as typed (`>100`, `5..10`, `=Rates`, text to find). */
+  filters: Record<string, string>;
+  /** Text every row shown has in its key or a text cell. */
+  search: string;
+  /** The column rows are grouped by, if any. */
+  group: string | null;
+}
+
 /** What one recalculation did. */
 export interface Change {
   /** Counts recalculations, from 1. */
@@ -95,6 +108,8 @@ export interface Change {
   patched: boolean;
   /** A column was added, or its total changed. */
   columns: boolean;
+  /** The sort, a filter, the search or the grouping changed (see `viewState`). */
+  view: boolean;
   /** `performance.now()` when the recalculation started. */
   started: number;
   /** How long it took, in milliseconds. */
@@ -102,6 +117,8 @@ export interface Change {
 }
 
 type Engine = Grid;
+type Name<F extends Fields, C extends string> = Extract<keyof F, string> | C;
+
 
 function readCell(cell: unknown): Cell {
   if (cell !== null && typeof cell === "object") return { error: String((cell as { e: unknown }).e) };
@@ -121,6 +138,7 @@ export class Table<F extends Fields = Fields, C extends string = string> {
   #waiting = false;
   #scheduled = false;
   #columnsChanged = true;
+  #viewChanged = false;
   #disposed = false;
 
   constructor(spec: TableSpec<F, C>);
@@ -286,6 +304,45 @@ export class Table<F extends Fields = Fields, C extends string = string> {
     }
   }
 
+  // ------------------------------------------------------------- the view
+
+  /**
+   * Sorts the rows by these columns, the first mattering most; `[]` for the
+   * order they came in. A grid drawing the table shows it.
+   */
+  sort(by: { column: Name<F, C>; desc?: boolean }[]): void {
+    this.engine.set_sort(by.map((s) => `${this.#col(s.column)}:${s.desc ? "desc" : "asc"}`).join(","));
+    this.#shaped();
+  }
+
+  /** Filters a column: `>100`, `5..10`, `=Rates`, `=Rates|FX`, or text to find; `""` for none. */
+  filter(column: Name<F, C>, text: string): void {
+    this.engine.set_filter(this.#col(column), text);
+    this.#shaped();
+  }
+
+  /** Shows only rows whose key or a text cell has this text; `""` for all. */
+  search(text: string): void {
+    this.engine.set_quick_filter(text);
+    this.#shaped();
+  }
+
+  /** Groups the rows by a text column, or not at all for `null`. */
+  group(column: Name<F, C> | null): void {
+    this.engine.set_group(column === null ? -1 : this.#col(column));
+    this.#shaped();
+  }
+
+  /** How the rows are shaped now: sort, filters, search and grouping. */
+  viewState(): ViewState {
+    return viewStateOf(this.engine.view_state(), this.#names);
+  }
+
+  #shaped(): void {
+    this.#viewChanged = true;
+    this.#changed();
+  }
+
   // ------------------------------------------------------------------- reads
 
   /** A row's cells by column name, or `undefined` if there is no such row. */
@@ -375,8 +432,15 @@ export class Table<F extends Fields = Fields, C extends string = string> {
     this.#waiting = false;
     const started = performance.now();
     const report = JSON.parse(this.engine.update()) as Omit<Change, "columns" | "started" | "ms">;
-    const change: Change = { ...report, columns: this.#columnsChanged, started, ms: performance.now() - started };
+    const change: Change = {
+      ...report,
+      columns: this.#columnsChanged,
+      view: this.#viewChanged,
+      started,
+      ms: performance.now() - started,
+    };
     this.#columnsChanged = false;
+    this.#viewChanged = false;
     for (const watcher of [...this.#watchers]) watcher(change);
     return change;
   }

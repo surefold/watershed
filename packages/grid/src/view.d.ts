@@ -97,7 +97,11 @@ export declare class GridView {
   fitColumn(col: number): void;
   /** Fits every column on screen. */
   fitColumns(): void;
-  /** Sorts by these columns (positions), the first mattering most. */
+  /**
+   * Sorts by these columns (positions), the first mattering most. The sort,
+   * filters, search and grouping are the table's: these set them there, and
+   * the grid follows `table.sort`, `filter`, `search` and `group` too.
+   */
   setSort(sort: { col: number; desc: boolean }[]): void;
   /** Filters a column: `>100`, `5..10`, `=Rates`, or text to look for. */
   setFilter(col: number, text: string): void;

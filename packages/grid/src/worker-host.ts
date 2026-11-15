@@ -56,6 +56,7 @@ function snapshot(change: Change | null): Snapshot {
     totalTrends,
     history,
     groupList: groups > 0 ? JSON.parse(engine.groups()) : [],
+    viewState: engine.view_state(),
     windows: Object.fromEntries([...windows].map(([view, w]) => [view, window(w)])),
   };
 }
