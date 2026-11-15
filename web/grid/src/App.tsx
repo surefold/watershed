@@ -2,7 +2,8 @@
 // @watershed/grid-solid. Everything the page shows comes from the table and
 // from what the view reports; the page adds nothing up itself.
 
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { render } from "solid-js/web";
 import { GroupChart, themes, type Column, type Focus, type GridView, type Layout, type Status, type AnyTable } from "@watershed/grid";
 import { TradeBook } from "@watershed/grid/demo";
 import { Grid } from "@watershed/grid-solid";
@@ -291,6 +292,29 @@ export function App() {
   }
 
   onMount(() => {
+    // The header is in the page's HTML, so it is there before any script runs;
+    // only its stream switch is drawn here.
+    const slot = document.getElementById("pill-slot");
+    if (slot) {
+      onCleanup(
+        render(
+          () => (
+            <button
+              type="button"
+              class="pill"
+              classList={{ on: streaming() }}
+              aria-pressed={streaming()}
+              title="Start or pause the stream of price changes"
+              onClick={() => setStreaming(!streaming())}
+            >
+              <span>{pillText()}</span>
+              <span class="act">{streaming() ? "Pause" : "Stream"}</span>
+            </button>
+          ),
+          slot,
+        ),
+      );
+    }
     chart = new GroupChart(chartBox, { onPick: (key) => view?.revealGroup(key) });
     void build(size());
   });
@@ -305,28 +329,6 @@ export function App() {
 
   return (
     <>
-      <header>
-        <h1>
-          Watershed <span>Grid</span>
-        </h1>
-        <span class="tag">Rust → WebAssembly · Solid</span>
-        <p>
-          A data grid whose rows, formulas, totals, sorting, filtering and grouping all run in WebAssembly on the watershed engine. Every cell
-          is a node, so a change recalculates only the cells and totals that depend on it. <a href="react/">The same table in React.</a>
-        </p>
-        <button
-          type="button"
-          class="pill"
-          classList={{ on: streaming() }}
-          aria-pressed={streaming()}
-          title="Start or pause the stream of price changes"
-          onClick={() => setStreaming(!streaming())}
-        >
-          <span>{pillText()}</span>
-          <span class="act">{streaming() ? "Pause" : "Stream"}</span>
-        </button>
-      </header>
-
       <dl class="stats" aria-label="Last update">
         <div class="stat">
           <dt>Inputs changed</dt>

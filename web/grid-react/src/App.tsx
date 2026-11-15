@@ -66,6 +66,11 @@ export function App() {
   const view = useRef<GridView>(null);
   const [live, setLive] = useState(true);
   const [theme, setTheme] = useState("");
+  // The page takes the grid's theme too: its colours read the grid's tokens.
+  useEffect(() => {
+    if (theme) document.documentElement.dataset.wgTheme = theme;
+    else delete document.documentElement.dataset.wgTheme;
+  }, [theme]);
   const [fx, setFx] = useState(1);
   const [why, setWhy] = useState<{ title: string; text: string } | null>(null);
   const [form, setForm] = useState({ key: "", name: "", sector: "Tech", shares: "100", cost: "50" });
@@ -102,18 +107,7 @@ export function App() {
   }
 
   return (
-    <div className="page" data-wg-theme={theme || undefined}>
-      <header>
-        <h1>
-          Watershed Grid <span>in React</span>
-        </h1>
-        <p>
-          2,000 positions in a <code>Table</code>; <code>&lt;Grid&gt;</code> draws it, and the figures below follow its totals with{" "}
-          <code>useTotal</code>. A price change recalculates that row's value and gain and the totals, nothing else.{" "}
-          <a href="../">The full grid, in Solid.</a>
-        </p>
-      </header>
-
+    <>
       <section className="figures">
         <Figure table={table} column="value" label="Value" />
         <Figure table={table} column="gain" label="Gain" />
@@ -194,6 +188,6 @@ export function App() {
           </div>
         </aside>
       </main>
-    </div>
+    </>
   );
 }
