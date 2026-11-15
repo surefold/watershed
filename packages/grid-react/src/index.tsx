@@ -8,10 +8,10 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
-import { drawGrid, type AnyTable, type Change, type GridOptions, type GridView } from "@surefold/grid";
+import { drawGrid, type AnyGridTable, type AnyTable, type Change, type GridOptions, type GridView } from "@surefold/grid";
 
 export interface GridProps extends Omit<GridOptions, "theme"> {
-  table: AnyTable;
+  table: AnyGridTable;
   theme?: string;
   className?: string;
   style?: CSSProperties;
@@ -86,7 +86,7 @@ export function useTable<T extends AnyTable>(make: () => T): T {
  * recalculation (`peek`), so rendering never sets off a recalculation, and
  * renders again after the next one.
  */
-export function useReading<T>(table: AnyTable, read: (table: AnyTable) => T): T {
+export function useReading<T>(table: AnyGridTable, read: (table: AnyGridTable) => T): T {
   const reader = useRef(read);
   reader.current = read;
   const subscribe = useCallback((changed: () => void) => table.watch(changed), [table]);
@@ -94,12 +94,12 @@ export function useReading<T>(table: AnyTable, read: (table: AnyTable) => T): T 
 }
 
 /** A column's total. */
-export function useTotal(table: AnyTable, column: string): number | null {
+export function useTotal(table: AnyGridTable, column: string): number | null {
   return useReading(table, (t) => t.total(column));
 }
 
 /** The last recalculation of a table; `undefined` until there is one. */
-export function useChange(table: AnyTable): Change | undefined {
+export function useChange(table: AnyGridTable): Change | undefined {
   const [change, setChange] = useState<Change>();
   useEffect(() => table.watch(setChange), [table]);
   return change;

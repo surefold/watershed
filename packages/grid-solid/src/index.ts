@@ -6,10 +6,10 @@
 
 import { createEffect, createSignal, on, onCleanup, type Accessor, type JSX } from "solid-js";
 import { spread } from "solid-js/web";
-import { drawGrid, type AnyTable, type Change, type GridOptions, type GridView } from "@surefold/grid";
+import { drawGrid, type AnyGridTable, type Change, type GridOptions, type GridView } from "@surefold/grid";
 
 export interface GridProps extends Omit<GridOptions, "theme"> {
-  table: AnyTable;
+  table: AnyGridTable;
   theme?: string;
   /** Called with the view once it is drawn, for its methods (grouping, looking back…). */
   ref?: (view: GridView) => void;
@@ -61,20 +61,20 @@ export function Grid(props: GridProps): JSX.Element {
 }
 
 /** The last recalculation of a table, as a signal; `undefined` until there is one. */
-export function createChange(table: AnyTable): Accessor<Change | undefined> {
+export function createChange(table: AnyGridTable): Accessor<Change | undefined> {
   const [change, setChange] = createSignal<Change>();
   onCleanup(table.watch(setChange));
   return change;
 }
 
 /** Follows anything read from a table, such as `(t) => t.total("pnl")`, as a signal. */
-export function createReading<T>(table: AnyTable, read: (table: AnyTable) => T): Accessor<T> {
+export function createReading<T>(table: AnyGridTable, read: (table: AnyGridTable) => T): Accessor<T> {
   const [value, setValue] = createSignal<T>(read(table), { equals: false });
   onCleanup(table.watch(() => setValue(() => read(table))));
   return value;
 }
 
 /** A column's total, as a signal. */
-export function createTotal(table: AnyTable, column: string): Accessor<number | null> {
+export function createTotal(table: AnyGridTable, column: string): Accessor<number | null> {
   return createReading(table, (t) => t.total(column));
 }

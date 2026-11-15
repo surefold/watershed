@@ -46,6 +46,13 @@ Then:
 npm install @surefold/grid @surefold/grid-solid
 ```
 
+## In a worker
+
+`table` can also be a `WorkerTable`, whose engine runs in a Web Worker (see
+[`@surefold/grid`](https://github.com/surefold/watershed/tree/main/packages/grid#in-a-worker)).
+The grid and the signals work the same way: totals and counts come from the
+snapshot the worker sends after each recalculation.
+
 ## Grid
 
 Takes the table and every option of [`drawGrid`](https://github.com/surefold/watershed/tree/main/packages/grid#drawgrid), plus
