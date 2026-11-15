@@ -399,6 +399,17 @@ What is taken from somewhere, and what is made up.
   come from. Shares that stopped trading are missing, which flatters the
   market and every rule alike.
 - **`tax_benefit`, `insurance`, `monte_carlo`.** Made up throughout.
+- **`grid_balancing`.** Made up throughout unless given a folder of real
+  readings, which `examples/shared/grid_data.py` fetches from Elexon's
+  [Insights API](https://bmrs.elexon.co.uk): for each unit on Great
+  Britain's grid in each half hour, its final physical notification and its
+  metered volume. Contains BMRS data © Elexon Limited copyright and database
+  right 2025, used under the
+  [BMRS data licence](https://www.elexon.co.uk/bsc/data/balancing-mechanism-reporting-agent/copyright-licence-bmrs-data/).
+  The second reading of each meter and its faults, each party's reserve and
+  how far the weather moves wind and demand are still made up, so parties
+  are numbered and not named. Metered against notified is not how the
+  market settles a party's imbalance.
 
 ## Running the examples
 
@@ -422,6 +433,15 @@ against its reserve is kept up to date, and the day is then run again under
 
 ```bash
 cargo run --release --example grid_balancing -- 1000000 400    # a million readings for 400 parties
+```
+
+It also runs on a real week: what every unit on Great Britain's grid told
+the operator it would do and what was metered, from Elexon. The data is
+fetched, not kept here:
+
+```bash
+python3 examples/shared/grid_data.py /path/to/data             # a week, about 690,000 readings
+cargo run --release --example grid_balancing -- /path/to/data
 ```
 
 `liabilities` and `capital` need the reference model's tables and answers.

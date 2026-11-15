@@ -9,7 +9,13 @@
 //!
 //! and with `--features cuda` the weather scenarios at the end run on a GPU.
 //! The arguments are how many readings (a metering point in a half hour) and
-//! how many parties.
+//! how many parties. Given a folder instead, it reads real readings from it:
+//!
+//!     python3 crates/watershed-gpu/examples/shared/grid_data.py /path/to/data
+//!     cargo run --release -p watershed-gpu --example grid_balancing -- /path/to/data
+//!
+//! which is a week of Great Britain's grid: for every unit in every half
+//! hour, what it told the operator it would do and what was metered.
 //!
 //! It is three questions asked of one model:
 //!
@@ -22,11 +28,25 @@
 //!   cannot make up is uncovered, and the operator has to find it.
 //! - **What if the weather turns?** Wind moves what generators put in and
 //!   cold moves what suppliers take out. The same model as a plan, over
-//!   many days of weather, says how far out the system gets.
+//!   many kinds of weather, says how far out the system gets.
 //!
-//! Volumes are in MWh and there are no prices. Everything is made up: the
-//! parties, the readings, the faults and the weather. It follows no real
-//! market's rules.
+//! Volumes are in MWh and there are no prices. Without a folder everything
+//! is made up: the parties, the readings, the faults and the weather. With
+//! one, what each unit notified and what was metered are real (Elexon's
+//! data), and these are still made up:
+//!
+//! - the second reading of each meter. Nobody publishes two readings of one
+//!   point, so the party's reading is the real one and the operator's is that
+//!   with the faults put in;
+//! - each party's reserve, which is not public;
+//! - how far the weather moves a wind farm or a supplier's demand.
+//!
+//! So the parties are numbered, not named: a shortfall worked out from a
+//! made-up reserve should not be put on a real company. What a unit is out
+//! by here is its metered volume against its notification, which is not how
+//! the market settles: that is against what a party contracted, and the
+//! operator's own instructions move units away from what they notified.
+//! It follows no real market's rules.
 
 use std::time::Instant;
 
@@ -56,6 +76,28 @@ enum Fault {
     Drift,
 }
 
+/// What a metering point is, for the weather: wind moves a wind farm and
+/// cold moves demand.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Wind,
+    Demand,
+    Other,
+}
+
+/// A metering point in a half hour: whose it is, what was nominated for it
+/// in MWh (in is positive, out is negative), and what actually flowed.
+struct Point {
+    party: usize,
+    kind: Kind,
+    nominated: f64,
+    flowed: f64,
+}
+
+/// A wind farm's output moves in proportion to the wind, and demand rises
+/// by this share for each degree colder. Both are made up.
+const DEMAND_PER_DEGREE: f64 = 0.01;
+
 /// What is wrong with reading `i`, if anything: decided by its number, so
 /// the counts expected at the end are known.
 fn fault(i: usize) -> Fault {
@@ -78,24 +120,79 @@ fn generates(p: usize) -> bool {
     p % 3 == 0
 }
 
-/// Reading `i`: whose point it is, what was nominated for it in MWh (in is
-/// positive, out is negative), and what actually flowed.
-fn flow(i: usize, parties: usize) -> (usize, f64, f64) {
+/// Made-up reading `i`. One in eight of a generator's points is a wind farm.
+fn made_up(i: usize, parties: usize) -> Point {
     let p = (i * 7 + i / parties) % parties;
     let size = 0.2 + ((i * 7919) % 4000) as f64 / 1000.0;
     let nominated = if generates(p) { 2.0 * size } else { -size };
     // Each party is a little out, some more than others and some the other way.
     let out = ((p * 53) % 21) as f64 / 10.0 - 1.0;
-    (p, nominated, nominated * (1.0 + 0.012 * out))
+    Point {
+        party: p,
+        kind: match (generates(p), i % 8) {
+            (true, 0) => Kind::Wind,
+            (true, _) => Kind::Other,
+            (false, _) => Kind::Demand,
+        },
+        nominated,
+        flowed: nominated * (1.0 + 0.012 * out),
+    }
+}
+
+/// Real readings, as `shared/grid_data.py` writes them, and how many parties
+/// they are for. A party's number is its place among the names in order.
+fn real(path: &str) -> Result<(Vec<Point>, usize)> {
+    let path = std::path::Path::new(path);
+    let file = match path.is_dir() {
+        true => path.join("readings.csv"),
+        false => path.to_path_buf(),
+    };
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut names: Vec<&str> = text
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split(',').nth(3))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut points = Vec::new();
+    for line in text.lines().skip(1) {
+        let cells: Vec<&str> = line.split(',').collect();
+        let [_, _, _, name, kind, notified, metered] = cells[..] else {
+            return Err(format!("not a reading: {line}").into());
+        };
+        points.push(Point {
+            party: names.binary_search(&name).expect("a party"),
+            kind: match kind {
+                "wind" => Kind::Wind,
+                "demand" => Kind::Demand,
+                _ => Kind::Other,
+            },
+            nominated: notified.parse()?,
+            flowed: metered.parse()?,
+        });
+    }
+    Ok((points, names.len()))
 }
 
 /// What the operator's meter says for reading `i`, with its fault in it.
-fn as_operator_reads(i: usize, parties: usize) -> f64 {
-    let flowed = flow(i, parties).2;
+fn as_operator_reads(i: usize, flowed: f64) -> f64 {
     match fault(i) {
         Fault::Disagree => flowed * 0.9,
         Fault::Drift => flowed * 1.003,
         _ => flowed,
+    }
+}
+
+/// The state reading `i` should end in. A fault in what a meter says shows
+/// only where something flowed.
+fn should_be(i: usize, flowed: f64) -> &'static str {
+    match (fault(i), flowed != 0.0) {
+        (Fault::NoParty, _) => "no reading from the party",
+        (Fault::NoOperator, _) => "no reading from the operator",
+        (Fault::Disagree, true) => "meters disagree",
+        (Fault::Drift, true) => "within tolerance",
+        _ => "agreed",
     }
 }
 
@@ -115,18 +212,18 @@ fn reading(
     readings: &mut Collection,
     f: &Meters,
     i: usize,
-    parties: usize,
+    point: &Point,
     from_party: bool,
 ) -> Result<()> {
     let key = format!("R{i:08}");
-    let (p, nominated, flowed) = flow(i, parties);
-    let operator = as_operator_reads(i, parties);
+    let flowed = point.flowed;
+    let operator = as_operator_reads(i, flowed);
     let row = match (from_party, readings.contains(&key)) {
         (true, true) => vec![f.by_party.is(flowed), f.party_read.is(true)],
         (false, true) => vec![f.by_operator.is(operator), f.operator_read.is(true)],
         (from_party, false) => vec![
-            f.party.is(party(p)),
-            f.nominated.is(nominated),
+            f.party.is(party(point.party)),
+            f.nominated.is(point.nominated),
             f.by_party.is(if from_party { flowed } else { 0.0 }),
             f.party_read.is(from_party),
             f.by_operator.is(if from_party { 0.0 } else { operator }),
@@ -161,9 +258,25 @@ fn main() -> Result<()> {
         None => otherwise,
     };
     let mut args = std::env::args().skip(1);
-    let count = number(args.next(), 1_000_000);
-    let parties = number(args.next(), 400);
+    let first = args.next();
+    let from = first
+        .clone()
+        .filter(|arg| arg.replace('_', "").parse::<usize>().is_err());
+    let (points, parties) = match &from {
+        Some(folder) => real(folder)?,
+        None => {
+            let count = number(first, 1_000_000);
+            let parties = number(args.next(), 400);
+            ((0..count).map(|i| made_up(i, parties)).collect(), parties)
+        }
+    };
+    let count = points.len();
     assert!(parties >= 10, "at least ten parties");
+    if let Some(folder) = &from {
+        println!(
+            "real readings from {folder}: what each unit notified and what was metered. Contains BMRS data © Elexon Limited copyright and database right 2025."
+        );
+    }
 
     let mut g = Graph::new();
     // Two meters may differ by this share of the reading and still agree.
@@ -220,13 +333,20 @@ fn main() -> Result<()> {
     let imbalance = readings.group_sum(&mut g, "imbalance_by_party", f.party, out)?;
 
     // What each party usually ends a day out by: the day below without its
-    // faults, which is what its reserve was sized for.
+    // faults, which is what its reserve was sized for. And how much of what
+    // it nominated is wind, and how much is demand.
     let mut usually = vec![0.0f64; parties];
     let mut volume = vec![0.0f64; parties];
-    for i in 0..count {
-        let (p, nominated, flowed) = flow(i, parties);
-        usually[p] += flowed - nominated;
-        volume[p] += nominated.abs();
+    let mut wind_volume = vec![0.0f64; parties];
+    let mut demand_volume = vec![0.0f64; parties];
+    for point in &points {
+        usually[point.party] += point.flowed - point.nominated;
+        volume[point.party] += point.nominated.abs();
+        match point.kind {
+            Kind::Wind => wind_volume[point.party] += point.nominated,
+            Kind::Demand => demand_volume[point.party] += point.nominated.abs(),
+            Kind::Other => {}
+        }
     }
 
     // ---- the day: each side's readings arrive in batches, in turn
@@ -244,7 +364,7 @@ fn main() -> Result<()> {
             for i in (batch * per_batch..((batch + 1) * per_batch).min(count))
                 .filter(|&i| fault(i) != absent)
             {
-                reading(&mut g, &mut readings, &f, i, parties, from_party)?;
+                reading(&mut g, &mut readings, &f, i, &points[i], from_party)?;
             }
             g.stabilize();
             slowest = slowest.max(began.elapsed().as_secs_f64());
@@ -263,16 +383,14 @@ fn main() -> Result<()> {
                     .expect("a party");
                 // Made up: a reserve sized for what the party is usually out
                 // by, some more amply than others, and how much the weather
-                // moves it. Wind moves generators; cold moves suppliers.
+                // moves it. Its wind farms put in more or less with the wind,
+                // and its demand takes out more in the cold.
                 let spread = ((p * 37) % 100) as f64 / 100.0;
                 let reserve = g.input(
                     &format!("{name}_reserve_mwh"),
                     usual.abs() * (0.9 + 0.4 * spread) + traded * 0.001,
                 )?;
-                let (windy, cold) = match generates(p) {
-                    true => (traded * 0.04 * (0.5 + spread), 0.0),
-                    false => (0.0, traded * 0.004 * (0.5 + spread)),
-                };
+                let (windy, cold) = (wind_volume[p], demand_volume[p] * DEMAND_PER_DEGREE);
                 let position = g.define(
                     &format!("{name}_position_mwh"),
                     metered_out + windy * wind - cold * colder,
@@ -332,7 +450,7 @@ fn main() -> Result<()> {
     };
     let (how_many, lacking, net) = position(&g)?;
     println!(
-        "read at the end of the day in {:.0} µs:",
+        "read once it is all in, in {:.0} µs:",
         began.elapsed().as_secs_f64() * 1e6
     );
     for (key, in_state, gap) in &rows {
@@ -344,18 +462,24 @@ fn main() -> Result<()> {
         net.abs()
     );
     // Against what was put in.
-    let expected = |wanted: Fault| (0..count).filter(|&i| fault(i) == wanted).count() as i64;
+    let expected = |wanted: &str| {
+        points
+            .iter()
+            .enumerate()
+            .filter(|(i, point)| should_be(*i, point.flowed) == wanted)
+            .count() as i64
+    };
     let found = |rows: &[(String, i64, f64)], key: &str| {
         rows.iter().find(|r| r.0 == key).map_or(0, |r| r.1)
     };
-    for (key, kind) in [
-        ("no reading from the operator", Fault::NoOperator),
-        ("no reading from the party", Fault::NoParty),
-        ("meters disagree", Fault::Disagree),
-        ("within tolerance", Fault::Drift),
-        ("agreed", Fault::None),
+    for key in [
+        "no reading from the operator",
+        "no reading from the party",
+        "meters disagree",
+        "within tolerance",
+        "agreed",
     ] {
-        assert_eq!(found(&rows, key), expected(kind), "{key}");
+        assert_eq!(found(&rows, key), expected(key), "{key}");
     }
     println!("  checked: each count is the number of readings given that fault");
 
@@ -374,14 +498,14 @@ fn main() -> Result<()> {
 
     // ---- after the end of the day: the operator reads a meter again, one at a time
     let wrong: Vec<usize> = (0..count)
-        .filter(|&i| fault(i) == Fault::Disagree)
+        .filter(|&i| should_be(i, points[i].flowed) == "meters disagree")
         .take(1_000)
         .collect();
     let began = Instant::now();
     let mut recalculated = 0;
     for &i in &wrong {
         let key = format!("R{i:08}");
-        readings.upsert(&mut g, &key, &[f.by_operator.is(flow(i, parties).2)])?;
+        readings.upsert(&mut g, &key, &[f.by_operator.is(points[i].flowed)])?;
         recalculated += g.stabilize().recalculated;
     }
     println!(
@@ -417,7 +541,7 @@ fn main() -> Result<()> {
     g.check_consistency().map_err(CalcError::Invalid)?;
     println!("checked: every total matches adding the rows up from scratch");
 
-    // ---- what if the weather turns: the same model as a plan, over many days
+    // ---- what if the weather turns: the same model as a plan, over many kinds of it
     let scenarios = 200_000;
     let outputs: [NodeId; 3] = [total_uncovered.id(), parties_uncovered.id(), system.id()];
     let began = Instant::now();
@@ -450,19 +574,19 @@ fn main() -> Result<()> {
         sorted[((scenarios as f64 * share) as usize).min(scenarios - 1)]
     };
     println!(
-        "{scenarios} days of weather on {on}: plan of {} calculations made in {:.0} ms, run in {:.0} ms",
+        "{scenarios} weather scenarios on {on}: plan of {} calculations made in {:.0} ms, run in {:.0} ms",
         plan.nodes(),
         planned.as_secs_f64() * 1e3,
         ran.as_secs_f64() * 1e3
     );
     println!(
-        "  uncovered between the parties: {:.0} MWh on a middling day, {:.0} on one day in ten, {:.0} on one in a hundred",
+        "  uncovered between the parties: {:.0} MWh in a middling one, {:.0} in one in ten, {:.0} in one in a hundred",
         at(&lacking, 0.5),
         at(&lacking, 0.9),
         at(&lacking, 0.99)
     );
     println!(
-        "  the system is out by {:.0} MWh on a middling day, {:.0} on one day in ten, {:.0} on one in a hundred: what the operator has to be able to call on",
+        "  the system is out by {:.0} MWh in a middling one, {:.0} in one in ten, {:.0} in one in a hundred: what the operator has to be able to call on",
         at(&out_by, 0.5),
         at(&out_by, 0.9),
         at(&out_by, 0.99)
