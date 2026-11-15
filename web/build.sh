@@ -2,6 +2,7 @@
 # Builds the interactive demo into web/dist, and the grid into web/dist/grid.
 #
 #   cargo install wasm-bindgen-cli --version 0.2.130   # once
+#   Node 20 or later, for npm                           # once
 #   rustup target add wasm32-unknown-unknown            # once
 #   web/build.sh
 #   python3 -m http.server -d web/dist 8000             # then open http://localhost:8000
@@ -26,10 +27,13 @@ wasm-bindgen --target web --no-typescript --out-dir web/dist/pkg \
   printf '\n</body>\n</html>\n'
 } > web/dist/index.html
 
-# The grid: its page, the script that draws it, and the engine.
-mkdir -p web/dist/grid/pkg
-wasm-bindgen --target web --no-typescript --out-dir web/dist/grid/pkg \
+# The grid's engine goes into the @watershed/grid package, with its types and
+# with memory freed when a table is garbage collected (--weak-refs). Then Vite
+# builds the Solid page into dist/grid and the React example into dist/grid/react.
+wasm-bindgen --target web --weak-refs --out-dir packages/grid/pkg \
   target/wasm32-unknown-unknown/release/watershed_grid.wasm
-cp web/grid/index.html web/grid/grid.js web/grid/chart.js web/grid/grid.css web/dist/grid/
+npm ci --no-audit --no-fund
+npm run build --workspace web/grid
+npm run build --workspace web/grid-react
 
-ls -la web/dist web/dist/pkg web/dist/grid web/dist/grid/pkg
+ls -la web/dist web/dist/pkg web/dist/grid web/dist/grid/assets web/dist/grid/react

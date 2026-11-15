@@ -1124,3 +1124,16 @@ fn a_block_of_cells_can_be_copied_added_up_and_filled() {
     // Lines: APAC, o-4, EU, o-1, o-3, ...
     assert_eq!(t.range_tsv(0, 4, &[QTY]), "3\n2\n");
 }
+
+#[test]
+fn one_row_can_be_read_by_its_key_and_a_removed_row_is_gone() {
+    let mut t = orders();
+    assert_eq!(t.row_json("o-1").as_deref(), Some(r#"["EU",2,10,20]"#));
+    t.set_cell("o-1", QTY, "3").unwrap();
+    t.update();
+    assert_eq!(t.row_json("o-1").as_deref(), Some(r#"["EU",3,10,30]"#));
+    t.remove("o-1").unwrap();
+    t.update();
+    assert_eq!(t.row_json("o-1"), None);
+    assert_eq!(t.row_json("nobody"), None);
+}

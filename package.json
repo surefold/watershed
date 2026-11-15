@@ -1,0 +1,14 @@
+{
+  "name": "watershed-web",
+  "private": true,
+  "description": "The grid's JavaScript packages and the pages that use them. The Rust is in crates/.",
+  "workspaces": [
+    "packages/*",
+    "web/grid",
+    "web/grid-react"
+  ],
+  "scripts": {
+    "build": "web/build.sh",
+    "check": "npm run check --workspaces --if-present"
+  }
+}

@@ -1057,6 +1057,21 @@ impl Table {
         (col < self.cols.len()).then(|| self.g.value(self.nodes[row * self.cols.len() + col]))
     }
 
+    /// A row's cells as of the last update, as a JSON array in column order
+    /// (cells written as in [`Table::rows_json`]), or `None` if there is no such row.
+    pub fn row_json(&self, key: &str) -> Option<String> {
+        let row = *self.index.get(key)?;
+        let mut out = String::from("[");
+        for col in 0..self.cols.len() {
+            if col > 0 {
+                out.push(',');
+            }
+            write_value(&mut out, self.cell(row, col));
+        }
+        out.push(']');
+        Some(out)
+    }
+
     // --------------------------------------------------------------- view
 
     /// Sorts by these columns, the first mattering most; `true` is descending.

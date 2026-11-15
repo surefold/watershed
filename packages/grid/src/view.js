@@ -1,11 +1,10 @@
-// Draws a watershed grid. The rows, calculated columns, totals, filtering,
-// sorting and grouping all live in WebAssembly (crates/watershed-grid); this
+// Draws a watershed table as a grid. The rows, calculated columns, totals,
+// filtering, sorting and grouping all live in the table (WebAssembly); this
 // file only draws the lines in view and passes on what the person does.
 //
-//   const view = new WatershedGrid(element, grid, { keyTitle: "trade" });
-//   grid.set_cell("T-000001", 4, "500");
-//   view.refresh();          // apply changes and redraw
-//   view.setTheme("dark");   // one of WatershedGrid.themes (see grid.css)
+//   const view = drawGrid(element, table, { keyColumn: { title: "trade" } });
+//   table.set("T-000001", "qty", 500);   // the view redraws by itself
+//   view.setTheme("dark");                // one of themes (see grid.css)
 //
 // A column is known by its position in the engine (0, 1, 2…). On screen the
 // key column comes first, then pinned columns, then the rest, in whatever
@@ -23,47 +22,39 @@ function el(tag, className, text) {
   return node;
 }
 
-export class WatershedGrid {
-  /** The themes grid.css has, for a list to choose from. "" takes the page's colours. */
-  static themes = [
-    { id: "", name: "Match the page" },
-    { id: "light", name: "Light" },
-    { id: "dark", name: "Dark" },
-    { id: "paper", name: "Paper" },
-    { id: "dusk", name: "Dusk" },
-    { id: "terminal", name: "Terminal" },
-    { id: "contrast", name: "High contrast" },
-  ];
+/** The themes grid.css has, for a list to choose from. "" takes the page's colours. */
+export const themes = [
+  { id: "", name: "Match the page" },
+  { id: "light", name: "Light" },
+  { id: "dark", name: "Dark" },
+  { id: "paper", name: "Paper" },
+  { id: "dusk", name: "Dusk" },
+  { id: "terminal", name: "Terminal" },
+  { id: "contrast", name: "High contrast" },
+];
 
-  /**
-   * @param {HTMLElement} root an element with a height
-   * @param grid the WebAssembly `Grid`
-   * @param options
-   *   rowHeight, keyTitle, keyWidth, label (what a screen reader calls the grid),
-   *   theme: one of `WatershedGrid.themes`' ids, or the name of a theme of
-   *     your own (a `[data-wg-theme="name"]` rule); the page's colours if not given,
-   *   formats: { column: { decimals, signed, width, trend } }
-   *     (`trend` draws how the cell moved over recent updates; needs `grid.keep_history`),
-   *   loadMore: async () => boolean, called as the person nears the end: add
-   *     rows to the grid and resolve to whether there may be more,
-   *   onStatus(status), onFocus(focus), onError(message), onNote(message),
-   *   onGroup(col), onColumns() (a column's total was changed from its menu)
-   */
-  constructor(root, grid, options = {}) {
+/** Draws `table` into `root` (an element with a height). See `GridOptions` in index.d.ts. */
+export function drawGrid(root, table, options) {
+  return new GridView(root, table, options);
+}
+
+export class GridView {
+
+  constructor(root, table, options = {}) {
     this.root = root;
-    this.grid = grid;
+    this.table = table;
+    this.grid = table.engine;
     this.rowH = options.rowHeight ?? 32;
-    this.keyTitle = options.keyTitle ?? "key";
-    this.keyWidth = options.keyWidth ?? 176;
+    this.keyTitle = options.keyColumn?.title ?? "key";
+    this.keyWidth = options.keyColumn?.width ?? 176;
     this.label = options.label ?? "Data grid";
     this.theme = options.theme ?? "";
-    this.formats = options.formats ?? {};
+    this.formats = options.columns ?? {};
     this.loadMore = options.loadMore ?? null;
     this.onStatus = options.onStatus ?? (() => {});
     this.onFocus = options.onFocus ?? (() => {});
     this.onGroup = options.onGroup ?? (() => {});
     this.onNote = options.onNote ?? (() => {});
-    this.onColumns = options.onColumns ?? (() => {});
     this.onError = options.onError ?? ((message) => console.warn(message));
 
     this.cols = [];
@@ -92,7 +83,10 @@ export class WatershedGrid {
     this.destroyed = false;
 
     this.build();
-    this.columnsChanged();
+    this.readColumns();
+    // Whatever changes the table, here or anywhere else, redraws the view.
+    this.unwatch = table.watch((change) => this.redraw(change));
+    this.refresh();
   }
 
   // ------------------------------------------------------------- structure
@@ -163,15 +157,17 @@ export class WatershedGrid {
   }
 
   destroy() {
+    if (this.destroyed) return;
     this.destroyed = true;
+    this.unwatch();
     this.closeMenu();
     this.observer.disconnect();
     cancelAnimationFrame(this.frame);
     this.root.replaceChildren();
   }
 
-  /** Call after adding a column: reads the columns again and redraws everything. */
-  columnsChanged() {
+  /** Reads the table's columns again: after one was added, or its total changed. */
+  readColumns() {
     this.cols = JSON.parse(this.grid.columns());
     for (let col = this.order.length; col < this.cols.length; col++) this.order.push(col);
     this.numbers = this.cols.map((c) => {
@@ -183,7 +179,6 @@ export class WatershedGrid {
       this.widths[pos] = pos === 0 ? this.keyWidth : (this.formats[col.name]?.width ?? (col.kind === "number" ? 112 : 124));
     }
     this.rebuildColumns();
-    this.refresh();
   }
 
   isPinned(pos) {
@@ -489,7 +484,7 @@ export class WatershedGrid {
   }
 
   /** Column order, pins, hidden columns and widths, by column name, to keep and give back. */
-  getState() {
+  getLayout() {
     const name = (col) => this.cols[col].name;
     return {
       order: this.order.map(name),
@@ -499,7 +494,7 @@ export class WatershedGrid {
     };
   }
 
-  setState(state) {
+  setLayout(state) {
     const find = (name) => this.cols.findIndex((c) => c.name === name);
     const known = (names) => (names ?? []).map(find).filter((col) => col >= 0);
     const order = known(state.order);
@@ -596,8 +591,8 @@ export class WatershedGrid {
         } catch (error) {
           return this.onError(error.message);
         }
-        this.columnsChanged();
-        this.onColumns();
+        this.table.columnsChanged();
+        this.refresh();
       });
       chips.append(chip);
     }
@@ -765,14 +760,19 @@ export class WatershedGrid {
 
   // ---------------------------------------------------------------- drawing
 
-  /** Applies every change made to the grid since the last call, and redraws. */
+  /** Recalculates the table now (rather than at the end of this task) and redraws. */
   refresh() {
-    const started = performance.now();
-    const report = JSON.parse(this.grid.update());
+    return this.table.flush();
+  }
+
+  /** Draws what a recalculation of the table changed. */
+  redraw(report) {
+    if (this.destroyed) return;
+    if (report.columns) this.readColumns();
     this.draw();
     this.onStatus({
       ...report,
-      ms: performance.now() - started,
+      ms: performance.now() - report.started,
       rows: this.grid.row_count(),
       filtered: this.grid.filtered_count(),
       groups: this.grid.group_count(),
