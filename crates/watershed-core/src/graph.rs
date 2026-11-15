@@ -198,14 +198,15 @@ impl RowNames {
 
     /// Records that node `id` is `row`. Rows' nodes come one after another.
     fn push(&mut self, id: u32, row: RowName) {
-        if let Some(run) = self.runs.last_mut()
-            && run.family == row.family
-            && run.slot == row.slot
-            && run.first + run.len == id
-            && run.first_part + run.len == row.part
-        {
-            run.len += 1;
-            return;
+        if let Some(run) = self.runs.last_mut() {
+            if run.family == row.family
+                && run.slot == row.slot
+                && run.first + run.len == id
+                && run.first_part + run.len == row.part
+            {
+                run.len += 1;
+                return;
+            }
         }
         let family = &mut self.families[row.family as usize];
         let slot = row.slot as usize;
@@ -227,10 +228,10 @@ impl Names {
     fn get(&self, id: NodeId) -> Cow<'_, str> {
         let i = id.index();
         let (from, to) = (self.starts[i] as usize, self.starts[i + 1] as usize);
-        if from == to
-            && let Some(name) = self.rows.name(id.0)
-        {
-            return Cow::Owned(name);
+        if from == to {
+            if let Some(name) = self.rows.name(id.0) {
+                return Cow::Owned(name);
+            }
         }
         Cow::Borrowed(&self.text[from..to])
     }
