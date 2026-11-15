@@ -310,8 +310,11 @@ that and checks the answers put together against one run: for the insurance
 book on 10,000 paths they were the same to the last bit with two and with
 four workers (one run of each). The workers there share one GPU, so it took
 longer, 24.4 s and 41.2 s against 11.2 to 11.7 s: it shows the answers
-agree, not a speed-up. Nothing here has been run on more than one machine
-or more than one GPU.
+agree, not a speed-up. With a GPU for each worker it is one: the cluster in
+[watershed-jvm](https://github.com/surefold/watershed-jvm) ran 2,000,000
+paths in 2 min 43 s on eight A100s against 18 min 46 s on one
+([the study](https://surefold.dev/bench/watershed-cluster/)). Nothing has
+been run on more than one machine.
 
 `Kept::patch` does the same for bringing a run up to date. It gives the
 small plan and which kept values it reads and replaces, without the values,
