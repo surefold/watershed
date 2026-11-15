@@ -409,6 +409,8 @@ pub struct Table {
 
     sort: Vec<(usize, bool)>,
     quick: String,
+    /// The quick filter as it was given (`quick` is it in lower case).
+    quick_text: String,
     group_by: Option<usize>,
     /// For each column that has been grouped by, each column's grouping in the collection.
     groupings: HashMap<usize, Vec<[Option<usize>; 3]>>,
@@ -488,6 +490,7 @@ impl Table {
             dead: HashSet::new(),
             sort: Vec::new(),
             quick: String::new(),
+            quick_text: String::new(),
             group_by: None,
             groupings: HashMap::new(),
             copies: Vec::new(),
@@ -1204,7 +1207,8 @@ impl Table {
 
     /// Shows only rows whose key or any text column contains this.
     pub fn set_quick_filter(&mut self, text: &str) {
-        self.quick = text.trim().to_lowercase();
+        self.quick_text = text.trim().to_string();
+        self.quick = self.quick_text.to_lowercase();
         self.structural = true;
     }
 
@@ -1911,6 +1915,37 @@ impl Table {
             out.push_str("]}");
         }
         out.push(']');
+        out
+    }
+
+    /// How the view is shaped, as JSON: `{"sort": [[col, desc]…], "filters":
+    /// {col: text…}, "search": text, "group": col or -1}`, columns by position.
+    pub fn view_state_json(&self) -> String {
+        let mut out = String::from("{\"sort\":[");
+        for (k, &(col, desc)) in self.sort.iter().enumerate() {
+            if k > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "[{col},{desc}]");
+        }
+        out.push_str("],\"filters\":{");
+        let mut first = true;
+        for (col, c) in self.cols.iter().enumerate() {
+            if c.filter_text.is_empty() {
+                continue;
+            }
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            let _ = write!(out, "\"{col}\":{}", json_str(&c.filter_text));
+        }
+        let group = self.group_by.map_or(-1, |col| col as i64);
+        let _ = write!(
+            out,
+            "}},\"search\":{},\"group\":{group}}}",
+            json_str(&self.quick_text)
+        );
         out
     }
 

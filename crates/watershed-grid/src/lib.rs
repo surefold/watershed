@@ -350,6 +350,12 @@ impl Grid {
         self.table.total_trend_json(col as usize, points as usize)
     }
 
+    /// The view's sort, filters, quick filter and grouping, as JSON (see
+    /// [`Table::view_state_json`]).
+    pub fn view_state(&self) -> String {
+        self.table.view_state_json()
+    }
+
     /// The bottom row's totals, as JSON.
     pub fn totals(&self) -> String {
         self.table.totals_json()

@@ -12,7 +12,8 @@
 // they return promises.
 
 import type { Call, FromWorker, Snapshot, ToWorker, Window } from "./protocol.js";
-import type { Cell, Change, Column, ColumnsOf, Fields, Group, Kind, RowOf, TableSpec, Total, ValueOf } from "./table.js";
+import type { Cell, Change, Column, ColumnsOf, Fields, Group, Kind, RowOf, TableSpec, Total, ValueOf, ViewState } from "./table.js";
+import { viewStateOf } from "./table-view.js";
 
 type Name<F extends Fields, C extends string> = Extract<keyof F, string> | C;
 
@@ -180,6 +181,33 @@ export class WorkerTable<F extends Fields = Fields, C extends string = string> {
     const calls = this.#batch!;
     this.#batch = null;
     return this.#calls(calls, true).then(() => undefined);
+  }
+
+  // ------------------------------------------------------------- the view
+
+  /** Sorts the rows (see `Table.sort`), in the worker. */
+  sort(by: { column: Name<F, C>; desc?: boolean }[]): Promise<void> {
+    return this.call("table", "sort", by);
+  }
+
+  /** Filters a column (see `Table.filter`), in the worker. A bad filter rejects. */
+  filter(column: Name<F, C>, text: string): Promise<void> {
+    return this.call("table", "filter", column, text);
+  }
+
+  /** Shows only rows with this text (see `Table.search`), in the worker. */
+  search(text: string): Promise<void> {
+    return this.call("table", "search", text);
+  }
+
+  /** Groups the rows by a text column, or not at all (see `Table.group`), in the worker. */
+  group(column: Name<F, C> | null): Promise<void> {
+    return this.call("table", "group", column);
+  }
+
+  /** How the rows are shaped, as of the last snapshot. */
+  viewState(): ViewState {
+    return viewStateOf(this.#snapshot.viewState, this.columns().map((c) => c.name));
   }
 
   /** Asks the worker to recalculate now rather than at the end of its task. */

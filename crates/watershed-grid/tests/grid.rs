@@ -1188,3 +1188,21 @@ fn a_bad_column_adds_no_rows_at_all() {
     assert_eq!(t.row_count(), 5);
     assert_eq!(t.row_json("o-6"), None);
 }
+
+#[test]
+fn the_views_sort_filters_search_and_grouping_can_be_read_back() {
+    let mut t = orders();
+    assert_eq!(
+        t.view_state_json(),
+        r#"{"sort":[],"filters":{},"search":"","group":-1}"#
+    );
+    t.set_sort(&[(LINE, true), (REGION, false)]).unwrap();
+    t.set_filter(QTY, " >1 ").unwrap();
+    t.set_quick_filter("  Eu ");
+    t.set_group(Some(REGION)).unwrap();
+    t.update();
+    assert_eq!(
+        t.view_state_json(),
+        r#"{"sort":[[3,true],[0,false]],"filters":{"1":">1"},"search":"Eu","group":0}"#
+    );
+}

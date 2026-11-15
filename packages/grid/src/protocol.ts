@@ -55,6 +55,8 @@ export interface Snapshot {
   history: [number, number] | null;
   /** The groups and their totals, when rows are grouped. */
   groupList: unknown[];
+  /** The sort, filters, search and grouping, as the engine gives them. */
+  viewState: string;
   windows: Record<number, Window>;
 }
 

@@ -77,6 +77,14 @@ out from. Also `size`, `columns()`, `groups()`, `totalTrend(column)`,
 `history()`, `csv()`, and `check()`, which compares every node with a full
 recalculation.
 
+**Shaping the rows:** `sort([{ column, desc }])`, `filter(column, text)`
+(`>100`, `5..10`, `=Rates`, `=Rates|FX`, or text to find), `search(text)`
+and `group(column | null)` decide which rows show and in what order, and
+`viewState()` says how they are set now. They are the table's, not a
+grid's: a grid drawing the table shows what is set here, and what someone
+sets from the grid's headers and filter boxes shows here. In a `WorkerTable`
+they run in the worker.
+
 **When it recalculates.** Writes are gathered up and recalculated once, at the
 end of the current task. Reads recalculate first if writes are waiting, so
 they always see what was written, with two exceptions:
@@ -110,7 +118,8 @@ and returns the view. Options:
 | `onStatus`, `onFocus`, `onGroup`, `onError`, `onNote` | What happened: each recalculation and its cost, the cell the person is on, grouping, and messages to show them. |
 
 The view's methods group (`setGroup`, `expandAll`, `revealGroup`), sort and
-filter (`setSort`, `setFilter`, `setQuickFilter`), fit columns to what
+filter (`setSort`, `setFilter`, `setQuickFilter`, the same as the table's
+`group`, `sort`, `filter` and `search`, by column position), fit columns to what
 they show (`fitColumn`, `fitColumns`; people double-click a column's edge),
 look back
 (`setAsOf(epoch)`), explain the focused cell (`explainFocus`), keep and restore
