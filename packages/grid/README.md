@@ -105,7 +105,9 @@ and returns the view. Options:
 | `onStatus`, `onFocus`, `onGroup`, `onError`, `onNote` | What happened: each recalculation and its cost, the cell the person is on, grouping, and messages to show them. |
 
 The view's methods group (`setGroup`, `expandAll`, `revealGroup`), sort and
-filter (`setSort`, `setFilter`, `setQuickFilter`), look back
+filter (`setSort`, `setFilter`, `setQuickFilter`), fit columns to what
+they show (`fitColumn`, `fitColumns`; people double-click a column's edge),
+look back
 (`setAsOf(epoch)`), explain the focused cell (`explainFocus`), keep and restore
 the column layout (`getLayout`, `setLayout`), and `destroy()` it.
 

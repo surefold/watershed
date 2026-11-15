@@ -228,6 +228,11 @@ export class GridView {
       }
       const handle = el("i", "wg-resize");
       handle.addEventListener("pointerdown", (e) => this.resize(e, pos));
+      handle.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        this.fit(pos);
+      });
+      handle.title = "Drag to resize; double-click to fit";
       cell.append(handle);
       this.headRow.append(cell);
       this.headCells[pos] = cell;
@@ -342,6 +347,50 @@ export class GridView {
     }
     this.pinnedWidth = pinnedWidth;
     this.root.style.setProperty("--wg-width", `${total}px`);
+  }
+
+  /**
+   * Sets a column's width to what its header, its total and the rows drawn now
+   * need. Rows out of view are not measured: with a hundred thousand, that
+   * would mean drawing them all.
+   */
+  fit(pos) {
+    const range = document.createRange();
+    const live = [...this.live.values()].map((row) => row._cells[pos]);
+    let widest = 0;
+    for (const cell of [this.headCells[pos], this.footRow._cells[pos], ...live]) {
+      if (!cell?.isConnected) continue;
+      // What the cell holds, from its first glyph to its last, whatever its
+      // width now; the menu button and the resize handle sit over it, so
+      // they don't count, and the header keeps room for the menu button.
+      let [left, right] = [Infinity, -Infinity];
+      for (const node of cell.childNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE && getComputedStyle(node).position === "absolute") continue;
+        range.selectNode(node);
+        const box = range.getBoundingClientRect();
+        if (box.width === 0) continue;
+        left = Math.min(left, box.left);
+        right = Math.max(right, box.right);
+      }
+      if (right < left) continue;
+      const style = getComputedStyle(cell);
+      const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      const menu = cell === this.headCells[pos] ? 28 : 0;
+      widest = Math.max(widest, right - left + padding + menu);
+    }
+    if (widest === 0) return;
+    this.widths[pos] = Math.min(640, Math.max(56, Math.ceil(widest) + 2));
+    this.applyWidths();
+  }
+
+  /** Fits one column's width to what it shows (`col` is its position; -1 for the key column). */
+  fitColumn(col) {
+    this.fit(col + 1);
+  }
+
+  /** Fits every column on screen to what it shows. */
+  fitColumns() {
+    for (const pos of this.display) this.fit(pos);
   }
 
   resize(e, pos) {
@@ -539,6 +588,7 @@ export class GridView {
       menu.append(el("hr"));
       item(this.pinned.has(col) ? "Unpin" : "Pin to the left", () => this.setPinned(col, !this.pinned.has(col)));
       item("Hide column", () => this.setHidden(col, true));
+      item("Fit width", () => this.fit(pos));
       if (info.groupable) {
         if (this.groupCol === col) item("Stop grouping", () => this.setGroup(-1));
         else item(`Group by ${info.name}`, () => this.setGroup(col));
@@ -558,6 +608,7 @@ export class GridView {
       menu.append(label);
     });
     menu.append(el("hr"));
+    item("Fit all columns", () => this.fitColumns());
     item("Reset columns", () => {
       this.order = this.cols.map((_, k) => k);
       this.hidden.clear();

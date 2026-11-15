@@ -138,7 +138,8 @@ group's total as a bar, read directly from the group nodes.
 
 **Columns and rows.** Columns can be dragged into a new order (dragging onto
 the pinned columns pins), pinned to the left, hidden and resized, from each
-header and its menu. Rows can arrive as the user scrolls: give the view a
+header and its menu. Double-clicking a column's edge fits its width to its
+header, its total and the rows on screen. Rows can arrive as the user scrolls: give the view a
 `loadMore` function that adds the next block and returns whether there may
 be more. Rows loaded that way are ordinary rows, so sorting, filters and
 totals cover everything loaded so far.
