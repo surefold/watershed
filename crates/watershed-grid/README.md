@@ -3,7 +3,9 @@
 A data grid built on [watershed-core](../watershed-core/README.md) and
 compiled to WebAssembly. Rows are a collection, so every cell is a node,
 calculated columns are formulas, and totals are aggregates in the graph.
-The page that draws it is in [`web/grid/`](../../web/grid).
+It is used from TypeScript through the packages in
+[`packages/`](../../packages/grid/README.md), and the site's grid page is built
+with them in [`web/grid/`](../../web/grid).
 
 [`watershed-web`](../watershed-web) is the companion crate: the engine
 compiled to WebAssembly behind an interactive page
@@ -22,6 +24,7 @@ there on one thread, as updates do.
 ```bash
 cargo install wasm-bindgen-cli --version 0.2.130   # once
 rustup target add wasm32-unknown-unknown            # once
+# and Node 20 or later, for npm and Vite
 web/build.sh
 python3 -m http.server -d web/dist 8000
 ```
@@ -37,13 +40,14 @@ put the engine in `packages/grid/pkg`).
 
 ## Using it from JavaScript
 
-Three packages in [`packages/`](../../packages), used by the pages in `web/`:
+Three packages in [`packages/`](../../packages), used by the pages in `web/`.
+Each has a README with its whole API:
 
-- `@watershed/grid`: a `Table` that holds the rows and works out formulas
+- [`@watershed/grid`](../../packages/grid/README.md): a `Table` that holds the rows and works out formulas
   and totals, and `drawGrid`, which draws a table. No framework.
-- `@watershed/grid-solid`: `<Grid table={…} />`, and `createTotal` and
+- [`@watershed/grid-solid`](../../packages/grid-solid/README.md): `<Grid table={…} />`, and `createTotal` and
   `createReading`, which follow a table as signals.
-- `@watershed/grid-react`: `<Grid table={…} />`, and the hooks `useTable`,
+- [`@watershed/grid-react`](../../packages/grid-react/README.md): `<Grid table={…} />`, and the hooks `useTable`,
   `useTotal`, `useReading` and `useChange`.
 
 The table holds the data and the grid only draws it. Rows never go through

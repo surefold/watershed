@@ -59,7 +59,8 @@ with its checks and timings.
 - **A spreadsheet, ten million times.** Formulas read from an `.xlsx`
   workbook and run as a plan.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
-  formulas, updated as edits arrive.
+  formulas, updated as edits arrive, as a TypeScript package with components
+  for [Solid](packages/grid-solid) and [React](packages/grid-react).
 
 The [guide](https://surefold.dev/guides/watershed/#applications) has each
 with its figures.
@@ -232,7 +233,9 @@ More in the [Python guide](crates/watershed-py/README.md).
 [watershed-jvm](https://github.com/surefold/watershed-jvm) run a first
 program in each.
 
-**Browser.** To build the WebAssembly module yourself, see the
+**Browser.** The [grid package](packages/grid/README.md) holds rows in a
+`Table` and draws them, with components for Solid and React. To build the
+WebAssembly module and the pages yourself, see the
 [grid README](crates/watershed-grid/README.md#building-and-running).
 
 The [guide](https://surefold.dev/guides/watershed/#example) has the same
@@ -260,7 +263,7 @@ example in every language, with what each prints.
 | Parquet sink | [`crates/watershed-parquet`](crates/watershed-parquet) | Writes each update's changes to Parquet files on a background thread. |
 | Python | [`crates/watershed-py`](crates/watershed-py/README.md) | A PyO3 package over the core. |
 | WebAssembly | [`crates/watershed-web`](crates/watershed-web), [`web/`](web) | The engine behind the playground: updates, and plans on one thread. |
-| Data grid | [`crates/watershed-grid`](crates/watershed-grid/README.md), [`web/grid/`](web/grid) | A browser data grid in which every cell is a graph node. |
+| Data grid | [`crates/watershed-grid`](crates/watershed-grid/README.md), [`packages/`](packages/grid/README.md), [`web/grid/`](web/grid), [`web/grid-react/`](web/grid-react) | A browser data grid in which every cell is a graph node: the engine as WebAssembly, the TypeScript packages (a `Table`, and components for Solid and React), and the pages built with them. |
 | Kotlin and Scala | [surefold/watershed-jvm](https://github.com/surefold/watershed-jvm) | The JVM API, and the experimental cluster that runs a plan's lots across GPUs. |
 
 ### Limitations

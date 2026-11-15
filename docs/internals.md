@@ -108,8 +108,12 @@ crates/watershed-parquet/  a ChangeSink that writes changes to Parquet files
 crates/watershed-py/       Python bindings (PyO3, maturin, uv)
 crates/watershed-web/      the engine as WebAssembly, with preset models
 crates/watershed-grid/     the data grid as WebAssembly
+packages/grid/             @watershed/grid: Table (table.ts), the grid's renderer (view.js), stylesheet and chart
+packages/grid-solid/       the grid as a Solid component, and signals that follow a table
+packages/grid-react/       the grid as a React component, and hooks that follow a table
 web/                       the interactive page (demo.html) and build script
-web/grid/                  the grid's page, renderer, stylesheet and chart
+web/grid/                  the grid's own page, a Solid app on the packages
+web/grid-react/            a smaller example in React
 ```
 
 ## Known costs
