@@ -29,7 +29,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::aggregate::{Aggregate, AggregateOp};
 use crate::compile::{
-    FloatOp, GeneralProgram, Program, Scratch, compile, decompile_float, eval_float, float_loads,
+    FloatOp, GeneralProgram, Program, Scratch, compile, decompile_float, eval_float, float_fits,
+    float_loads, float_relative,
 };
 use crate::error::CalcError;
 use crate::expr::IntoExpr;
@@ -424,6 +425,10 @@ pub struct Graph {
     /// Every calculated node, grouped by height, for recalculating everything
     /// in parallel. Built when first needed; cleared when a node is added.
     levels: Option<Vec<Vec<NodeId>>>,
+    /// Programs shared by a collection's rows (see `define_like`): for a
+    /// model node and its program, the shared program that reads each row's
+    /// own nodes by how far before itself they are; `None` if it cannot.
+    shared: HashMap<(u32, u32), Option<u32>>,
     /// Results of recalculating a level in parallel: the new value for each
     /// node whose value changed. Kept between updates to reuse its memory.
     changes: Vec<Outcome>,
@@ -511,6 +516,7 @@ impl Graph {
             deps_scratch: Vec::new(),
             parallel_threshold: DEFAULT_PARALLEL_THRESHOLD,
             levels: None,
+            shared: HashMap::new(),
             changes: Vec::new(),
             changed_ids: Vec::new(),
             redefined: HashSet::new(),
@@ -674,18 +680,17 @@ impl Graph {
             },
             Program::General(program) => {
                 self.general.push(program);
-                self.reads.push(Box::default());
                 let code = u32::try_from(self.general.len() - 1).expect("too many programs");
                 Hot {
                     code,
-                    len: 0,
+                    len: self.new_reads(),
                     height,
                     kind: Kind::General,
                 }
             }
         };
         // Worked out from the values of the last update, like every other node.
-        let value = self.evaluate(hot);
+        let value = self.evaluate(self.next_id(), hot);
         Ok(self.push((name, hash), hot, ty, &deps, value))
     }
 
@@ -710,36 +715,63 @@ impl Graph {
             }
         };
         let model = self.hot[like.index()];
+        let this = self.next_id();
         let mut deps = std::mem::take(&mut self.deps_scratch);
         deps.clear();
-        let mut swapped = |n: u32| {
-            let to = swap(NodeId(n));
-            debug_assert_eq!(self.types[n as usize], self.types[to.index()]);
-            deps.push(to);
-            to.0
-        };
-        let (code, len) = match model.kind {
-            Kind::Float => {
+        // One program for every row: when this row's nodes sit as far before
+        // the new node as the model row's sit before the model, the new node
+        // runs the model's program in its row-relative form instead of a
+        // copy of it (about a hundred bytes a cell, and an allocation for a
+        // general program).
+        let shared = self.shared_program(like, model, this, &swap);
+        let (code, len) = match (shared, model.kind) {
+            (Some(code), Kind::Float) => {
+                let mut reads = Vec::new();
+                float_loads(self.float_program(model), like.0, &mut reads);
+                deps.extend(reads.into_iter().map(&swap));
+                (code, model.len)
+            }
+            (Some(code), Kind::General) => {
+                let mut reads = Vec::new();
+                self.general[model.code as usize].loads(like.0, &mut reads);
+                deps.extend(reads.into_iter().map(&swap));
+                (code, self.new_reads())
+            }
+            (_, Kind::Float) => {
                 let start = self.float_ops.len();
                 let from = model.code as usize;
                 for k in from..from + model.len as usize {
-                    let op = match self.float_ops[k] {
-                        FloatOp::Load(n) => FloatOp::Load(swapped(n)),
-                        other => other,
+                    let read = match self.float_ops[k] {
+                        FloatOp::Load(n) => Some(n),
+                        FloatOp::Rel(back) => Some(like.0 - back),
+                        _ => None,
+                    };
+                    let op = match read {
+                        Some(n) => {
+                            let to = swap(NodeId(n));
+                            debug_assert_eq!(self.types[n as usize], self.types[to.index()]);
+                            deps.push(to);
+                            FloatOp::Load(to.0)
+                        }
+                        None => self.float_ops[k],
                     };
                     self.float_ops.push(op);
                 }
                 let start = u32::try_from(start).expect("too many instructions in one graph");
                 (start, model.len)
             }
-            Kind::General => {
-                let program = self.general[model.code as usize].with_loads(&mut swapped);
+            (_, Kind::General) => {
+                let mut swapped = |n: u32| {
+                    let to = swap(NodeId(n));
+                    deps.push(to);
+                    to.0
+                };
+                let program = self.general[model.code as usize].with_loads(like.0, &mut swapped);
                 self.general.push(program);
-                self.reads.push(Box::default());
                 let code = u32::try_from(self.general.len() - 1).expect("too many programs");
-                (code, 0)
+                (code, self.new_reads())
             }
-            Kind::Input | Kind::Aggregate => {
+            (_, Kind::Input | Kind::Aggregate) => {
                 self.deps_scratch = deps;
                 return Err(CalcError::Invalid(format!(
                     "{:?} has no expression to copy",
@@ -760,10 +792,56 @@ impl Graph {
             height,
             kind: model.kind,
         };
-        let value = self.evaluate(hot);
+        let value = self.evaluate(this, hot);
         let id = self.push(new, hot, self.types[like.index()], &deps, value);
+        debug_assert_eq!(id, this);
         self.deps_scratch = deps;
         Ok(id)
+    }
+
+    /// The model's program in its row-relative form, if node `this` can run
+    /// it and read what a copy with `swap` would read. Made once per model.
+    fn shared_program(
+        &mut self,
+        like: NodeId,
+        model: Hot,
+        this: NodeId,
+        swap: &impl Fn(NodeId) -> NodeId,
+    ) -> Option<u32> {
+        let moves = |n: u32| swap(NodeId(n)).0 != n;
+        let swap = |n: u32| swap(NodeId(n)).0;
+        let key = (like.0, model.code);
+        let code = match self.shared.get(&key) {
+            Some(&made) => made?,
+            None => {
+                let made = match model.kind {
+                    Kind::Float => {
+                        float_relative(self.float_program(model), like.0, &moves).map(|ops| {
+                            let start = self.float_ops.len();
+                            self.float_ops.extend(ops);
+                            u32::try_from(start).expect("too many instructions in one graph")
+                        })
+                    }
+                    Kind::General => self.general[model.code as usize]
+                        .relative(like.0, &moves)
+                        .map(|program| {
+                            self.general.push(program);
+                            u32::try_from(self.general.len() - 1).expect("too many programs")
+                        }),
+                    Kind::Input | Kind::Aggregate => None,
+                };
+                self.shared.insert(key, made);
+                made?
+            }
+        };
+        let fits = match model.kind {
+            Kind::Float => {
+                let ops = &self.float_ops[code as usize..(code + model.len) as usize];
+                float_fits(ops, like.0, this.0, &swap)
+            }
+            _ => self.general[code as usize].fits(like.0, this.0, &swap),
+        };
+        fits.then_some(code)
     }
 
     /// Parses a formula written as text, such as `qty * price * (1 + tax)`,
@@ -878,21 +956,21 @@ impl Graph {
             &mut self.float_ops,
             &mut self.float_consts,
         );
-        // The old program is left where it is, unused (its slot in `general`
-        // is reused when the new one is general too).
+        // The old program is left where it is, unused: other nodes may run
+        // it too (a collection's rows share one). Its slot for what a
+        // dynamic program read is reused when the new one is general too.
         let (code, len, kind) = match program {
             Program::Float { start, len } => (start, len, Kind::Float),
             Program::General(program) => {
-                let code = if old.kind == Kind::General {
-                    self.general[old.code as usize] = program;
-                    self.reads[old.code as usize] = Box::default();
-                    old.code
+                self.general.push(program);
+                let code = u32::try_from(self.general.len() - 1).expect("too many programs");
+                let reads = if old.kind == Kind::General {
+                    self.reads[old.len as usize] = Box::default();
+                    old.len
                 } else {
-                    self.general.push(program);
-                    self.reads.push(Box::default());
-                    u32::try_from(self.general.len() - 1).expect("too many programs")
+                    self.new_reads()
                 };
-                (code, 0, Kind::General)
+                (code, reads, Kind::General)
             }
         };
         let height = deps
@@ -1096,12 +1174,24 @@ impl Graph {
         self.last_user[n] = edge;
     }
 
+    /// The id the next node will have.
+    fn next_id(&self) -> NodeId {
+        NodeId(u32::try_from(self.hot.len()).expect("a graph holds at most u32::MAX nodes"))
+    }
+
+    /// A new slot for what a dynamic general program read (a node's `Hot.len`).
+    fn new_reads(&mut self) -> u32 {
+        self.reads.push(Box::default());
+        u32::try_from(self.reads.len() - 1).expect("too many programs")
+    }
+
     #[inline]
-    fn evaluate(&mut self, hot: Hot) -> Value {
+    fn evaluate(&mut self, id: NodeId, hot: Hot) -> Value {
         if hot.kind == Kind::Aggregate {
             return self.aggregates[hot.code as usize].recalculate_everything(&self.values);
         }
         let value = evaluate(
+            id.0,
             hot,
             &self.float_ops,
             &self.float_consts,
@@ -1110,7 +1200,7 @@ impl Graph {
             &mut self.scratch,
         );
         if self.is_dynamic(hot) {
-            self.reads[hot.code as usize] = self.scratch.reads();
+            self.reads[hot.len as usize] = self.scratch.reads();
         }
         value
     }
@@ -1123,7 +1213,7 @@ impl Graph {
     /// read last time changed in this update, so its value cannot change.
     fn reads_unchanged(&self, hot: Hot) -> bool {
         self.is_dynamic(hot)
-            && self.reads[hot.code as usize]
+            && self.reads[hot.len as usize]
                 .iter()
                 .all(|&r| self.changed_in[r as usize] != self.epoch)
     }
@@ -1139,7 +1229,7 @@ impl Graph {
             // Only the members that changed, which marking passed on.
             self.aggregates[hot.code as usize].recalculate(&self.values)
         } else {
-            self.evaluate(hot)
+            self.evaluate(id, hot)
         };
         let change = (!self.values[i].same_as(&new_value)).then_some(new_value);
         self.apply(id, change, report);
@@ -1537,7 +1627,8 @@ impl Graph {
                 {
                     return Outcome::Later;
                 }
-                let new_value = evaluate(h, float_ops, float_consts, general, values, scratch);
+                let new_value =
+                    evaluate(id.0, h, float_ops, float_consts, general, values, scratch);
                 if values[i].same_as(&new_value) {
                     Outcome::Same
                 } else {
@@ -1880,8 +1971,8 @@ impl Graph {
         let mut deps = Vec::new();
         match hot.kind {
             Kind::Input => {}
-            Kind::Float => float_loads(self.float_program(hot), &mut deps),
-            Kind::General => self.general[hot.code as usize].loads(&mut deps),
+            Kind::Float => float_loads(self.float_program(hot), id.0, &mut deps),
+            Kind::General => self.general[hot.code as usize].loads(id.0, &mut deps),
             Kind::Aggregate => {
                 for &(value, present) in &self.aggregates[hot.code as usize].members {
                     deps.push(NodeId(value));
@@ -1901,7 +1992,7 @@ impl Graph {
     pub fn reads(&self, id: NodeId) -> Vec<NodeId> {
         let hot = self.hot[id.index()];
         if self.is_dynamic(hot) {
-            self.reads[hot.code as usize]
+            self.reads[hot.len as usize]
                 .iter()
                 .map(|&r| NodeId(r))
                 .collect()
@@ -1946,8 +2037,9 @@ impl Graph {
                 self.float_program(hot),
                 &self.float_consts,
                 self.id,
+                id.0,
             )),
-            Kind::General => Some(self.general[hot.code as usize].decompile(self.id)),
+            Kind::General => Some(self.general[hot.code as usize].decompile(self.id, id.0)),
             Kind::Aggregate => None,
         }
     }
@@ -2068,7 +2160,7 @@ impl Graph {
             for i in 0..self.hot.len() {
                 let hot = self.hot[i];
                 if hot.kind != Kind::Input {
-                    self.values[i] = self.evaluate(hot);
+                    self.values[i] = self.evaluate(NodeId(i as u32), hot);
                     count += 1;
                 }
             }
@@ -2095,14 +2187,14 @@ impl Graph {
                         Outcome::Same => {}
                         Outcome::Changed(value) => self.values[id.index()] = value,
                         Outcome::Later => {
-                            self.values[id.index()] = self.evaluate(self.hot[id.index()]);
+                            self.values[id.index()] = self.evaluate(id, self.hot[id.index()]);
                         }
                     }
                 }
                 self.changes = changes;
             } else {
                 for &id in level {
-                    self.values[id.index()] = self.evaluate(self.hot[id.index()]);
+                    self.values[id.index()] = self.evaluate(id, self.hot[id.index()]);
                 }
             }
         }
@@ -2215,7 +2307,7 @@ impl Graph {
         let reads = if self.is_dynamic(hot) {
             let mut reads = Vec::new();
             self.general[hot.code as usize]
-                .decompile(self.id)
+                .decompile(self.id, id.0)
                 .reads_given(&|node| self.value_then(node, at).clone(), &mut reads);
             reads.sort();
             reads.dedup();
@@ -2492,6 +2584,7 @@ fn escape(s: &str) -> String {
 /// Recalculates one node from the values of the nodes it uses.
 #[inline]
 fn evaluate(
+    this: u32,
     hot: Hot,
     float_ops: &[FloatOp],
     float_consts: &[f64],
@@ -2507,9 +2600,10 @@ fn evaluate(
                 float_consts,
                 values,
                 scratch,
+                this,
             )
         }
-        Kind::General => general[hot.code as usize].eval(values, scratch),
+        Kind::General => general[hot.code as usize].eval(values, scratch, this),
         Kind::Input => unreachable!("inputs are never recalculated"),
         Kind::Aggregate => unreachable!("aggregates are recalculated by the graph"),
     }
