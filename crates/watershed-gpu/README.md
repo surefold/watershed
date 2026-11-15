@@ -413,6 +413,17 @@ cargo run --release --features cuda --example pensions
 Without `--features cuda` each runs on the CPU, with fewer scenarios unless
 told otherwise.
 
+`grid_balancing` is both ways of running on one model that is not about
+money: the parties on a grid nominate what each metering point will put in
+or take out, every point is read by its owner and by the network operator
+and the two readings reconciled as they arrive, each party's imbalance
+against its reserve is kept up to date, and the day is then run again under
+200,000 days of weather as a plan.
+
+```bash
+cargo run --release --example grid_balancing -- 1000000 400    # a million readings for 400 parties
+```
+
 `liabilities` and `capital` need the reference model's tables and answers.
 `examples/shared/liabilities_reference.py` runs lifelib and writes them:
 
