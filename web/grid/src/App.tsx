@@ -4,7 +4,7 @@
 
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { render } from "solid-js/web";
-import { GroupChart, themes, type Column, type Focus, type GridView, type Layout, type Status, type AnyGridTable } from "@surefold/grid";
+import { GroupChart, themes, type Column, type Focus, type GridView, type Layout, type Status, type AnyGridTable, type ViewState } from "@surefold/grid";
 import { WorkerTradeBook } from "@surefold/grid/demo";
 import { Grid } from "@surefold/grid-solid";
 
@@ -81,6 +81,9 @@ export function App() {
   const [history, setHistory] = createSignal<[number, number]>([0, 0]);
   const [progress, setProgress] = createSignal(0);
   const [fee, setFee] = createSignal(2);
+  // How the table's rows are shaped, as the table says: set from the grid or from code.
+  const [shape, setShape] = createSignal<ViewState>({ sort: [], filters: {}, search: "", group: null });
+  let searchBox!: HTMLInputElement;
 
   let view: GridView | undefined;
   let chart: GroupChart | undefined;
@@ -131,6 +134,12 @@ export function App() {
     if (s.loading !== undefined) setMore({ loading: s.loading, done: Boolean(s.done) });
     if (s.epoch === undefined) return;
     if (s.columns) setColumns(table().columns());
+    if (s.view || s.columns) {
+      const state = table().viewState();
+      setShape(state);
+      // The search box shows the table's search, unless it is being typed in.
+      if (searchBox && searchBox !== document.activeElement) searchBox.value = state.search;
+    }
     drawChart();
     if (lookingBack() === null) setHistory(table().history() ?? [0, 0]);
     setFooter({ rows: s.rows!, filtered: s.filtered!, groups: s.groups!, selected: s.selected! });
@@ -292,6 +301,38 @@ export function App() {
     say(`Deleted ${whole.format(count)} row${count === 1 ? "" : "s"}.`, "good");
   }
 
+  /** The table's sort, filters, search and grouping, in words. */
+  const shapeText = () => {
+    const v = shape();
+    const parts = [
+      ...v.sort.map((s) => `sorted by ${s.column} ${s.desc ? "↓" : "↑"}`),
+      ...Object.entries(v.filters).map(([column, text]) => `${column} ${/^[<>=]|\.\./.test(text) ? text : `has “${text}”`}`),
+      ...(v.search ? [`search “${v.search}”`] : []),
+      ...(v.group ? [`grouped by ${v.group}`] : []),
+    ];
+    return parts.length ? parts.join(" · ") : "as loaded: no sort, filter or grouping";
+  };
+
+  /** Shapes the rows from code, through the table, as an app would; the grid follows. */
+  async function shapeFromCode(preset: "losses" | "rates" | "clear") {
+    const t = table();
+    try {
+      if (preset === "losses") await t.sort([{ column: "net", desc: false }]);
+      if (preset === "rates") {
+        await t.filter("desk", "=Rates");
+        await t.group("trader");
+      }
+      if (preset === "clear") {
+        await t.sort([]);
+        for (const column of Object.keys(t.viewState().filters)) await t.filter(column as "desk", "");
+        await t.search("");
+        await t.group(null);
+      }
+    } catch (error) {
+      say((error as Error).message, "bad");
+    }
+  }
+
   async function check() {
     const started = performance.now();
     const wrong = await table().check();
@@ -374,7 +415,14 @@ export function App() {
 
       <section class="tools" aria-label="Grid controls">
         <div class="bar">
-          <input type="search" class="search" placeholder="Search keys and text…" aria-label="Search keys and text" onInput={(e) => search(e.currentTarget.value)} />
+          <input
+            ref={searchBox}
+            type="search"
+            class="search"
+            placeholder="Search keys and text…"
+            aria-label="Search keys and text"
+            onInput={(e) => search(e.currentTarget.value)}
+          />
           <label>
             Group by{" "}
             <select value={String(group())} onChange={(e) => setGroup(Number(e.currentTarget.value))}>
@@ -415,6 +463,23 @@ export function App() {
           <button onClick={async () => download("watershed-grid.csv", await table().csv(), "text/csv")}>Export CSV</button>
           <button class="check" title="Recalculates every node from scratch and compares with the incremental values." onClick={check}>
             Check against full recalculation
+          </button>
+        </div>
+        <div class="bar view-bar">
+          <span class="view-label">View</span>
+          <span class="view-state" role="status" title="table.viewState(): the sort, filters, search and grouping, whether set in the grid or from code">
+            {shapeText()}
+          </span>
+          <span class="grow" />
+          <span class="view-label">From code</span>
+          <button title={'table.sort([{ column: "net" }])'} onClick={() => void shapeFromCode("losses")}>
+            Biggest losses first
+          </button>
+          <button title={'table.filter("desk", "=Rates"); table.group("trader")'} onClick={() => void shapeFromCode("rates")}>
+            Rates desk, by trader
+          </button>
+          <button title={'table.sort([]); table.filter(…, ""); table.search(""); table.group(null)'} onClick={() => void shapeFromCode("clear")}>
+            Clear
           </button>
         </div>
         <div class="bar">
