@@ -1713,3 +1713,112 @@ fn a_node_given_a_rows_name_before_the_row_exists_stops_the_row_being_made() -> 
     ));
     Ok(())
 }
+
+#[test]
+fn a_collections_rows_share_their_columns_programs_and_each_reads_its_own_row() -> Result {
+    let mut g = Graph::new();
+    let fee = g.input("fee", 0.5)?;
+    let mut trades = Collection::new(&g, "trades");
+    let qty = trades.field::<f64>("qty")?;
+    let price = trades.field::<f64>("price")?;
+    let side = trades.field::<String>("side")?;
+    // Arithmetic, which runs as a float program, and an `if`, which runs as
+    // a general program that records what it read.
+    trades.column(&mut g, "gross", qty * price - fee)?;
+    trades.column(
+        &mut g,
+        "signed",
+        when(side.equals("sell"))
+            .then(-(qty * price))
+            .otherwise(qty * price),
+    )?;
+    for i in 0..6 {
+        let s = if i % 2 == 0 { "buy" } else { "sell" };
+        trades.upsert(
+            &mut g,
+            &format!("t{i}"),
+            &[
+                qty.is(f64::from(i + 1)),
+                price.is(10.0),
+                side.is(s.to_string()),
+            ],
+        )?;
+    }
+    g.stabilize();
+
+    for i in 0..6u32 {
+        let node = |part: &str| g.find(&format!("trades[{i}].{part}")).unwrap();
+        let q = f64::from(i + 1);
+        assert!(
+            g.value(node("gross")).same_as(&Value::F64(q * 10.0 - 0.5)),
+            "row {i}"
+        );
+        let signed = if i % 2 == 0 { q * 10.0 } else { -q * 10.0 };
+        assert!(
+            g.value(node("signed")).same_as(&Value::F64(signed)),
+            "row {i}"
+        );
+        // Each row's cell reads its own row (and the shared input), as a copy would.
+        let mut deps = vec![node("qty"), node("price"), g.find("fee").unwrap()];
+        deps.sort();
+        assert_eq!(g.dependencies(node("gross")), deps, "row {i}");
+        // What the `if` read is kept for each row, not for the program.
+        assert!(g.reads(node("signed")).contains(&node("side")), "row {i}");
+    }
+
+    // A price changes in one row: only that row's cells move.
+    trades.upsert(
+        &mut g,
+        "t4",
+        &[qty.is(5.0), price.is(20.0), side.is("buy".to_string())],
+    )?;
+    g.stabilize();
+    assert!(
+        g.value(g.find("trades[4].gross").unwrap())
+            .same_as(&Value::F64(99.5))
+    );
+    assert!(
+        g.value(g.find("trades[3].gross").unwrap())
+            .same_as(&Value::F64(39.5))
+    );
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn giving_one_rows_cell_a_new_expression_leaves_the_other_rows_on_the_shared_one() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    let price = orders.field::<f64>("price")?;
+    orders.column(&mut g, "line", qty * price)?;
+    for i in 0..4 {
+        orders.upsert(
+            &mut g,
+            &format!("o{i}"),
+            &[qty.is(f64::from(i + 1)), price.is(2.0)],
+        )?;
+    }
+    g.stabilize();
+    let line2 = g.find("orders[2].line").unwrap();
+    let qty2 = g.find("orders[2].qty").unwrap();
+    g.redefine_ir(
+        line2,
+        Ir::Binary(
+            watershed_core::BinOp::Add,
+            std::sync::Arc::new(g.reference(qty2)),
+            std::sync::Arc::new(Ir::Const(Value::F64(100.0))),
+        ),
+    )?;
+    g.stabilize();
+    assert!(g.value(line2).same_as(&Value::F64(103.0)));
+    for (i, line) in [(1, 4.0), (3, 8.0)] {
+        assert!(
+            g.value(g.find(&format!("orders[{i}].line")).unwrap())
+                .same_as(&Value::F64(line)),
+            "row {i}"
+        );
+    }
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}

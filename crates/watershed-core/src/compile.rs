@@ -27,6 +27,9 @@ pub(crate) enum Cmp {
 pub(crate) enum Op {
     /// Push the value of a node.
     Load(u32),
+    /// Push the value of the node this many before the one running the
+    /// program: a program shared by a collection's rows reads its own row.
+    Rel(u32),
     /// Push a constant.
     Const(u32),
     AddF,
@@ -84,6 +87,8 @@ pub(crate) enum Op {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FloatOp {
     Load(u32),
+    /// The node this many before the one running the program (see `Op::Rel`).
+    Rel(u32),
     /// An index into the graph's pool of float constants, which keeps each
     /// instruction to 8 bytes.
     Const(u32),
@@ -125,7 +130,7 @@ impl GeneralProgram {
     /// Evaluates the program. For a dynamic program, `scratch.reads` is left
     /// holding the nodes this evaluation actually read.
     #[inline]
-    pub(crate) fn eval(&self, values: &[Value], scratch: &mut Scratch) -> Value {
+    pub(crate) fn eval(&self, values: &[Value], scratch: &mut Scratch, this: u32) -> Value {
         let reads = if self.dynamic {
             scratch.reads.clear();
             Some(&mut scratch.reads)
@@ -139,6 +144,7 @@ impl GeneralProgram {
             values,
             &mut scratch.values,
             reads,
+            this,
         )
     }
 
@@ -146,22 +152,25 @@ impl GeneralProgram {
         self.dynamic
     }
 
-    /// Every node the program reads (possibly with repeats).
-    pub(crate) fn loads(&self, out: &mut Vec<NodeId>) {
+    /// Every node the program reads (possibly with repeats), run by node `this`.
+    pub(crate) fn loads(&self, this: u32, out: &mut Vec<NodeId>) {
         out.extend(self.ops.iter().filter_map(|op| match op {
             Op::Load(n) => Some(NodeId(*n)),
+            Op::Rel(k) => Some(NodeId(this - k)),
             _ => None,
         }));
     }
 
-    /// The same program reading `swap(n)` wherever this one reads node `n`.
-    pub(crate) fn with_loads(&self, swap: &mut dyn FnMut(u32) -> u32) -> GeneralProgram {
+    /// The same program, as run by node `this`, reading `swap(n)` wherever
+    /// it reads node `n`, every read by its node's number.
+    pub(crate) fn with_loads(&self, this: u32, swap: &mut dyn FnMut(u32) -> u32) -> GeneralProgram {
         GeneralProgram {
             ops: self
                 .ops
                 .iter()
                 .map(|op| match op {
                     Op::Load(n) => Op::Load(swap(*n)),
+                    Op::Rel(k) => Op::Load(swap(this - k)),
                     other => *other,
                 })
                 .collect(),
@@ -171,8 +180,48 @@ impl GeneralProgram {
         }
     }
 
-    /// Rebuilds the expression this program was compiled from.
-    pub(crate) fn decompile(&self, graph: GraphId) -> Ir {
+    /// The same program, as run by node `this`, reading the nodes `moves`
+    /// picks out by how far before `this` they are, so that another node
+    /// can run it and read the nodes as far before itself. `None` if one of
+    /// them is not before `this`.
+    pub(crate) fn relative(
+        &self,
+        this: u32,
+        moves: &dyn Fn(u32) -> bool,
+    ) -> Option<GeneralProgram> {
+        let ops = self
+            .ops
+            .iter()
+            .map(|op| match *op {
+                Op::Load(n) if moves(n) => (n < this).then_some(Op::Rel(this - n)),
+                Op::Rel(_) => None,
+                other => Some(other),
+            })
+            .collect::<Option<Box<[Op]>>>()?;
+        Some(GeneralProgram {
+            ops,
+            constants: self.constants.clone(),
+            tables: self.tables.clone(),
+            dynamic: self.dynamic,
+        })
+    }
+
+    /// Whether node `this` running this program reads what node `model`
+    /// running it would, each node `n` swapped for `swap(n)`.
+    pub(crate) fn fits(&self, model: u32, this: u32, swap: &dyn Fn(u32) -> u32) -> bool {
+        self.ops.iter().all(|op| match *op {
+            Op::Load(n) => swap(n) == n,
+            Op::Rel(k) => k <= model && k <= this && swap(model - k) == this - k,
+            _ => true,
+        })
+    }
+
+    /// Rebuilds the expression this program was compiled from, as run by node `this`.
+    pub(crate) fn decompile(&self, graph: GraphId, this: u32) -> Ir {
+        if self.ops.iter().any(|op| matches!(op, Op::Rel(_))) {
+            let absolute = self.with_loads(this, &mut |n| n);
+            return decompile_general(&absolute.ops, &absolute.constants, &absolute.tables, graph);
+        }
         decompile_general(&self.ops, &self.constants, &self.tables, graph)
     }
 }
@@ -231,22 +280,58 @@ pub(crate) fn compile(
     })
 }
 
-/// Every node a float program reads (possibly with repeats).
-pub(crate) fn float_loads(ops: &[FloatOp], out: &mut Vec<NodeId>) {
+/// Every node a float program reads (possibly with repeats), run by node `this`.
+pub(crate) fn float_loads(ops: &[FloatOp], this: u32, out: &mut Vec<NodeId>) {
     out.extend(ops.iter().filter_map(|op| match op {
         FloatOp::Load(n) => Some(NodeId(*n)),
+        FloatOp::Rel(k) => Some(NodeId(this - k)),
         _ => None,
     }));
 }
 
-/// Rebuilds the expression a float program was compiled from.
-pub(crate) fn decompile_float(ops: &[FloatOp], consts: &[f64], graph: GraphId) -> Ir {
+/// A float program as run by node `this`, reading the nodes `moves` picks
+/// out by how far before `this` they are (see `GeneralProgram::relative`).
+pub(crate) fn float_relative(
+    ops: &[FloatOp],
+    this: u32,
+    moves: &dyn Fn(u32) -> bool,
+) -> Option<Vec<FloatOp>> {
+    ops.iter()
+        .map(|op| match *op {
+            FloatOp::Load(n) if moves(n) => (n < this).then_some(FloatOp::Rel(this - n)),
+            FloatOp::Rel(_) => None,
+            other => Some(other),
+        })
+        .collect()
+}
+
+/// Whether node `this` running a float program reads what node `model`
+/// running it would, each node `n` swapped for `swap(n)`.
+pub(crate) fn float_fits(
+    ops: &[FloatOp],
+    model: u32,
+    this: u32,
+    swap: &dyn Fn(u32) -> u32,
+) -> bool {
+    ops.iter().all(|op| match *op {
+        FloatOp::Load(n) => swap(n) == n,
+        FloatOp::Rel(k) => k <= model && k <= this && swap(model - k) == this - k,
+        _ => true,
+    })
+}
+
+/// Rebuilds the expression a float program was compiled from, as run by node `this`.
+pub(crate) fn decompile_float(ops: &[FloatOp], consts: &[f64], graph: GraphId, this: u32) -> Ir {
     let mut stack: Vec<Ir> = Vec::new();
     for op in ops {
         let ir = match *op {
             FloatOp::Load(n) => Ir::Ref(NodeRef {
                 graph,
                 node: NodeId(n),
+            }),
+            FloatOp::Rel(k) => Ir::Ref(NodeRef {
+                graph,
+                node: NodeId(this - k),
             }),
             FloatOp::Const(i) => Ir::Const(Value::F64(consts[i as usize])),
             FloatOp::Neg | FloatOp::Abs => {
@@ -339,6 +424,7 @@ fn decompile_general(ops: &[Op], constants: &[Value], tables: &[u32], graph: Gra
                     graph,
                     node: NodeId(n),
                 })),
+                Op::Rel(_) => unreachable!("decompiled from a program with absolute loads"),
                 Op::Const(i) => stack.push(Ir::Const(constants[i as usize].clone())),
                 Op::MakeList(count) => {
                     let at = stack.len() - count as usize;
@@ -448,11 +534,16 @@ pub(crate) fn eval_float(
     consts: &[f64],
     values: &[Value],
     scratch: &mut Scratch,
+    this: u32,
 ) -> Value {
     let stack = &mut scratch.floats;
     stack.clear();
     for op in ops {
-        match *op {
+        let op = match *op {
+            FloatOp::Rel(k) => FloatOp::Load(this - k),
+            op => op,
+        };
+        match op {
             FloatOp::Load(i) => match &values[i as usize] {
                 Value::F64(x) => stack.push(*x),
                 // The first error read is the answer: nothing before it
@@ -499,11 +590,15 @@ fn eval_general(
     values: &[Value],
     stack: &mut Vec<Value>,
     mut reads: Option<&mut Vec<u32>>,
+    this: u32,
 ) -> Value {
     stack.clear();
     let mut pc = 0;
     while pc < ops.len() {
-        let op = ops[pc];
+        let op = match ops[pc] {
+            Op::Rel(k) => Op::Load(this - k),
+            op => op,
+        };
         pc += 1;
         match op {
             Op::Load(i) => {
@@ -512,6 +607,7 @@ fn eval_general(
                 }
                 stack.push(values[i as usize].clone());
             }
+            Op::Rel(_) => unreachable!("turned into a load above"),
             Op::Const(i) => stack.push(constants[i as usize].clone()),
 
             Op::AddF => float(stack, |x, y| x + y),

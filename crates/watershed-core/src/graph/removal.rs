@@ -72,7 +72,7 @@ impl Graph {
                 let a = &mut self.aggregates[old.code as usize];
                 *a = Aggregate::new(a.op, a.value_type);
             }
-            Kind::General => self.reads[old.code as usize] = Box::default(),
+            Kind::General => self.reads[old.len as usize] = Box::default(),
             Kind::Float | Kind::Input => {}
         }
         // From here it is an input that nothing reads: never queued, never
