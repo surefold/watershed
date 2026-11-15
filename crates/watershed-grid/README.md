@@ -11,8 +11,11 @@ compiled to WebAssembly behind an interactive page
 can move inputs, see which nodes recalculate, ask any node to explain its
 value, and time a graph of up to a million nodes in the browser.
 
-Both crates build watershed-core without its `parallel` feature, so updates
-in the browser run on one thread.
+The page can also run a model as a scenario plan: `Model::scenarios` and
+`Model::sweep` compile it with [watershed-gpu](../watershed-gpu/README.md)
+and run the plan, for many values of one input, without touching the graph.
+There is no CUDA in a browser and no threads in this build, so a plan runs
+there on one thread, as updates do.
 
 ## Building and running
 

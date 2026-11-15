@@ -159,6 +159,14 @@ button.primary { background: var(--water); color: var(--surface); }
 button.secondary { background: transparent; color: var(--water); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 .status { font-size: 0.88rem; color: var(--muted); min-height: 1.4em; }
+.plan-lede, .plan-note { margin: 0; font-size: 0.88rem; color: var(--muted); }
+.plan-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 0.9rem; }
+.plan-controls select { font: inherit; padding: 3px 6px; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); color: inherit; max-width: 100%; }
+.plan-scroll { overflow-x: auto; }
+.plan-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.plan-table th, .plan-table td { padding: 5px 10px 5px 0; text-align: right; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.plan-table th:first-child, .plan-table td:first-child { text-align: left; }
+.plan-table thead th { font-weight: 600; color: var(--muted); }
 .status.ok { color: var(--rain); }
 .status.bad { color: var(--sediment); }
 
@@ -275,6 +283,25 @@ footer { color: var(--muted); font-size: 0.85rem; }
         <div class="panel">
           <h3>Updates</h3>
           <ul class="log" id="log"><li class="empty">Move a slider to start an update.</li></ul>
+        </div>
+        <div class="panel plan">
+          <h3>Run it as scenarios</h3>
+          <p class="plan-lede">The same formulas, compiled to a plan and run for many values of one input. The graph above keeps the values it has.</p>
+          <div class="plan-controls">
+            <label>Vary <select id="plan-input" aria-label="The input to vary"></select></label>
+            <label>over <select id="plan-count" aria-label="How many scenarios">
+              <option value="1000">1,000</option>
+              <option value="100000" selected>100,000</option>
+              <option value="1000000">1,000,000</option>
+            </select> scenarios</label>
+            <button class="secondary small" id="plan-run" type="button">Run</button>
+          </div>
+          <p class="status" id="plan-status" role="status">Nothing run yet.</p>
+          <div class="plan-scroll"><table class="plan-table" id="plan-table" hidden>
+            <thead><tr><th scope="col">Output</th><th scope="col" id="plan-low">At the lowest</th><th scope="col" id="plan-high">At the highest</th><th scope="col">Least</th><th scope="col">Most</th><th scope="col">Mean</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+          <p class="plan-note">A browser has no CUDA, so the plan runs here on one thread. Natively the same plan runs on every core or on a GPU: <code>cargo run --release -p watershed-gpu --example loans</code>.</p>
         </div>
         <div class="panel">
           <h3>Why does <span id="explain-name">this node</span> have its value?</h3>
@@ -513,12 +540,58 @@ function load(name) {
   renderInputs();
   renderGraph();
   renderExplain();
+  renderPlan();
   $("source").innerHTML = highlight(Model.source(name) ?? "");
   const p = PRESETS.find((p) => p.id === name);
   if (p.feed) {
     startFeed(p.feed);
     renderLog();
   }
+}
+
+// ---------------------------------------------------------------- scenarios
+
+// The inputs a plan can vary: the numbers.
+function renderPlan() {
+  const select = $("plan-input");
+  const numbers = nodes.filter((n) => n.input && values[n.id].kind === "f64");
+  select.innerHTML = numbers.map((n) => `<option value="${n.id}">${n.name}</option>`).join("");
+  $("plan-run").disabled = numbers.length === 0;
+  $("plan-table").hidden = true;
+  const status = $("plan-status");
+  status.className = "status";
+  status.textContent = numbers.length ? "Nothing run yet." : "This model has no number to vary.";
+}
+
+function runPlan() {
+  const status = $("plan-status");
+  const table = $("plan-table");
+  const id = Number($("plan-input").value);
+  const count = Number($("plan-count").value);
+  // Over the range the input's slider has.
+  const { min, max } = sliderRange(values[id].value);
+  const started = performance.now();
+  let result;
+  try {
+    result = JSON.parse(model.sweep(id, min, max, count));
+  } catch (error) {
+    table.hidden = true;
+    status.className = "status bad";
+    status.textContent = "This model cannot be run as a plan: " + (error.message ?? error);
+    return;
+  }
+  const ms = performance.now() - started;
+  const each = result.nodes * result.scenarios;
+  status.className = "status ok";
+  status.textContent = `${result.scenarios.toLocaleString()} scenarios in ${ms < 0.1 ? "under 0.1 ms" : fmtMs(ms)}: a plan of ${result.nodes} calculations in ${result.levels} levels and ${result.kernels} kernels, ${each.toLocaleString()} calculations in all. ${nodes[id].name} went from ${format(min)} to ${format(max)}.`;
+  $("plan-low").textContent = `At ${format(min)}`;
+  $("plan-high").textContent = `At ${format(max)}`;
+  // A total of nothing can come back as minus nought; shown as nought.
+  const cell = (x) => `<td>${x === null ? "–" : format(x === 0 ? 0 : x)}</td>`;
+  table.querySelector("tbody").innerHTML = result.outputs
+    .map((o) => `<tr><td>${nodes[o.id].name}</td>${cell(o.first)}${cell(o.last)}${cell(o.min)}${cell(o.max)}${cell(o.mean)}</tr>`)
+    .join("");
+  table.hidden = false;
 }
 
 function sliderRange(v) {
@@ -740,6 +813,8 @@ function renderExplain() {
 // ---------------------------------------------------------------- benchmark
 
 let bench = null;
+$("plan-run").addEventListener("click", runPlan);
+
 $("build").addEventListener("click", async () => {
   const trades = Number(document.querySelector('input[name="size"]:checked').value);
   const button = $("build");

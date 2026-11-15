@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 wasm-bindgen = "0.2.130"
 watershed-core = { version = "0.1.0", path = "../watershed-core", default-features = false }
+# Scenario plans, run on the CPU: there is no CUDA in a browser.
+watershed-gpu = { version = "0.1.0", path = "../watershed-gpu" }
 
 [lints]
 workspace = true

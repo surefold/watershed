@@ -62,8 +62,14 @@ Expression types are checked when an expression is built, at run time,
 where the Rust API checks them at compile time. The type stubs are in
 [`watershed.pyi`](watershed.pyi).
 
-The package is not published to PyPI; build it from this folder. It needs
-Python 3.9 or later.
+The package is not published to PyPI. With a Rust toolchain installed, pip
+builds it from the repository:
+
+```bash
+pip install "git+https://github.com/surefold/watershed#subdirectory=crates/watershed-py"
+```
+
+It needs Python 3.9 or later.
 
 ## Developing
 

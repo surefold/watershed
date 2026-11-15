@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use wasm_bindgen::prelude::*;
 use watershed_core::prelude::*;
 use watershed_core::{Groups, NodeId, Value};
+use watershed_gpu::Scenarios;
 
 /// The example models. Each is a file of ordinary watershed code; the page
 /// shows the same file as the source of the graph it draws.
@@ -179,9 +180,128 @@ impl Model {
     pub fn check(&self) -> Option<String> {
         self.graph.check_consistency().err()
     }
+
+    /// Compiles the model into a scenario plan and runs it: the input `vary`
+    /// takes each of `values` in turn, one scenario for each, and every
+    /// other input keeps the value it has now. The graph is not changed.
+    ///
+    /// The plan's outputs are the calculated numbers that depend on `vary`.
+    /// Returns `{nodes, levels, kernels, outputs:[ids], results:[[a value
+    /// for each output] for each scenario]}`, or the reason the model
+    /// cannot be run as a plan.
+    pub fn scenarios(&self, vary: u32, values: &[f64]) -> Result<String, JsError> {
+        self.plan_of(vary, values).map_err(|why| JsError::new(&why))
+    }
+
+    /// As [`scenarios`](Self::scenarios), for `count` values of `vary`
+    /// spread evenly from `from` to `to`, and with the results summed up
+    /// here: a million scenarios are too many to hand back one by one.
+    ///
+    /// Returns `{nodes, levels, kernels, scenarios, outputs:[{id, first,
+    /// last, min, max, mean}]}`, where `first` and `last` are the values at
+    /// `from` and at `to`.
+    pub fn sweep(&self, vary: u32, from: f64, to: f64, count: u32) -> Result<String, JsError> {
+        self.sweep_of(vary, from, to, count)
+            .map_err(|why| JsError::new(&why))
+    }
 }
 
 impl Model {
+    // A plan of everything numeric that `vary` reaches, and those outputs.
+    fn plan(&self, vary: u32) -> Result<(Scenarios, Vec<NodeId>), String> {
+        let g = &self.graph;
+        let vary = *self
+            .ids
+            .get(vary as usize)
+            .ok_or_else(|| "there is no such node".to_string())?;
+        // What `vary` reaches, in node order: a node comes after what it reads.
+        let mut reached = vec![false; self.ids.len()];
+        reached[vary.index()] = true;
+        for &id in &self.ids {
+            if g.dependencies(id).iter().any(|d| reached[d.index()]) {
+                reached[id.index()] = true;
+            }
+        }
+        let outputs: Vec<NodeId> = self
+            .ids
+            .iter()
+            .copied()
+            .filter(|&id| id != vary && reached[id.index()] && matches!(g.value(id), Value::F64(_)))
+            .collect();
+        let plan = Scenarios::new(g, &[vary], &outputs).map_err(|e| e.to_string())?;
+        Ok((plan, outputs))
+    }
+
+    fn sweep_of(&self, vary: u32, from: f64, to: f64, count: u32) -> Result<String, String> {
+        let (plan, outputs) = self.plan(vary)?;
+        let count = count.max(1) as usize;
+        let step = match count {
+            1 => 0.0,
+            _ => (to - from) / (count - 1) as f64,
+        };
+        let inputs: Vec<f64> = (0..count).map(|k| from + step * k as f64).collect();
+        let results = plan.run_cpu(&inputs);
+        let width = outputs.len();
+        let columns: Vec<String> = outputs
+            .iter()
+            .enumerate()
+            .map(|(k, id)| {
+                let column = || results.iter().skip(k).step_by(width).copied();
+                let (min, max) = column()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+                        (lo.min(x), hi.max(x))
+                    });
+                format!(
+                    r#"{{"id":{},"first":{},"last":{},"min":{},"max":{},"mean":{}}}"#,
+                    id.index(),
+                    json_number(results[k]),
+                    json_number(results[results.len() - width + k]),
+                    json_number(min),
+                    json_number(max),
+                    json_number(column().sum::<f64>() / count as f64)
+                )
+            })
+            .collect();
+        Ok(format!(
+            r#"{{"nodes":{},"levels":{},"kernels":{},"scenarios":{},"outputs":[{}]}}"#,
+            plan.nodes(),
+            plan.levels(),
+            plan.shapes(),
+            count,
+            columns.join(",")
+        ))
+    }
+
+    // The plan and its results, as JSON; apart from `scenarios` so that it
+    // can be tested where there is no JavaScript to make an error for.
+    fn plan_of(&self, vary: u32, values: &[f64]) -> Result<String, String> {
+        let (plan, outputs) = self.plan(vary)?;
+        let results = plan.run_cpu(values);
+        let rows: Vec<String> = results
+            .chunks(outputs.len())
+            .map(|row| {
+                let cells: Vec<String> = row.iter().map(|&x| json_number(x)).collect();
+                format!("[{}]", cells.join(","))
+            })
+            .collect();
+        let ids: Vec<String> = outputs.iter().map(|id| id.index().to_string()).collect();
+        Ok(format!(
+            r#"{{"nodes":{},"levels":{},"kernels":{},"outputs":[{}],"results":[{}]}}"#,
+            plan.nodes(),
+            plan.levels(),
+            plan.shapes(),
+            ids.join(","),
+            rows.join(",")
+        ))
+    }
+
+    #[cfg(test)]
+    fn set_on(&mut self, id: u32, value: f64) {
+        self.graph
+            .set_value(self.ids[id as usize], Value::F64(value))
+            .unwrap();
+    }
+
     fn id(&self, id: u32) -> Result<NodeId, JsError> {
         self.ids
             .get(id as usize)
@@ -481,6 +601,14 @@ fn json_str(s: &str) -> String {
     out
 }
 
+// A number as JSON has it: what is not finite has no way to be written.
+fn json_number(x: f64) -> String {
+    match x.is_finite() {
+        true => x.to_string(),
+        false => "null".into(),
+    }
+}
+
 fn value_json(v: &Value) -> String {
     let (kind, value) = match v {
         Value::F64(x) if x.is_finite() => ("f64", x.to_string()),
@@ -505,6 +633,43 @@ fn value_json(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_runs_as_a_plan_and_gives_what_the_graph_gives() {
+        let mut m = Model {
+            graph: Graph::new(),
+            ids: Vec::new(),
+        };
+        presets::order::build(&mut m.graph).unwrap();
+        m.ids = m.graph.node_ids().collect();
+        let price = m.graph.find("price").unwrap().index() as u32;
+        let before = m.values();
+
+        // subtotal, with_tax, shipping and total, for three prices: free
+        // shipping starts at 50, which only the last reaches.
+        assert_eq!(
+            m.plan_of(price, &[2.5, 3.0, 4.5]).unwrap(),
+            r#"{"nodes":5,"levels":5,"kernels":5,"outputs":[4,5,7,8],"results":[[25,30,4.99,34.99],[30,36,4.99,40.99],[45,54,0,54]]}"#
+        );
+        // The graph is as it was.
+        assert_eq!(m.values(), before);
+
+        // And each scenario is what the graph gives with that price set.
+        for (price_now, total) in [(3.0, "40.99"), (4.5, "54")] {
+            m.set_on(price, price_now);
+            m.graph.stabilize();
+            assert_eq!(m.graph.value(*m.ids.last().unwrap()).to_string(), total);
+        }
+        assert!(m.plan_of(99, &[1.0]).is_err());
+
+        // A sweep is the same plan over evenly spread prices, summed up.
+        m.set_on(price, 2.5);
+        m.graph.stabilize();
+        assert_eq!(
+            m.sweep_of(price, 2.5, 4.5, 3).unwrap(),
+            r#"{"nodes":5,"levels":5,"kernels":5,"scenarios":3,"outputs":[{"id":4,"first":25,"last":45,"min":25,"max":45,"mean":35},{"id":5,"first":30,"last":54,"min":30,"max":54,"mean":42},{"id":7,"first":4.99,"last":0,"min":0,"max":4.99,"mean":3.3266666666666667},{"id":8,"first":34.99,"last":54,"min":34.99,"max":54,"mean":45.326666666666675}]}"#
+        );
+    }
 
     #[test]
     fn edits_keep_a_rolling_window_and_total_it() {

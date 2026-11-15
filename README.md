@@ -13,6 +13,13 @@ and run it in two ways:
    evaluates many sets of inputs against the same model, across CPU cores or
    on an NVIDIA GPU.
 
+Try it without installing anything: the
+[playground](https://surefold.dev/watershed/) is the engine compiled to
+WebAssembly, where you can change a model's inputs, see what is
+recalculated, and run it as a plan over a million scenarios. The
+[guide](https://surefold.dev/guides/watershed/) has a first example in Rust,
+Python, Kotlin and Scala.
+
 The first answers "what is the value now that this input has changed?" in
 time proportional to what the change affects. The second answers "what would
 the values be under each of these ten thousand input sets?" using every core
