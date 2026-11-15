@@ -89,6 +89,14 @@ export declare class GridView {
   setLayout(layout: Partial<Layout>): void;
   setPinned(col: number, pinned: boolean): void;
   setHidden(col: number, hidden: boolean): void;
+  /**
+   * Fits a column's width to its header, its total and the rows drawn now
+   * (`col` is its position; -1 for the key column). People can double-click
+   * a column's edge for the same.
+   */
+  fitColumn(col: number): void;
+  /** Fits every column on screen. */
+  fitColumns(): void;
   /** Sorts by these columns (positions), the first mattering most. */
   setSort(sort: { col: number; desc: boolean }[]): void;
   /** Filters a column: `>100`, `5..10`, `=Rates`, or text to look for. */
