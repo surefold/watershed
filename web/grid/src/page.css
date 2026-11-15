@@ -72,6 +72,9 @@ h2 { font: 600 0.7rem/1.3 var(--mono); text-transform: uppercase; letter-spacing
 .bar .rate-control { flex-wrap: wrap; white-space: normal; }
 .sep { width: 1px; height: 18px; background: var(--rule); margin: 0 4px; }
 .grow { flex: 1 1 0; min-width: 0; }
+/* The table's view, in words, and the buttons that set it from code. */
+.view-label { font: 600 0.66rem/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.view-state { font: 12.5px/1.3 var(--mono); color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar.formula { background: var(--band); border-radius: 0 0 12px 12px; }
 .bar.formula :is(input, select) { background: var(--surface); border-color: var(--rule); }
 .fx { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: color-mix(in srgb, var(--water) 12%, var(--surface)); color: var(--water); font: italic 600 14px/1 var(--body); }
