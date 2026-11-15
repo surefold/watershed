@@ -95,7 +95,7 @@ impl Model {
                 out,
                 r#"{{"id":{},"name":{},"type":{},"input":{},"height":{},"deps":[{}],"formula":{}}}"#,
                 id.index(),
-                json_str(g.name(id)),
+                json_str(&g.name(id)),
                 json_str(&g.node_type(id).to_string()),
                 g.is_input(id),
                 g.height(id),

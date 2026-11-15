@@ -90,6 +90,18 @@ fn leaf(op: AggregateOp, ty: Type, value: &Value, present: &Value) -> Value {
     }
 }
 
+/// Combines two float partial results, as `combine` does for two `F64`s.
+fn combine_f64(op: AggregateOp, x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return if x.is_nan() { x } else { y };
+    }
+    match op {
+        AggregateOp::Sum | AggregateOp::Count => x + y,
+        AggregateOp::Min => x.min(y),
+        AggregateOp::Max => x.max(y),
+    }
+}
+
 /// Combines two partial results. An error wins, the left one first.
 fn combine(op: AggregateOp, a: &Value, b: &Value) -> Value {
     match (a, b) {
@@ -97,14 +109,7 @@ fn combine(op: AggregateOp, a: &Value, b: &Value) -> Value {
         // NaN wins, as it does in a sum: Rust's `f64::min` and `f64::max`
         // ignore NaN, which would make the result depend on the tree's shape
         // (NaN against empty room gives the padding, alone it gives NaN).
-        (Value::F64(x), Value::F64(y)) if x.is_nan() || y.is_nan() => {
-            Value::F64(if x.is_nan() { *x } else { *y })
-        }
-        (Value::F64(x), Value::F64(y)) => Value::F64(match op {
-            AggregateOp::Sum | AggregateOp::Count => x + y,
-            AggregateOp::Min => x.min(*y),
-            AggregateOp::Max => x.max(*y),
-        }),
+        (Value::F64(x), Value::F64(y)) => Value::F64(combine_f64(op, *x, *y)),
         (Value::I64(x), Value::I64(y)) => match op {
             AggregateOp::Sum | AggregateOp::Count => x
                 .checked_add(*y)
@@ -126,6 +131,66 @@ fn capacity(members: usize) -> usize {
     members.max(1).next_power_of_two()
 }
 
+/// The partial results. A float sum, minimum or maximum keeps them as plain
+/// `f64`s, half the room of a `Value` each; the first value that is not a
+/// float (an error) turns the tree into `Value`s for good, so that it can
+/// hold it.
+#[derive(Debug)]
+enum Tree {
+    Floats(Vec<f64>),
+    Values(Vec<Value>),
+}
+
+impl Tree {
+    /// A tree of `len` slots, each holding `fill`.
+    fn new(op: AggregateOp, value_type: Type, len: usize, fill: Value) -> Tree {
+        match fill {
+            Value::F64(x) if value_type == Type::F64 && op != AggregateOp::Count => {
+                Tree::Floats(vec![x; len])
+            }
+            fill => Tree::Values(vec![fill; len]),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Tree::Floats(t) => t.len(),
+            Tree::Values(t) => t.len(),
+        }
+    }
+
+    fn get(&self, k: usize) -> Value {
+        match self {
+            Tree::Floats(t) => Value::F64(t[k]),
+            Tree::Values(t) => t[k].clone(),
+        }
+    }
+
+    fn set(&mut self, k: usize, value: Value) {
+        match (&mut *self, value) {
+            (Tree::Floats(t), Value::F64(x)) => t[k] = x,
+            (Tree::Values(t), value) => t[k] = value,
+            (Tree::Floats(t), value) => {
+                let mut values: Vec<Value> = t.iter().map(|&x| Value::F64(x)).collect();
+                values[k] = value;
+                *self = Tree::Values(values);
+            }
+        }
+    }
+
+    /// Works out slot `k` from its two halves.
+    fn recombine(&mut self, op: AggregateOp, k: usize) {
+        match self {
+            Tree::Floats(t) => t[k] = combine_f64(op, t[2 * k], t[2 * k + 1]),
+            Tree::Values(t) => t[k] = combine(op, &t[2 * k], &t[2 * k + 1]),
+        }
+    }
+}
+
+/// From a node to the member it is part of: the member's index, or, with
+/// this bit set, an index into `Aggregate::many`.
+const MANY: u32 = 1 << 31;
+
 /// One aggregate's members and its tree of partial results.
 #[derive(Debug)]
 pub(crate) struct Aggregate {
@@ -134,11 +199,15 @@ pub(crate) struct Aggregate {
     pub(crate) value_type: Type,
     /// Each member's value node and presence node.
     pub(crate) members: Vec<(u32, u32)>,
-    /// From a node to the members it is part of.
-    by_node: HashMap<u32, MemberOf, ById>,
+    /// From a node to the member it is part of (see `MANY`). Nearly every
+    /// node is part of one, so this holds a number, not a list: eight bytes
+    /// an entry, where a million members are two million entries.
+    by_node: HashMap<u32, u32, ById>,
+    /// The members of each node that is part of more than one.
+    many: Vec<Vec<u32>>,
     /// `tree[capacity + i]` is member i's contribution; `tree[k]` combines
     /// `tree[2k]` and `tree[2k + 1]`; `tree[1]` is the result.
-    tree: Vec<Value>,
+    tree: Tree,
     /// Nodes that changed since the last recalculation.
     pub(crate) changed: Vec<u32>,
     /// When members joined: for each update that added some, the update
@@ -178,14 +247,6 @@ impl Hasher for IdHasher {
     }
 }
 
-/// The members a node is part of. It is nearly always one, and that case
-/// holds no list, so a million members do not mean a million small lists.
-#[derive(Debug)]
-enum MemberOf {
-    One(u32),
-    Many(Vec<u32>),
-}
-
 impl Aggregate {
     pub(crate) fn new(op: AggregateOp, value_type: Type) -> Self {
         Aggregate {
@@ -193,7 +254,8 @@ impl Aggregate {
             value_type,
             members: Vec::new(),
             by_node: HashMap::default(),
-            tree: vec![identity(op, value_type); 2],
+            many: Vec::new(),
+            tree: Tree::new(op, value_type, 2, identity(op, value_type)),
             changed: Vec::new(),
             joined: Vec::new(),
         }
@@ -237,21 +299,34 @@ impl Aggregate {
         new
     }
 
+    /// Makes room for `more` members, growing the tree once rather than
+    /// doubling it as they arrive.
+    pub(crate) fn reserve(&mut self, more: usize) {
+        let wanted = self.members.len() + more;
+        self.members.reserve(more);
+        // A member's value node and its presence node.
+        self.by_node.reserve(2 * more);
+        while self.capacity() < wanted {
+            self.grow();
+        }
+    }
+
     /// Records that `node` is part of member `index`. Returns whether the
     /// node was not part of any member before.
     fn note(&mut self, node: u32, index: u32) -> bool {
+        assert!(index < MANY, "an aggregate holds fewer than 2^31 members");
         match self.by_node.entry(node) {
             Entry::Vacant(slot) => {
-                slot.insert(MemberOf::One(index));
+                slot.insert(index);
                 true
             }
             Entry::Occupied(mut slot) => {
-                match slot.get_mut() {
-                    MemberOf::One(first) => {
-                        let first = *first;
-                        slot.insert(MemberOf::Many(vec![first, index]));
-                    }
-                    MemberOf::Many(list) => list.push(index),
+                let held = *slot.get();
+                if held & MANY != 0 {
+                    self.many[(held & !MANY) as usize].push(index);
+                } else {
+                    slot.insert(MANY | self.many.len() as u32);
+                    self.many.push(vec![held, index]);
                 }
                 false
             }
@@ -264,10 +339,15 @@ impl Aggregate {
         let old = self.capacity();
         let new = old * 2;
         let id = identity(self.op, self.value_type);
-        let mut tree = vec![id; 2 * new];
-        tree[new..new + old].clone_from_slice(&self.tree[old..2 * old]);
+        let mut tree = match &self.tree {
+            Tree::Floats(_) => Tree::new(self.op, self.value_type, 2 * new, id),
+            Tree::Values(_) => Tree::Values(vec![id; 2 * new]),
+        };
+        for i in 0..old {
+            tree.set(new + i, self.tree.get(old + i));
+        }
         for k in (1..new).rev() {
-            tree[k] = combine(self.op, &tree[2 * k], &tree[2 * k + 1]);
+            tree.recombine(self.op, k);
         }
         self.tree = tree;
     }
@@ -288,8 +368,11 @@ impl Aggregate {
         let mut indexes: Vec<usize> = Vec::new();
         for node in std::mem::take(&mut self.changed) {
             match self.by_node.get(&node) {
-                Some(MemberOf::One(i)) => indexes.push(*i as usize),
-                Some(MemberOf::Many(list)) => indexes.extend(list.iter().map(|&i| i as usize)),
+                Some(&held) if held & MANY != 0 => {
+                    let list = &self.many[(held & !MANY) as usize];
+                    indexes.extend(list.iter().map(|&i| i as usize));
+                }
+                Some(&i) => indexes.push(i as usize),
                 None => {}
             }
         }
@@ -297,7 +380,8 @@ impl Aggregate {
         indexes.dedup();
         let capacity = self.capacity();
         for &i in &indexes {
-            self.tree[capacity + i] = self.leaf(i, values);
+            let leaf = self.leaf(i, values);
+            self.tree.set(capacity + i, leaf);
         }
         // Each changed member has `steps` partial results above it. When so
         // many members changed that those paths add up to more than the
@@ -306,18 +390,18 @@ impl Aggregate {
         let steps = capacity.ilog2().max(1) as usize;
         if indexes.len().saturating_mul(steps) >= capacity {
             for k in (1..capacity).rev() {
-                self.tree[k] = combine(self.op, &self.tree[2 * k], &self.tree[2 * k + 1]);
+                self.tree.recombine(self.op, k);
             }
         } else {
             for &i in &indexes {
                 let mut k = (capacity + i) / 2;
                 while k >= 1 {
-                    self.tree[k] = combine(self.op, &self.tree[2 * k], &self.tree[2 * k + 1]);
+                    self.tree.recombine(self.op, k);
                     k /= 2;
                 }
             }
         }
-        self.tree[1].clone()
+        self.tree.get(1)
     }
 
     /// Recomputes every leaf and the whole tree.
@@ -325,12 +409,13 @@ impl Aggregate {
         self.changed.clear();
         let capacity = self.capacity();
         for i in 0..self.members.len() {
-            self.tree[capacity + i] = self.leaf(i, values);
+            let leaf = self.leaf(i, values);
+            self.tree.set(capacity + i, leaf);
         }
         for k in (1..capacity).rev() {
-            self.tree[k] = combine(self.op, &self.tree[2 * k], &self.tree[2 * k + 1]);
+            self.tree.recombine(self.op, k);
         }
-        self.tree[1].clone()
+        self.tree.get(1)
     }
 
     /// The result calculated from scratch, without the stored tree: the
@@ -357,8 +442,8 @@ mod tests {
     /// Every partial result is its two halves combined.
     fn tree_is_whole(a: &Aggregate) {
         for k in 1..a.capacity() {
-            let both = combine(a.op, &a.tree[2 * k], &a.tree[2 * k + 1]);
-            assert!(a.tree[k].same_as(&both), "partial result {k}");
+            let both = combine(a.op, &a.tree.get(2 * k), &a.tree.get(2 * k + 1));
+            assert!(a.tree.get(k).same_as(&both), "partial result {k}");
         }
     }
 
@@ -387,5 +472,54 @@ mod tests {
         let none = a.recalculate(&values);
         assert!(none.same_as(&a.folded_from_scratch(&values)));
         tree_is_whole(&a);
+    }
+
+    #[test]
+    fn a_float_total_keeps_plain_floats_until_an_error_arrives_and_still_wins() {
+        let mut values: Vec<Value> = (0..10).map(|i| Value::F64(f64::from(i))).collect();
+        values.push(Value::Bool(true));
+        let mut a = Aggregate::new(AggregateOp::Max, Type::F64);
+        for i in 0..10 {
+            a.push(i, 10);
+        }
+        assert!(a.recalculate(&values).same_as(&Value::F64(9.0)));
+        assert!(
+            matches!(a.tree, Tree::Floats(_)),
+            "a float maximum holds floats"
+        );
+
+        // An error in one member is the result, as before.
+        values[3] = Value::error("bad price");
+        a.changed.push(3);
+        let wrong = a.recalculate(&values);
+        assert!(matches!(wrong, Value::Error(_)), "{wrong}");
+        assert!(
+            matches!(a.tree, Tree::Values(_)),
+            "the tree now holds values"
+        );
+        tree_is_whole(&a);
+
+        // Mended, the result is a number again, the same as from scratch.
+        values[3] = Value::F64(30.0);
+        a.changed.push(3);
+        assert!(a.recalculate(&values).same_as(&Value::F64(30.0)));
+        assert!(a.folded_from_scratch(&values).same_as(&Value::F64(30.0)));
+        tree_is_whole(&a);
+    }
+
+    #[test]
+    fn a_count_and_an_integer_sum_keep_values() {
+        assert!(matches!(
+            Aggregate::new(AggregateOp::Count, Type::F64).tree,
+            Tree::Values(_)
+        ));
+        assert!(matches!(
+            Aggregate::new(AggregateOp::Sum, Type::I64).tree,
+            Tree::Values(_)
+        ));
+        assert!(matches!(
+            Aggregate::new(AggregateOp::Sum, Type::F64).tree,
+            Tree::Floats(_)
+        ));
     }
 }

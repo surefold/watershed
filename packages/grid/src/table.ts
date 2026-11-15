@@ -38,6 +38,12 @@ export type AnyTable = Table<any, any>;
 /** A row to put: a value for every field. */
 export type RowOf<F extends Fields> = { [N in keyof F]: ValueOf<F[N]> };
 
+/**
+ * Many rows' fields, a column at a time, for `putMany`: for each field, its
+ * value in every row. A number column can be a `Float64Array`.
+ */
+export type ColumnsOf<F extends Fields> = { [N in keyof F]: ArrayLike<ValueOf<F[N]>> };
+
 export interface TableSpec<F extends Fields, C extends string> {
   /** The columns you give values for, and their kinds, in order. */
   fields: F;
@@ -102,6 +108,7 @@ export class Table<F extends Fields = Fields, C extends string = string> {
   /** The WebAssembly grid underneath. Not part of the API: for this package's views. */
   readonly engine: Engine;
   #fields: string[] = [];
+  #kinds: Kind[] = [];
   #names: string[] = [];
   #batching = 0;
   #peeking = 0;
@@ -142,6 +149,70 @@ export class Table<F extends Fields = Fields, C extends string = string> {
         return String(value);
       }),
     );
+    this.#changed();
+  }
+
+  /**
+   * Makes room for `rows` more rows. Optional, for a large load: arrays then
+   * grow once instead of doubling as rows arrive, which briefly needs up to
+   * twice the memory. `putMany` makes room for its own rows.
+   */
+  reserve(rows: number): void {
+    this.engine.reserve(rows);
+  }
+
+  /**
+   * Adds or replaces many rows at once, from columns: `keys[i]` is row i's
+   * key, and each field's column holds its value in every row. Much faster
+   * than `put` for many rows: numbers go in as numbers (a `Float64Array`
+   * is used as it is), and each distinct text goes in once, so rows that
+   * hold the same text share it. Everything is checked first: a bad value
+   * adds no rows.
+   *
+   *   trades.putMany(["T-1", "T-2"], { qty: [500, 200], side: ["Buy", "Sell"], … });
+   */
+  putMany(keys: readonly string[], columns: ColumnsOf<F>): void {
+    const rows = keys.length;
+    const kinds = this.#kinds;
+    const count = (kind: Kind) => kinds.filter((k) => k === kind).length;
+    const numbers = new Float64Array(rows * count("number"));
+    const bools = new Uint8Array(rows * count("bool"));
+    const codes = new Uint32Array(rows * count("text"));
+    const texts: string[] = [];
+    const starts: number[] = [0];
+    const given = columns as Record<string, ArrayLike<unknown> | undefined>;
+    let [n, b, t] = [0, 0, 0];
+    this.#fields.forEach((name, k) => {
+      const column = given[name];
+      if (!column || column.length !== rows) throw new Error(`${name} needs ${rows} values, one for each key`);
+      switch (kinds[k]) {
+        case "number":
+          numbers.set(column as ArrayLike<number>, n++ * rows);
+          break;
+        case "bool":
+          for (let r = 0; r < rows; r++) bools[b * rows + r] = column[r] ? 1 : 0;
+          b++;
+          break;
+        case "text": {
+          // Each distinct text once, and for each row which one it is.
+          const seen = new Map<string, number>();
+          for (let r = 0; r < rows; r++) {
+            const text = String(column[r]);
+            let code = seen.get(text);
+            if (code === undefined) {
+              code = seen.size;
+              seen.set(text, code);
+              texts.push(text);
+            }
+            codes[t * rows + r] = code;
+          }
+          starts.push(texts.length);
+          t++;
+          break;
+        }
+      }
+    });
+    this.engine.upsert_many(keys as string[], numbers, bools, codes, texts, Uint32Array.from(starts));
     this.#changed();
   }
 
@@ -336,7 +407,9 @@ export class Table<F extends Fields = Fields, C extends string = string> {
     const columns = this.columns();
     this.#position = new Map(columns.map((c, k) => [c.name, k]));
     this.#names = columns.map((c) => c.name);
-    this.#fields = columns.filter((c) => c.formula === null).map((c) => c.name);
+    const fields = columns.filter((c) => c.formula === null);
+    this.#fields = fields.map((c) => c.name);
+    this.#kinds = fields.map((c) => c.kind);
   }
 
   #col(name: string): number {

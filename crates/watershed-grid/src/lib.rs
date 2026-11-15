@@ -12,12 +12,13 @@
 //! fifty.
 
 use wasm_bindgen::prelude::*;
+use watershed_core::Value;
 
 mod demo;
 pub use watershed_core::formula;
 pub mod table;
 
-pub use table::{Agg, Kind, Table, Update};
+pub use table::{Agg, Columns, Kind, Table, Update};
 
 fn positions(cols: Vec<u32>) -> Vec<usize> {
     cols.into_iter().map(|col| col as usize).collect()
@@ -100,6 +101,35 @@ impl Grid {
             .collect::<Result<Vec<_>, _>>()
             .map_err(js_error)?;
         self.table.upsert(key, values).map_err(js_error)
+    }
+
+    /// Makes room for `rows` more rows (see [`Table::reserve`]).
+    pub fn reserve(&mut self, rows: u32) {
+        self.table.reserve(rows as usize);
+    }
+
+    /// Adds or replaces many rows at once, a column at a time (see
+    /// [`Table::upsert_columns`]): the number fields' values one field
+    /// after another, then the true/false fields', then for each text field
+    /// which of its distinct texts each row holds, the distinct texts
+    /// themselves, and where each field's distinct texts start.
+    pub fn upsert_many(
+        &mut self,
+        keys: Vec<String>,
+        numbers: &[f64],
+        bools: &[u8],
+        codes: &[u32],
+        texts: Vec<String>,
+        starts: &[u32],
+    ) -> Result<(), JsError> {
+        let columns = Columns {
+            numbers,
+            bools,
+            codes,
+            texts: texts.into_iter().map(|s| Value::Str(s.into())).collect(),
+            starts,
+        };
+        self.table.upsert_columns(&keys, &columns).map_err(js_error)
     }
 
     /// Sets one cell from text.

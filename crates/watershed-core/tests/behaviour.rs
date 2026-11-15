@@ -7,8 +7,11 @@ use watershed_core::{AggregateOp, Ir, Type, Value};
 type Result = std::result::Result<(), CalcError>;
 
 /// The names of the nodes the last update recalculated, in order.
-fn recalculated(g: &Graph) -> Vec<&str> {
-    g.last_recalculated().iter().map(|&id| g.name(id)).collect()
+fn recalculated(g: &Graph) -> Vec<String> {
+    g.last_recalculated()
+        .iter()
+        .map(|&id| g.name(id).into_owned())
+        .collect()
 }
 
 #[test]
@@ -1651,4 +1654,62 @@ fn maths_functions_work_on_floats_typed_and_as_formulas() {
     // They are for floats only.
     g.input("whole", 4i64).unwrap();
     assert!(g.define_formula("bad", "sqrt(whole)").is_err());
+}
+
+#[test]
+fn a_rows_nodes_are_named_and_found_by_name_though_the_names_are_not_stored() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    let price = orders.field::<f64>("price")?;
+    orders.column(&mut g, "line", qty * price)?;
+    for i in 0..4 {
+        orders.upsert(
+            &mut g,
+            &format!("o{i}"),
+            &[qty.is(1.0 + f64::from(i)), price.is(2.0)],
+        )?;
+    }
+    // A column added once rows exist, which the rows already there get too.
+    orders.column(&mut g, "double", qty * 2.0)?;
+    g.stabilize();
+
+    for name in [
+        "orders[0].present",
+        "orders[0].qty",
+        "orders[0].line",
+        "orders[3].qty",
+        "orders[3].line",
+        "orders[2].double",
+    ] {
+        let id = g
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} is not found"));
+        assert_eq!(g.name(id), name);
+    }
+    assert!(
+        g.value(g.find("orders[3].line").unwrap())
+            .same_as(&Value::F64(8.0))
+    );
+    assert_eq!(g.find("orders[4].qty"), None);
+    assert_eq!(g.find("orders[1].nothing"), None);
+    assert_eq!(g.find("orders[x].qty"), None);
+    Ok(())
+}
+
+#[test]
+fn a_node_given_a_rows_name_before_the_row_exists_stops_the_row_being_made() -> Result {
+    let mut g = Graph::new();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty")?;
+    orders.upsert(&mut g, "o0", &[qty.is(1.0)])?;
+    g.input("orders[1].qty", 5.0)?;
+    let made = orders.upsert(&mut g, "o1", &[qty.is(2.0)]);
+    assert!(matches!(made, Err(CalcError::DuplicateName(name)) if name == "orders[1].qty"));
+    // A name of a row that exists is taken already.
+    assert!(matches!(
+        g.input("orders[0].qty", 1.0),
+        Err(CalcError::DuplicateName(_))
+    ));
+    Ok(())
 }

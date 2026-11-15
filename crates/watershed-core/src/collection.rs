@@ -56,7 +56,7 @@ use std::sync::Arc;
 use crate::aggregate::AggregateOp;
 use crate::error::CalcError;
 use crate::expr::IntoExpr;
-use crate::graph::{Graph, KeyedRow, key_text, next_graph_id};
+use crate::graph::{Graph, KeyedRow, NodeName, RowName, key_text, next_graph_id};
 use crate::handle::{GraphId, Node, NodeId, NodeRef};
 use crate::ir::{Ir, TypeError};
 use crate::value::{CalcType, Numeric, Type, Value};
@@ -180,6 +180,9 @@ enum Target {
 /// A keyed table of rows. See the [module documentation](self).
 pub struct Collection {
     graph: GraphId,
+    /// How the graph names this collection's row nodes (see `Graph::row_names`),
+    /// once it has a row.
+    row_names: Option<u32>,
     template: GraphId,
     name: String,
     fields: Vec<(String, Type)>,
@@ -235,6 +238,7 @@ impl Collection {
     pub fn new(g: &Graph, name: &str) -> Collection {
         Collection {
             graph: g.id(),
+            row_names: None,
             template: next_graph_id(),
             name: name.to_string(),
             fields: Vec::new(),
@@ -325,7 +329,7 @@ impl Collection {
         // Rows that already exist (including removed ones, which can be reused) get it too.
         for s in 0..self.slots.len() {
             let name = format!("{}[{s}].{name}", self.name);
-            let node = self.define_column(g, s, index as usize, &name)?;
+            let node = self.define_column(g, s, index as usize, NodeName::Given(&name))?;
             self.slots[s].columns.push(node);
         }
         Ok((self.placeholder(COLUMN | index), ty))
@@ -1199,7 +1203,7 @@ impl Collection {
         g: &mut Graph,
         slot: usize,
         column: usize,
-        name: &str,
+        name: NodeName<'_>,
     ) -> Result<NodeId, CalcError> {
         let def = &self.columns[column];
         // The first row's node is checked and compiled from the formula.
@@ -1208,7 +1212,10 @@ impl Collection {
         let (first, row) = (&self.slots[0], &self.slots[slot]);
         if slot == 0 || first.columns.len() <= column {
             let ir = self.instantiate(g, slot, &def.formula);
-            return g.define_ir(name, ir);
+            return match name {
+                NodeName::Given(name) => g.define_ir(name, ir),
+                NodeName::Row(_) => g.define_ir(&format!("{}[{slot}].{}", self.name, def.name), ir),
+            };
         }
         g.define_like(name, first.columns[column], |n| {
             if let Some(k) = first.fields.iter().position(|&f| f == n) {
@@ -1221,22 +1228,51 @@ impl Collection {
         })
     }
 
+    /// Makes room for `rows` more rows, so that adding many does not copy
+    /// the graph's arrays as they grow (which briefly needs up to twice the
+    /// memory). Optional: rows can be added without it.
+    pub fn reserve(&mut self, g: &mut Graph, rows: usize) {
+        if g.id() != self.graph {
+            return;
+        }
+        // A row is its presence, its fields and its columns. Each column
+        // reads a few nodes, and each total links a row's value and presence.
+        let nodes = 1 + self.fields.len() + self.columns.len();
+        let edges = 3 * self.columns.len() + 2 * self.totals.len();
+        let totals: Vec<NodeId> = self.totals.iter().map(|&(total, _)| total).collect();
+        g.reserve_rows(self.row_names, rows, nodes, edges, &totals);
+        self.slots.reserve(rows);
+        self.keys.reserve(rows);
+    }
+
     /// Makes a new row's nodes, absent until the update; it joins every total.
     fn new_slot(&mut self, g: &mut Graph, values: Vec<Value>) -> Result<usize, CalcError> {
         let s = self.slots.len();
-        // Every node of the row is named `name[s].part`. The start is
-        // written once, and each part's name put after it in turn.
-        let mut name = format!("{}[{s}].", self.name);
-        let stem = name.len();
-        fn named<'a>(name: &'a mut String, stem: usize, part: &str) -> &'a str {
-            name.truncate(stem);
-            name.push_str(part);
-            name
+        // Every node of the row is named `name[s].part`, worked out by the
+        // graph when asked for rather than stored (see `Graph::row_names`):
+        // `present`, then the fields, then the columns.
+        let family = *self
+            .row_names
+            .get_or_insert_with(|| g.row_names(&self.name));
+        let parts = 1 + self.fields.len() + self.columns.len();
+        while g.row_parts(family) < parts {
+            let k = g.row_parts(family);
+            let part = match k {
+                0 => "present",
+                k if k <= self.fields.len() => self.fields[k - 1].0.as_str(),
+                k => self.columns[k - 1 - self.fields.len()].name.as_str(),
+            };
+            g.add_row_part(family, part);
         }
-        let present = g.input_value(named(&mut name, stem, "present"), Value::Bool(false))?;
+        let row = |part: usize| RowName {
+            family,
+            slot: s as u32,
+            part: part as u32,
+        };
+        let present = g.row_input(row(0), Value::Bool(false))?;
         let mut fields = Vec::with_capacity(values.len());
-        for ((field, _), value) in self.fields.iter().zip(values) {
-            fields.push(g.input_value(named(&mut name, stem, field), value)?);
+        for (k, value) in values.into_iter().enumerate() {
+            fields.push(g.row_input(row(1 + k), value)?);
         }
         self.slots.push(Slot {
             present,
@@ -1244,8 +1280,8 @@ impl Collection {
             columns: Vec::with_capacity(self.columns.len()),
         });
         for c in 0..self.columns.len() {
-            let name = named(&mut name, stem, &self.columns[c].name);
-            let node = self.define_column(g, s, c, name)?;
+            let node =
+                self.define_column(g, s, c, NodeName::Row(row(1 + self.fields.len() + c)))?;
             self.slots[s].columns.push(node);
         }
         for &(total, target) in &self.totals {

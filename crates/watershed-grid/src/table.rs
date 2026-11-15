@@ -68,6 +68,24 @@ impl Kind {
     }
 }
 
+/// Many rows' fields, a column at a time, for [`Table::upsert_columns`].
+/// For `rows` rows, each column holds `rows` values, and the columns of
+/// each kind are in field order.
+pub struct Columns<'a> {
+    /// The number fields, one after another.
+    pub numbers: &'a [f64],
+    /// The true/false fields, one after another (0 is false).
+    pub bools: &'a [u8],
+    /// The text fields, one after another: for each row, which of its
+    /// field's distinct texts it holds.
+    pub codes: &'a [u32],
+    /// Every text field's distinct texts, one field after another.
+    pub texts: Vec<Value>,
+    /// Where each text field's distinct texts start in `texts`, and one
+    /// more entry for where the last one ends.
+    pub starts: &'a [u32],
+}
+
 /// A number column's total, in the bottom row and in each group's row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agg {
@@ -697,6 +715,96 @@ impl Table {
             );
         }
         self.structural = true;
+        Ok(())
+    }
+
+    /// Makes room for `rows` more rows, so that adding many does not copy
+    /// arrays as they grow, which briefly needs up to twice the memory.
+    pub fn reserve(&mut self, rows: usize) {
+        self.c.reserve(&mut self.g, rows);
+        self.keys.reserve(rows);
+        self.index.reserve(rows);
+        self.nodes.reserve(rows * self.cols.len());
+    }
+
+    /// Adds or replaces many rows at once, from columns rather than text:
+    /// each field's values for every row, in field order. Numbers and
+    /// true/false come as they are; each text field comes as its distinct
+    /// texts and, for every row, which of them it holds, so rows that hold
+    /// the same text share one copy of it.
+    ///
+    /// Everything is checked before any row is added: a bad column adds
+    /// nothing.
+    pub fn upsert_columns(&mut self, keys: &[String], columns: &Columns<'_>) -> Result<(), String> {
+        let kinds = self.field_kinds();
+        let rows = keys.len();
+        let of = |kind: Kind| kinds.iter().filter(|&&k| k == kind).count();
+        let (numbers, bools, texts) = (of(Kind::Number), of(Kind::Bool), of(Kind::Text));
+        let names: Vec<&str> = self
+            .cols
+            .iter()
+            .filter(|c| c.formula.is_none())
+            .map(|c| c.name.as_str())
+            .collect();
+        if columns.numbers.len() != rows * numbers
+            || columns.bools.len() != rows * bools
+            || columns.codes.len() != rows * texts
+            || columns.starts.len() != texts + 1
+            || columns.starts.last().copied() != Some(columns.texts.len() as u32)
+        {
+            return Err(format!(
+                "{rows} rows need {numbers} number, {bools} true/false and {texts} text columns of {rows} values each"
+            ));
+        }
+        // Check every value first, so that a bad one adds no rows at all.
+        let mut n = 0;
+        let mut t = 0;
+        for (kind, name) in kinds.iter().zip(&names) {
+            match kind {
+                Kind::Number => {
+                    let column = &columns.numbers[n * rows..(n + 1) * rows];
+                    if let Some(r) = column.iter().position(|x| !x.is_finite()) {
+                        return Err(format!("{name} of {} is not a number", keys[r]));
+                    }
+                    n += 1;
+                }
+                Kind::Text => {
+                    let distinct = columns.starts[t + 1] - columns.starts[t];
+                    let column = &columns.codes[t * rows..(t + 1) * rows];
+                    if let Some(r) = column.iter().position(|&code| code >= distinct) {
+                        return Err(format!(
+                            "{name} of {} refers to text {} of {distinct}",
+                            keys[r], column[r]
+                        ));
+                    }
+                    t += 1;
+                }
+                Kind::Bool => {}
+            }
+        }
+        self.reserve(rows);
+        for (r, key) in keys.iter().enumerate() {
+            let (mut n, mut b, mut t) = (0, 0, 0);
+            let row = kinds
+                .iter()
+                .map(|kind| match kind {
+                    Kind::Number => {
+                        n += 1;
+                        Value::F64(columns.numbers[(n - 1) * rows + r])
+                    }
+                    Kind::Bool => {
+                        b += 1;
+                        Value::Bool(columns.bools[(b - 1) * rows + r] != 0)
+                    }
+                    Kind::Text => {
+                        t += 1;
+                        let code = columns.codes[(t - 1) * rows + r];
+                        columns.texts[(columns.starts[t - 1] + code) as usize].clone()
+                    }
+                })
+                .collect();
+            self.upsert(key, row)?;
+        }
         Ok(())
     }
 

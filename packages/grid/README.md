@@ -62,6 +62,11 @@ npm install @surefold/grid
 | `history` | Keep this many recalculations back, for trends in cells and for looking back. |
 
 **Writing:** `put(key, row)` adds or replaces a row and needs every field.
+`putMany(keys, columns)` adds or replaces many rows from columns (`{ qty:
+Float64Array, side: string[], … }`), about twice as fast as `put` for a large
+load, with each distinct text stored once; a bad value adds no rows.
+`reserve(rows)` makes room before a large load, so arrays grow once instead
+of doubling, which briefly needs twice the memory.
 `set(key, field, value)` changes one field, `patch(key, values)` some of them,
 `drop(key)` removes a row. `setValue(name, n)` changes a named number, and
 `addFormula(name, formula, total?)` adds a column while it runs.
@@ -117,6 +122,17 @@ from the grid itself. [The grid's README](https://github.com/surefold/watershed/
 says what each does and how it is worked out.
 
 `GroupChart` draws each group's total as a bar, from `table.groups()`.
+
+## How many rows
+
+A row costs about 2 KB in the browser for a table of 7 fields, 3 formulas
+and 6 totals, and a page's WebAssembly memory stops at 4 GB. Loaded with
+`putMany` in blocks, such a table holds about 1.5 million rows; with
+`reserve(2_000_000)` first, about 2 million. Once loaded, a change still
+recalculates only what it reaches: a few price changes take about 0.1 ms
+at a million rows. Loading takes about 400,000 rows a second, on the page's
+thread, and the first recalculation after a large load works out every
+total once (about a second at a million rows).
 
 ## Using it
 
