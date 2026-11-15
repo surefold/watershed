@@ -1,7 +1,7 @@
 //! What the grid promises, one test per promise. Read the names.
 
 use watershed_core::Value;
-use watershed_grid::{Agg, Kind, Table};
+use watershed_grid::{Agg, Columns, Kind, Table};
 
 fn text(s: &str) -> Value {
     Value::Str(s.into())
@@ -1136,4 +1136,55 @@ fn one_row_can_be_read_by_its_key_and_a_removed_row_is_gone() {
     t.update();
     assert_eq!(t.row_json("o-1"), None);
     assert_eq!(t.row_json("nobody"), None);
+}
+
+/// Two rows of orders, a column at a time: regions as codes into ["EU", "US"].
+fn two_orders<'a>(numbers: &'a [f64], codes: &'a [u32]) -> Columns<'a> {
+    Columns {
+        numbers,
+        bools: &[],
+        codes,
+        texts: vec![text("EU"), text("US")],
+        starts: &[0, 2],
+    }
+}
+
+#[test]
+fn many_rows_go_in_a_column_at_a_time_and_come_out_as_if_put_one_by_one() {
+    let mut t = orders();
+    let keys = vec!["o-6".to_string(), "o-7".to_string()];
+    // qty for both rows, then price for both rows.
+    t.upsert_columns(&keys, &two_orders(&[2.0, 3.0, 10.0, 4.0], &[1, 0]))
+        .unwrap();
+    t.update();
+    assert_eq!(t.row_json("o-6").as_deref(), Some(r#"["US",2,10,20]"#));
+    assert_eq!(t.row_json("o-7").as_deref(), Some(r#"["EU",3,4,12]"#));
+    assert_eq!(t.row_count(), 7);
+    assert_eq!(t.check(), Ok(()));
+
+    // The same keys again replace those rows.
+    t.upsert_columns(&keys, &two_orders(&[1.0, 1.0, 1.0, 1.0], &[0, 0]))
+        .unwrap();
+    t.update();
+    assert_eq!(t.row_json("o-6").as_deref(), Some(r#"["EU",1,1,1]"#));
+    assert_eq!(t.row_count(), 7);
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn a_bad_column_adds_no_rows_at_all() {
+    let mut t = orders();
+    let keys = vec!["o-6".to_string(), "o-7".to_string()];
+    let not_a_number = t.upsert_columns(&keys, &two_orders(&[2.0, f64::NAN, 10.0, 4.0], &[0, 0]));
+    assert_eq!(not_a_number, Err("qty of o-7 is not a number".into()));
+    let no_such_text = t.upsert_columns(&keys, &two_orders(&[2.0, 3.0, 10.0, 4.0], &[0, 2]));
+    assert_eq!(
+        no_such_text,
+        Err("region of o-7 refers to text 2 of 2".into())
+    );
+    let too_short = t.upsert_columns(&keys, &two_orders(&[2.0, 3.0, 10.0], &[0, 0]));
+    assert!(too_short.is_err());
+    t.update();
+    assert_eq!(t.row_count(), 5);
+    assert_eq!(t.row_json("o-6"), None);
 }
