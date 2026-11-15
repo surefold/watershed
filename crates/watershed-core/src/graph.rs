@@ -20,6 +20,7 @@
 //!    still counts every node it mentions, so the order stays safe whichever
 //!    ones it reads next time.)
 
+use std::borrow::Cow;
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -80,7 +81,8 @@ struct Hot {
 }
 
 /// Every node's name, stored back to back in one string, with a compact
-/// index from name to node.
+/// index from name to node. A collection's row nodes are the exception:
+/// their names are worked out when asked for (see `RowNames`).
 #[derive(Default)]
 struct Names {
     text: String,
@@ -91,12 +93,146 @@ struct Names {
     /// second and later ones go in `collisions`.
     index: HashMap<u64, NodeId, Prehashed>,
     collisions: HashMap<String, NodeId>,
+    rows: RowNames,
+}
+
+/// A name for `Graph::define_like`: given, or a collection row's.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NodeName<'a> {
+    Given(&'a str),
+    Row(RowName),
+}
+
+/// A new node's name: stored (with its hash, from `check_name`), or a
+/// collection row's, worked out when asked for.
+enum NewName<'a> {
+    Stored(&'a str, u64),
+    Row(RowName),
+}
+
+impl<'a> From<(&'a str, u64)> for NewName<'a> {
+    fn from((name, hash): (&'a str, u64)) -> Self {
+        NewName::Stored(name, hash)
+    }
+}
+
+impl From<RowName> for NewName<'_> {
+    fn from(row: RowName) -> Self {
+        NewName::Row(row)
+    }
+}
+
+/// Which node of a collection's row: the collection (as `Graph::row_names`
+/// gave it), the row's slot, and the part, counted as the collection
+/// counts them: `present`, then the fields, then the columns.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RowName {
+    pub(crate) family: u32,
+    pub(crate) slot: u32,
+    pub(crate) part: u32,
+}
+
+/// The names of collections' row nodes, `prefix[slot].part`, worked out
+/// when asked for instead of stored. A row's nodes are made one after
+/// another, so a run of them takes 16 bytes where their names and index
+/// entries took about fifty bytes a node. They are only asked for to
+/// explain a value or look a node up by name.
+#[derive(Default)]
+struct RowNames {
+    families: Vec<RowFamily>,
+    by_prefix: HashMap<String, u32>,
+    /// In node order: each run is consecutive nodes of one row.
+    runs: Vec<Run>,
+    /// Row nodes removed from the graph: no longer found by name.
+    forgotten: HashSet<u32>,
+    /// Prefixes some stored name starts with, as `prefix[`: a new row node
+    /// in such a family is checked against the stored names.
+    stored_prefixes: HashSet<String>,
+}
+
+struct RowFamily {
+    prefix: String,
+    /// The parts' names, in the order a row's nodes are made.
+    parts: Vec<String>,
+    /// For each slot, its run in `runs`.
+    slots: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct Run {
+    first: u32,
+    len: u32,
+    family: u32,
+    slot: u32,
+    first_part: u32,
+}
+
+impl RowNames {
+    /// The run node `id` is part of, if any.
+    fn run_of(&self, id: u32) -> Option<&Run> {
+        let at = self
+            .runs
+            .partition_point(|r| r.first <= id)
+            .checked_sub(1)?;
+        let run = &self.runs[at];
+        (id < run.first + run.len).then_some(run)
+    }
+
+    fn name(&self, id: u32) -> Option<String> {
+        let run = self.run_of(id)?;
+        let family = &self.families[run.family as usize];
+        let part = &family.parts[(run.first_part + id - run.first) as usize];
+        Some(format!("{}[{}].{part}", family.prefix, run.slot))
+    }
+
+    fn find(&self, name: &str) -> Option<NodeId> {
+        let close = name.rfind("].")?;
+        let open = name[..close].rfind('[')?;
+        let family = &self.families[*self.by_prefix.get(&name[..open])? as usize];
+        let slot: usize = name[open + 1..close].parse().ok()?;
+        let part = family.parts.iter().position(|p| *p == name[close + 2..])? as u32;
+        let run = &self.runs[*family.slots.get(slot)? as usize];
+        let id = run.first + part.checked_sub(run.first_part)?;
+        (part - run.first_part < run.len && !self.forgotten.contains(&id)).then_some(NodeId(id))
+    }
+
+    /// Records that node `id` is `row`. Rows' nodes come one after another.
+    fn push(&mut self, id: u32, row: RowName) {
+        if let Some(run) = self.runs.last_mut()
+            && run.family == row.family
+            && run.slot == row.slot
+            && run.first + run.len == id
+            && run.first_part + run.len == row.part
+        {
+            run.len += 1;
+            return;
+        }
+        let family = &mut self.families[row.family as usize];
+        let slot = row.slot as usize;
+        if family.slots.len() <= slot {
+            family.slots.resize(slot + 1, u32::MAX);
+        }
+        family.slots[slot] = self.runs.len() as u32;
+        self.runs.push(Run {
+            first: id,
+            len: 1,
+            family: row.family,
+            slot: row.slot,
+            first_part: row.part,
+        });
+    }
 }
 
 impl Names {
-    fn get(&self, id: NodeId) -> &str {
+    fn get(&self, id: NodeId) -> Cow<'_, str> {
         let i = id.index();
-        &self.text[self.starts[i] as usize..self.starts[i + 1] as usize]
+        let (from, to) = (self.starts[i] as usize, self.starts[i + 1] as usize);
+        if from == to
+            && let Some(name) = self.rows.name(id.0)
+        {
+            return Cow::Owned(name);
+        }
+        Cow::Borrowed(&self.text[from..to])
     }
 
     fn find(&self, name: &str) -> Option<NodeId> {
@@ -106,7 +242,13 @@ impl Names {
     /// Forgets which node has a name, so that it is not found and the name
     /// can be given again. The node still knows what it was called.
     fn forget(&mut self, id: NodeId) {
-        let name = self.get(id).to_string();
+        if self.rows.run_of(id.0).is_some()
+            && self.starts[id.index()] == self.starts[id.index() + 1]
+        {
+            self.rows.forgotten.insert(id.0);
+            return;
+        }
+        let name = self.get(id).into_owned();
         let hash = self.hash(&name);
         if self.index.get(&hash) == Some(&id) {
             self.index.remove(&hash);
@@ -122,13 +264,23 @@ impl Names {
     }
 
     fn find_hashed(&self, name: &str, hash: u64) -> Option<NodeId> {
-        match self.index.get(&hash) {
+        let stored = match self.index.get(&hash) {
             Some(&id) if self.get(id) == name => Some(id),
             // Nearly every graph has no two names with one hash, and then
             // the name is not hashed a second time to look for one.
             _ if self.collisions.is_empty() => None,
             _ => self.collisions.get(name).copied(),
+        };
+        stored.or_else(|| self.rows.find(name))
+    }
+
+    /// Adds the next node, a row node whose name is worked out when asked for.
+    fn push_row(&mut self, row: RowName, id: NodeId) {
+        if self.starts.is_empty() {
+            self.starts.push(0);
         }
+        self.starts.push(self.text.len() as u32);
+        self.rows.push(id.0, row);
     }
 
     /// Adds the next node's name, whose hash is `hash`. The caller has
@@ -136,6 +288,25 @@ impl Names {
     fn push(&mut self, name: &str, hash: u64, id: NodeId) {
         if self.starts.is_empty() {
             self.starts.push(0);
+        }
+        // A stored name of a row node's form could be given again to a row
+        // made later. One for a row that exists already cannot (collections
+        // store a few such names themselves), so only the others count.
+        if let Some(open) = name.find('[') {
+            let prefix = &name[..open];
+            let slot = name[open + 1..]
+                .split(']')
+                .next()
+                .and_then(|s| s.parse::<usize>().ok());
+            let made = match (self.rows.by_prefix.get(prefix), slot) {
+                (Some(&family), Some(slot)) => {
+                    slot < self.rows.families[family as usize].slots.len()
+                }
+                _ => false,
+            };
+            if !made {
+                self.rows.stored_prefixes.insert(prefix.to_string());
+            }
         }
         self.text.push_str(name);
         self.starts
@@ -366,6 +537,13 @@ impl Graph {
     /// between them, so a large graph is built without its arrays being
     /// copied as they grow (which briefly needs up to twice the memory).
     pub fn reserve(&mut self, nodes: usize, edges: usize) {
+        self.reserve_unnamed(nodes, edges);
+        self.names.index.reserve(nodes);
+    }
+
+    /// As [`reserve`](Self::reserve), for nodes whose names are not stored
+    /// (a collection's rows), so the index of names is left as it is.
+    fn reserve_unnamed(&mut self, nodes: usize, edges: usize) {
         self.values.reserve(nodes);
         self.hot.reserve(nodes);
         self.types.reserve(nodes);
@@ -373,9 +551,34 @@ impl Graph {
         self.first_user.reserve(nodes);
         self.last_user.reserve(nodes);
         self.names.starts.reserve(nodes + 1);
-        self.names.index.reserve(nodes);
         self.edges.reserve(edges);
         self.packed_start.reserve(nodes);
+    }
+
+    /// Makes room for `rows` more rows of a collection, each `nodes` nodes
+    /// with about `edges` links, joining each of `aggregates`: so that
+    /// filling a large collection does not copy its arrays as they grow,
+    /// which briefly needs up to twice the memory.
+    pub(crate) fn reserve_rows(
+        &mut self,
+        family: Option<u32>,
+        rows: usize,
+        nodes: usize,
+        edges: usize,
+        aggregates: &[NodeId],
+    ) {
+        self.reserve_unnamed(rows * nodes, rows * edges);
+        let names = &mut self.names.rows;
+        names.runs.reserve(rows);
+        if let Some(family) = family {
+            names.families[family as usize].slots.reserve(rows);
+        }
+        for &aggregate in aggregates {
+            let hot = self.hot[aggregate.index()];
+            if hot.kind == Kind::Aggregate {
+                self.aggregates[hot.code as usize].reserve(rows);
+            }
+        }
     }
 
     /// Adds an input with a starting value.
@@ -494,11 +697,17 @@ impl Graph {
     /// typed as the original.
     pub(crate) fn define_like(
         &mut self,
-        name: &str,
+        name: NodeName<'_>,
         like: NodeId,
         swap: impl Fn(NodeId) -> NodeId,
     ) -> Result<NodeId, CalcError> {
-        let hash = self.check_name(name)?;
+        let new = match name {
+            NodeName::Given(name) => NewName::Stored(name, self.check_name(name)?),
+            NodeName::Row(row) => {
+                self.check_row_name(row)?;
+                NewName::Row(row)
+            }
+        };
         let model = self.hot[like.index()];
         let mut deps = std::mem::take(&mut self.deps_scratch);
         deps.clear();
@@ -551,7 +760,7 @@ impl Graph {
             kind: model.kind,
         };
         let value = self.evaluate(hot);
-        let id = self.push((name, hash), hot, self.types[like.index()], &deps, value);
+        let id = self.push(new, hot, self.types[like.index()], &deps, value);
         self.deps_scratch = deps;
         Ok(id)
     }
@@ -829,9 +1038,9 @@ impl Graph {
         self.relink_pending = false;
     }
 
-    fn push(
+    fn push<'n>(
         &mut self,
-        (name, hash): (&str, u64),
+        name: impl Into<NewName<'n>>,
         hot: Hot,
         ty: Type,
         deps: &[NodeId],
@@ -843,7 +1052,10 @@ impl Graph {
         self.hot.push(hot);
         self.types.push(ty);
         self.changed_in.push(self.epoch);
-        self.names.push(name, hash, id);
+        match name.into() {
+            NewName::Stored(name, hash) => self.names.push(name, hash, id),
+            NewName::Row(row) => self.names.push_row(row, id),
+        }
         self.first_user.push(NONE);
         self.last_user.push(NONE);
         if self.pull {
@@ -1022,7 +1234,7 @@ impl Graph {
             )));
         }
         let value_type = self.aggregates[hot.code as usize].value_type;
-        self.check_member(self.name(aggregate), value_type, value, present)?;
+        self.check_member(&self.name(aggregate), value_type, value, present)?;
         let top = self.height(value).max(self.height(present));
         if top >= hot.height as usize {
             return Err(CalcError::Invalid(format!(
@@ -1585,8 +1797,68 @@ impl Graph {
         &self.values[id.index()]
     }
 
-    pub fn name(&self, id: NodeId) -> &str {
+    /// The node's name. A collection's row nodes have theirs worked out
+    /// when asked for, so this can be a new `String`.
+    pub fn name(&self, id: NodeId) -> Cow<'_, str> {
         self.names.get(id)
+    }
+
+    /// Starts naming a collection's rows `prefix[slot].part`, worked out
+    /// when asked for. Returns the number [`RowName`]s use for it.
+    pub(crate) fn row_names(&mut self, prefix: &str) -> u32 {
+        let rows = &mut self.names.rows;
+        let family = rows.families.len() as u32;
+        rows.families.push(RowFamily {
+            prefix: prefix.to_string(),
+            parts: Vec::new(),
+            slots: Vec::new(),
+        });
+        rows.by_prefix.insert(prefix.to_string(), family);
+        family
+    }
+
+    /// How many parts a collection's rows have names for.
+    pub(crate) fn row_parts(&self, family: u32) -> usize {
+        self.names.rows.families[family as usize].parts.len()
+    }
+
+    /// Names the next part of a collection's rows.
+    pub(crate) fn add_row_part(&mut self, family: u32, part: &str) {
+        self.names.rows.families[family as usize]
+            .parts
+            .push(part.to_string());
+    }
+
+    /// Adds an input that is part of a collection's row.
+    pub(crate) fn row_input(&mut self, row: RowName, value: Value) -> Result<NodeId, CalcError> {
+        self.check_row_name(row)?;
+        let ty = value
+            .type_of()
+            .ok_or_else(|| TypeError("an input's starting value cannot be an error".into()))?;
+        let hot = Hot {
+            code: 0,
+            len: 0,
+            height: 0,
+            kind: Kind::Input,
+        };
+        Ok(self.push(row, hot, ty, &[], value))
+    }
+
+    /// A row node's name is new by how it is made, unless someone gave a
+    /// stored node a name of that form.
+    fn check_row_name(&self, row: RowName) -> Result<(), CalcError> {
+        let rows = &self.names.rows;
+        let family = &rows.families[row.family as usize];
+        if rows.stored_prefixes.contains(&family.prefix) {
+            let name = format!(
+                "{}[{}].{}",
+                family.prefix, row.slot, family.parts[row.part as usize]
+            );
+            if self.names.find(&name).is_some() {
+                return Err(CalcError::DuplicateName(name));
+            }
+        }
+        Ok(())
     }
 
     pub fn find(&self, name: &str) -> Option<NodeId> {
