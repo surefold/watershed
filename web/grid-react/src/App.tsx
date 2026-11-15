@@ -5,8 +5,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { GroupChart, themes, type AnyTable, type Column, type GridView, type Layout, type Status, type Total } from "@surefold/grid";
-import { TradeBook } from "@surefold/grid/demo";
+import { GroupChart, themes, type AnyGridTable, type Column, type GridView, type Layout, type Status, type Total } from "@surefold/grid";
+import { WorkerTradeBook } from "@surefold/grid/demo";
 import { Grid } from "@surefold/grid-react";
 
 const whole = new Intl.NumberFormat("en-US");
@@ -59,7 +59,9 @@ function download(name: string, text: string, type: string) {
 }
 
 export function App() {
-  const [book, setBook] = useState<{ id: number; book: TradeBook }>();
+  // The rows live in a Web Worker: building them, streaming prices and every
+  // recalculation happen there, and the page only draws.
+  const [book, setBook] = useState<{ id: number; book: WorkerTradeBook }>();
   const [lazy, setLazy] = useState(false);
   const [size, setSize] = useState("50000");
   const [theme, setThemeState] = useState(document.documentElement.dataset.wgTheme ?? "");
@@ -85,7 +87,9 @@ export function App() {
 
   // What the streaming loop and the view's callbacks read, between renders.
   const live = useRef({
-    book: undefined as TradeBook | undefined,
+    book: undefined as WorkerTradeBook | undefined,
+    loaded: 0, // rows loaded as the person scrolled
+
     built: 0,
     view: undefined as GridView | undefined,
     chart: undefined as GroupChart | undefined,
@@ -113,7 +117,7 @@ export function App() {
 
   const drawChart = useCallback(() => {
     // Its columns can be added as it runs, so it is read as a table of any columns.
-    const t: AnyTable | undefined = l.book?.table;
+    const t: AnyGridTable | undefined = l.book?.table;
     const info = l.columns.find((c) => c.name === l.chartName && c.total !== "none");
     if (!t || !info || !l.chart) return;
     const decimals = info.total === "count" ? 0 : (looks[info.name]?.decimals ?? 2);
@@ -183,10 +187,11 @@ export function App() {
     if (l.view) l.layout = l.view.getLayout();
     lookBackState(null);
     const old = l.book;
-    const next = new TradeBook();
-    next.table.setValue("fee_bps", fee);
+    const next = await WorkerTradeBook.create();
+    void next.table.setValue("fee_bps", fee);
     const scrolling = chosen === "scroll";
-    if (scrolling) next.streamingRows();
+    if (scrolling) void next.streamingRows();
+    l.loaded = 0;
     l.book = next;
     l.group = -1; // a grid built again starts with its rows not grouped
     setGroupState(-1);
@@ -203,8 +208,8 @@ export function App() {
       const rows = Number(chosen);
       const chunk = 5000;
       for (let made = 0; made < rows; made += chunk) {
-        next.fill(Math.min(chunk, rows - made));
-        next.table.flush();
+        // The worker builds them; the page stays free to scroll and click.
+        await next.fill(Math.min(chunk, rows - made));
         setProgress(Math.round((100 * (made + chunk)) / rows));
         say(`Building ${whole.format(Math.min(made + chunk, rows))} of ${whole.format(rows)} rows…`);
         await new Promise((done) => setTimeout(done));
@@ -221,8 +226,9 @@ export function App() {
     // Stands in for a server: a short wait, then the next block of rows.
     await new Promise((done) => setTimeout(done, 160));
     if (l.book !== mine || !mine) return false;
-    mine.fill(BLOCK);
-    return mine.table.size < MOST;
+    await mine.fill(BLOCK);
+    l.loaded += BLOCK;
+    return l.loaded < MOST;
   }
 
   // ------------------------------------------------------------- streaming
@@ -239,7 +245,7 @@ export function App() {
     const changes = Math.floor(l.due);
     if (changes > 0) {
       l.due -= changes;
-      l.book?.tick(changes);
+      void l.book?.tick(changes);
     }
     requestAnimationFrame(tick);
   }
@@ -298,9 +304,13 @@ export function App() {
     const [name, source] = [formula.name.trim(), formula.source.trim()];
     if (!name || !source) return say("Give the column a name and a formula, such as: bps = pnl / notional * 10000", "bad");
     try {
-      table().addFormula(name, source, formula.total as Total);
-      setFormula({ ...formula, name: "", source: "" });
-      say(`Added ${name}.`, "good");
+      table()
+        .addFormula(name, source, formula.total as Total)
+        .then(() => {
+          setFormula({ ...formula, name: "", source: "" });
+          say(`Added ${name}.`, "good");
+        })
+        .catch((error: Error) => say(error.message, "bad"));
     } catch (error) {
       say((error as Error).message, "bad");
     }
@@ -313,9 +323,9 @@ export function App() {
     say(`Deleted ${whole.format(count)} row${count === 1 ? "" : "s"}.`, "good");
   }
 
-  function check() {
+  async function check() {
     const started = performance.now();
-    const wrong = table().check();
+    const wrong = await table().check();
     const ms = (performance.now() - started).toFixed(0);
     if (wrong) say(wrong, "bad");
     else say(`Every node matches a full recalculation (${ms} ms).`, "good");
@@ -445,7 +455,7 @@ export function App() {
           </label>
           <span className="grow" />
           <button onClick={removeSelected}>Delete selected</button>
-          <button onClick={() => download("watershed-grid.csv", table().csv(), "text/csv")}>Export CSV</button>
+          <button onClick={async () => download("watershed-grid.csv", await table().csv(), "text/csv")}>Export CSV</button>
           <button className="check" title="Recalculates every node from scratch and compares with the incremental values." onClick={check}>
             Check against full recalculation
           </button>
@@ -472,7 +482,7 @@ export function App() {
                 const value = Number(e.target.value);
                 if (!Number.isFinite(value)) return;
                 setFee(value);
-                table().setValue("fee_bps", value);
+                void table().setValue("fee_bps", value);
               }}
             />
           </label>

@@ -15,6 +15,11 @@ const OVERSCAN = 6;
 const TREND_POINTS = 32;
 const SVG = "http://www.w3.org/2000/svg";
 
+/** The engine gives JSON as text; a WorkerTable's engine gives it parsed. */
+function json(value) {
+  return typeof value === "string" ? JSON.parse(value) : value;
+}
+
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -43,7 +48,10 @@ export class GridView {
   constructor(root, table, options = {}) {
     this.root = root;
     this.table = table;
-    this.grid = table.engine;
+    // A table in a worker gives each view an engine that reads what it draws
+    // from the worker's snapshots, and draws again when rows it asked for come.
+    this.grid = typeof table.connect === "function" ? table.connect(() => this.draw()) : table.engine;
+    this.epoch = 0;
     this.rowH = options.rowHeight ?? 32;
     this.keyTitle = options.keyColumn?.title ?? "key";
     this.keyWidth = options.keyColumn?.width ?? 176;
@@ -160,6 +168,7 @@ export class GridView {
     if (this.destroyed) return;
     this.destroyed = true;
     this.unwatch();
+    this.grid.disconnect?.();
     this.closeMenu();
     this.observer.disconnect();
     cancelAnimationFrame(this.frame);
@@ -168,7 +177,7 @@ export class GridView {
 
   /** Reads the table's columns again: after one was added, or its total changed. */
   readColumns() {
-    this.cols = JSON.parse(this.grid.columns());
+    this.cols = json(this.grid.columns());
     for (let col = this.order.length; col < this.cols.length; col++) this.order.push(col);
     this.numbers = this.cols.map((c) => {
       const decimals = c.agg === "count" && c.kind !== "number" ? 0 : (this.formats[c.name]?.decimals ?? 2);
@@ -191,7 +200,7 @@ export class GridView {
 
   /** Lays the columns out again after their order, pinning or visibility changed. */
   rebuildColumns() {
-    this.cols = JSON.parse(this.grid.columns());
+    this.cols = json(this.grid.columns());
     this.arrange();
     this.body.setAttribute("aria-colcount", this.display.length);
 
@@ -297,9 +306,9 @@ export class GridView {
     let timer = 0;
     input.addEventListener("input", () => {
       clearTimeout(timer);
-      timer = setTimeout(() => {
+      timer = setTimeout(async () => {
         try {
-          this.grid.set_filter(col, input.value);
+          await this.grid.set_filter(col, input.value);
           input.classList.remove("wg-bad");
           input.title = "";
           this.body.scrollTop = 0;
@@ -635,14 +644,15 @@ export class GridView {
       const chip = el("button", "wg-chip", agg);
       chip.type = "button";
       chip.setAttribute("aria-pressed", String(info.agg === agg));
-      chip.addEventListener("click", () => {
+      chip.addEventListener("click", async () => {
         this.closeMenu();
         try {
-          this.grid.set_agg(col, agg);
+          await this.grid.set_agg(col, agg);
         } catch (error) {
           return this.onError(error.message);
         }
-        this.table.columnsChanged();
+        // In a worker, the worker's table has done this already.
+        if (typeof this.table.connect !== "function") this.table.columnsChanged();
         this.refresh();
       });
       chips.append(chip);
@@ -652,8 +662,17 @@ export class GridView {
 
   /** Adds a tick list of a text column's values to its menu; unticking one filters it out. */
   valueFilter(menu, col) {
-    const { more, values } = JSON.parse(this.grid.values(col, 60));
     menu.append(el("div", "wg-menu-title", "Show values"));
+    // The list is filled in when the engine answers (at once, unless it is in a worker).
+    const holder = el("div");
+    menu.append(holder, el("hr"));
+    Promise.resolve(this.grid.values(col, 60)).then(
+      (answer) => this.listValues(holder, col, json(answer)),
+      (error) => holder.append(el("div", "wg-menu-note", error.message)),
+    );
+  }
+
+  listValues(menu, col, { more, values }) {
     if (more) {
       menu.append(el("div", "wg-menu-note", "Too many to list. Type in the filter box instead."));
     } else {
@@ -675,14 +694,13 @@ export class GridView {
         return { box, value };
       });
     }
-    menu.append(el("hr"));
   }
 
   /** Sets a column's filter as if it had been typed in its box. */
-  setFilter(col, text) {
+  async setFilter(col, text) {
     const input = this.filterInputs[col];
     try {
-      this.grid.set_filter(col, text);
+      await this.grid.set_filter(col, text);
       input.value = text;
       input.classList.remove("wg-bad");
       this.body.scrollTop = 0;
@@ -699,7 +717,7 @@ export class GridView {
   setAsOf(epoch) {
     this.stopEdit(false, 0, true);
     try {
-      this.grid.set_as_of(epoch ?? -1);
+      Promise.resolve(this.grid.set_as_of(epoch ?? -1)).catch((error) => this.onError(error.message));
     } catch (error) {
       this.onError(error.message);
     }
@@ -768,9 +786,9 @@ export class GridView {
   }
 
   /** Opens a group and scrolls to it. */
-  revealGroup(key) {
-    if (!this.grid.group_is_open(key)) this.grid.toggle_group(key);
-    const line = this.grid.group_line(key);
+  async revealGroup(key) {
+    if (!(await this.grid.group_is_open(key))) await this.grid.toggle_group(key);
+    const line = await this.grid.group_line(key);
     if (line < 0) return;
     this.draw();
     this.body.scrollTop = line * this.rowH;
@@ -820,6 +838,7 @@ export class GridView {
   redraw(report) {
     if (this.destroyed) return;
     if (report.columns) this.readColumns();
+    this.epoch = report.epoch;
     this.draw();
     this.onStatus({
       ...report,
@@ -858,9 +877,9 @@ export class GridView {
     this.box = this.rangeBox();
     const first = Math.max(0, Math.floor(this.body.scrollTop / this.rowH) - OVERSCAN);
     const count = Math.ceil(this.body.clientHeight / this.rowH) + 2 * OVERSCAN;
-    const lines = JSON.parse(this.grid.rows(first, count));
+    const lines = json(this.grid.rows(first, count));
     const last = first + lines.length;
-    const trends = this.trendCols.map((col) => JSON.parse(this.grid.trends(first, lines.length, col, TREND_POINTS)));
+    const trends = this.trendCols.map((col) => json(this.grid.trends(first, lines.length, col, TREND_POINTS)));
 
     for (const [line, row] of this.live) {
       if (line < first || line >= last) {
@@ -884,13 +903,13 @@ export class GridView {
       this.trendCols.forEach((col, t) => this.spark(row._cells[col + 1], trends[t][k]));
     });
 
-    const totals = JSON.parse(this.grid.totals());
+    const totals = json(this.grid.totals());
     const totalsBefore = this.before.get("total");
     const cells = this.footRow._cells;
     for (const pos of this.display) {
       if (pos > 0) this.setCell(cells[pos], pos - 1, totals[pos - 1], totalsBefore?.[pos - 1]);
     }
-    for (const col of this.trendCols) this.spark(cells[col + 1], JSON.parse(this.grid.total_trend(col, TREND_POINTS)));
+    for (const col of this.trendCols) this.spark(cells[col + 1], json(this.grid.total_trend(col, TREND_POINTS)));
     seen.set("total", totals);
     this.before = seen;
     cells[0].textContent = this.grid.filtered_count() < this.grid.row_count() ? "Total (filtered)" : "Total";
@@ -1010,9 +1029,13 @@ export class GridView {
     const key = hit.data.k;
     if (e.shiftKey && this.anchor !== null) {
       const [low, high] = [Math.min(this.anchor, hit.line), Math.max(this.anchor, hit.line)];
-      const between = JSON.parse(this.grid.rows(low, Math.min(high - low + 1, 20000)));
       if (!(e.metaKey || e.ctrlKey)) this.selected.clear();
-      for (const line of between) if (line.k !== undefined) this.selected.add(line.k);
+      // The rows between may be out of view; a worker sends them when asked.
+      this.lines(low, Math.min(high - low + 1, 20000)).then((between) => {
+        for (const line of between) if (line.k !== undefined) this.selected.add(line.k);
+        this.onStatus({ selected: this.selected.size });
+        this.draw();
+      });
     } else if (e.metaKey || e.ctrlKey) {
       if (!this.selected.delete(key)) this.selected.add(key);
       this.anchor = hit.line;
@@ -1057,7 +1080,7 @@ export class GridView {
     [across, toAcross] = [clamp(across), clamp(toAcross)];
     this.range = line === toLine && across === toAcross ? null : { line, across, toLine, toAcross };
     if (this.focus?.line !== line || this.focus?.pos !== this.display[across]) {
-      const [data] = JSON.parse(this.grid.rows(line, 1));
+      const [data] = json(this.grid.rows(line, 1));
       if (data) this.focusLine(line, this.display[across], data);
     }
     this.rangeChanged();
@@ -1069,7 +1092,10 @@ export class GridView {
     if (!box) return this.onStatus({ range: null });
     const cols = this.rangeCols(box);
     this.rangeCells = (box.l1 - box.l0 + 1) * cols.length;
-    this.onStatus({ range: JSON.parse(this.grid.range_stats(box.l0, box.l1 - box.l0 + 1, cols)) });
+    Promise.resolve(this.grid.range_stats(box.l0, box.l1 - box.l0 + 1, cols)).then(
+      (stats) => this.onStatus({ range: json(stats) }),
+      (error) => this.onError(error.message),
+    );
   }
 
   /** The line and the place across of the cell under a point on the screen. */
@@ -1181,13 +1207,31 @@ export class GridView {
     const f = this.focus;
     if (!f || f.col < 0) return null;
     const name = this.cols[f.col].name;
+    const title = f.kind === "total" ? `Total of ${name}` : f.kind === "group" ? `${name} for ${f.key || "(blank)"}` : `${name} of ${f.key}`;
+    // What was asked for last, and when: an answer from a worker comes
+    // later, so it is kept, and the page told again when it comes.
+    const asking = `${f.kind}|${f.key}|${f.col}|${this.epoch}`;
+    if (this.why?.asking === asking) return this.why.answer;
+    let text;
     try {
-      if (f.kind === "total") return { title: `Total of ${name}`, text: this.grid.explain_total(f.col) };
-      if (f.kind === "group") return { title: `${name} for ${f.key || "(blank)"}`, text: this.grid.explain_group(f.key, f.col) };
-      return { title: `${name} of ${f.key}`, text: this.grid.explain(f.key, f.col) };
+      text = f.kind === "total" ? this.grid.explain_total(f.col) : f.kind === "group" ? this.grid.explain_group(f.key, f.col) : this.grid.explain(f.key, f.col);
     } catch (error) {
       return { title: name, text: error.message };
     }
+    if (typeof text?.then !== "function") return { title, text };
+    const before = this.why?.answer.title === title ? this.why.answer : { title, text: "Working it out…" };
+    this.why = { asking, answer: before };
+    text.then(
+      (answer) => {
+        if (this.why?.asking !== asking || this.destroyed) return;
+        this.why.answer = { title, text: answer };
+        if (this.focus) this.onFocus(this.focus);
+      },
+      (error) => {
+        if (this.why?.asking === asking) this.why.answer = { title: name, text: error.message };
+      },
+    );
+    return before;
   }
 
   /** Moves the focus to a line and to the column `across` places along the screen. */
@@ -1200,7 +1244,7 @@ export class GridView {
     line = Math.min(Math.max(line, 0), this.viewLen - 1);
     const pos = this.display[Math.min(Math.max(across, 0), this.display.length - 1)];
     this.reveal(line, pos);
-    const [data] = JSON.parse(this.grid.rows(line, 1));
+    const [data] = json(this.grid.rows(line, 1));
     if (!data) return;
     this.focusLine(line, pos, data);
     this.draw();
@@ -1330,7 +1374,8 @@ export class GridView {
     editing.cell._text = null; // draw it again
     if (commit) {
       try {
-        this.grid.set_cell(editing.key, editing.col, text);
+        // From a worker, an error comes later.
+        Promise.resolve(this.grid.set_cell(editing.key, editing.col, text)).catch((error) => this.onError(error.message));
       } catch (error) {
         this.onError(error.message);
       }
@@ -1346,9 +1391,9 @@ export class GridView {
   // ------------------------------------------------- undo, copy and paste
 
   /** Puts back the last edit (or pasted block), or with `again` does it again. */
-  undo(again = false) {
+  async undo(again = false) {
     try {
-      const what = again ? this.grid.redo() : this.grid.undo();
+      const what = await (again ? this.grid.redo() : this.grid.undo());
       this.refresh();
       this.onNote(what ? `${again ? "Did again" : "Undid"}: ${what}.` : `Nothing to ${again ? "do again" : "undo"}.`);
     } catch (error) {
@@ -1367,7 +1412,17 @@ export class GridView {
     } else if (this.selected.size > 1) {
       text = this.grid.tsv([...this.selected], Uint32Array.from(this.display.filter((pos) => pos > 0).map((pos) => pos - 1)));
       this.onNote(`Copied ${this.selected.size.toLocaleString("en-US")} rows.`);
-    } else if (this.focus?.kind === "cell") {
+    }
+    if (typeof text?.then === "function") {
+      // From a worker the text comes later, after the copy event, so it goes
+      // to the clipboard through the browser's asynchronous clipboard.
+      e.preventDefault();
+      text
+        .then((copied) => navigator.clipboard.writeText(copied))
+        .catch((error) => this.onError(`Could not copy: ${error.message}`));
+      return;
+    }
+    if (text === null && this.focus?.kind === "cell") {
       const data = this.live.get(this.focus.line)?._data;
       const value = this.focus.pos === 0 ? data?.k : data?.c[this.focus.col];
       if (value !== undefined && value !== null && typeof value !== "object") text = String(value);
@@ -1394,32 +1449,52 @@ export class GridView {
     const across = box ? box.a0 : Math.max(1, this.display.indexOf(this.focus.pos));
     const top = box ? box.l0 : this.focus.line;
     // The rows from there down, passing over group lines.
-    const rows = JSON.parse(this.grid.rows(top, block.length * 2 + 64)).filter((line) => line.k !== undefined);
+    this.lines(top, block.length * 2 + 64).then(async (lines) => {
+      const rows = lines.filter((line) => line.k !== undefined);
+      const cells = [];
+      let skipped = 0;
+      block.slice(0, rows.length).forEach((texts, r) => {
+        texts.forEach((text, c) => {
+          const pos = this.display[across + c];
+          if (pos === undefined || !this.cols[pos - 1].editable) skipped += 1;
+          else cells.push([rows[r].k, pos - 1, text]);
+        });
+      });
+      const done = await this.setCells(cells);
+      this.refresh();
+      const count = (n) => `${n.toLocaleString("en-US")} cell${n === 1 ? "" : "s"}`;
+      skipped += done.skipped;
+      this.onNote(`Pasted ${count(done.set)}${skipped ? `; skipped ${count(skipped)}` : ""}.`);
+    });
+  }
+
+  /** Sets cells (`[key, col, text]`) as one step to undo, skipping those that will not take their text. */
+  async setCells(cells) {
+    if (typeof this.grid.setCells === "function") return this.grid.setCells(cells);
     let [set, skipped] = [0, 0];
     this.grid.begin_edits();
-    block.slice(0, rows.length).forEach((cells, r) => {
-      cells.forEach((text, c) => {
-        const pos = this.display[across + c];
-        try {
-          if (pos === undefined || !this.cols[pos - 1].editable) throw new Error("not a cell that can be set");
-          this.grid.set_cell(rows[r].k, pos - 1, text);
-          set += 1;
-        } catch {
-          skipped += 1;
-        }
-      });
-    });
+    for (const [key, col, text] of cells) {
+      try {
+        this.grid.set_cell(key, col, text);
+        set += 1;
+      } catch {
+        skipped += 1;
+      }
+    }
     this.grid.end_edits();
-    this.refresh();
-    const count = (n) => `${n.toLocaleString("en-US")} cell${n === 1 ? "" : "s"}`;
-    this.onNote(`Pasted ${count(set)}${skipped ? `; skipped ${count(skipped)}` : ""}.`);
+    return { set, skipped };
+  }
+
+  /** Lines of the view, which in a worker may be out of the rows it has sent. */
+  async lines(first, count) {
+    return typeof this.grid.fetchRows === "function" ? this.grid.fetchRows(first, count) : json(this.grid.rows(first, count));
   }
 
   /** Sets every cell of the block to one text, as one step to undo. */
-  fillRange(text) {
+  async fillRange(text) {
     const box = this.rangeBox();
     if (!box) return;
-    const { set, skipped } = JSON.parse(this.grid.fill(box.l0, box.l1 - box.l0 + 1, this.rangeCols(box), text));
+    const { set, skipped } = json(await this.grid.fill(box.l0, box.l1 - box.l0 + 1, this.rangeCols(box), text));
     this.body.focus({ preventScroll: true });
     this.refresh();
     const count = (n) => `${n.toLocaleString("en-US")} cell${n === 1 ? "" : "s"}`;
@@ -1434,7 +1509,10 @@ export class GridView {
 
   /** Removes the selected rows from the grid. */
   removeSelected() {
-    for (const key of this.selected) this.grid.remove(key);
+    const keys = [...this.selected];
+    // In a worker, as one message and one recalculation.
+    if (typeof this.grid.batch === "function") this.grid.batch(() => keys.forEach((key) => this.grid.remove(key)));
+    else for (const key of keys) this.grid.remove(key);
     if (this.focus?.kind === "cell" && this.selected.has(this.focus.key)) {
       this.focus = null;
       this.onFocus(null);

@@ -94,6 +94,9 @@ const pnl = useTotal(trades, "pnl");
 <Grid table={trades} theme="dark" ref={viewRef} />
 ```
 
+For large loads, `WorkerTable` runs the same engine in a Web Worker, so the
+page never waits on it: see the package's README.
+
 The engine loads when `@surefold/grid` is imported (a top-level `await`),
 so a bundler needs to target ES2022 or later. Below the packages is the
 WebAssembly `Grid` class itself (`grid.add_field`, `grid.upsert`…), which

@@ -1,4 +1,4 @@
-import type { Change, Table } from "./table.js";
+import type { AnyGridTable, Change } from "./table.js";
 
 export interface Theme {
   /** What `setTheme` takes; "" takes the page's colours. */
@@ -78,13 +78,13 @@ export interface GridOptions {
 }
 
 /** Draws `table` into `root`, which must have a height. */
-export declare function drawGrid(root: HTMLElement, table: Table<any, any>, options?: GridOptions): GridView;
+export declare function drawGrid(root: HTMLElement, table: AnyGridTable, options?: GridOptions): GridView;
 
 export declare class GridView {
-  constructor(root: HTMLElement, table: Table<any, any>, options?: GridOptions);
+  constructor(root: HTMLElement, table: AnyGridTable, options?: GridOptions);
   setTheme(theme: string): void;
-  /** Recalculates now and redraws. Not needed after changes made through the table. */
-  refresh(): Change;
+  /** Recalculates now and redraws. Not needed after changes made through the table. In a worker, the redraw comes when the worker answers. */
+  refresh(): Change | void;
   getLayout(): Layout;
   setLayout(layout: Partial<Layout>): void;
   setPinned(col: number, pinned: boolean): void;
@@ -107,10 +107,14 @@ export declare class GridView {
   setGroup(col: number): void;
   expandAll(open: boolean): void;
   /** Opens a group and scrolls to it. */
-  revealGroup(key: string): void;
+  revealGroup(key: string): Promise<void>;
   /** Shows the table as it was after an earlier recalculation (see `table.history()`), or now for `null`. */
   setAsOf(epoch: number | null): void;
-  /** Why the focused cell or total has its value. */
+  /**
+   * Why the focused cell or total has its value. With a WorkerTable the
+   * answer comes from the worker: until it does, this says so, and `onFocus`
+   * is called again when it comes.
+   */
   explainFocus(): { title: string; text: string } | null;
   selectedKeys(): string[];
   removeSelected(): void;

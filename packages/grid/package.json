@@ -20,9 +20,9 @@
       "default": "./dist/index.js"
     },
     "./demo": {
-      "source": "./src/demo.ts",
-      "types": "./dist/demo.d.ts",
-      "default": "./dist/demo.js"
+      "source": "./src/demo-entry.ts",
+      "types": "./dist/demo-entry.d.ts",
+      "default": "./dist/demo-entry.js"
     },
     "./grid.css": {
       "source": "./src/grid.css",
@@ -38,11 +38,11 @@
   ],
   "sideEffects": [
     "*.css",
-    "./src/table.ts",
-    "./dist/table.js"
+    "./src/worker.ts",
+    "./dist/worker.js"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp src/view.js src/view.d.ts src/chart.js src/chart.d.ts src/grid.css dist/",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp src/view.js src/view.d.ts src/chart.js src/chart.d.ts src/grid.css dist/ && sed -i.bak 's#\"./worker.ts\"#\"./worker.js\"#' dist/remote.js && rm dist/remote.js.bak",
     "check": "tsc --noEmit -p ."
   }
 }

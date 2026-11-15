@@ -4,8 +4,8 @@
 
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { render } from "solid-js/web";
-import { GroupChart, themes, type Column, type Focus, type GridView, type Layout, type Status, type AnyTable } from "@surefold/grid";
-import { TradeBook } from "@surefold/grid/demo";
+import { GroupChart, themes, type Column, type Focus, type GridView, type Layout, type Status, type AnyGridTable } from "@surefold/grid";
+import { WorkerTradeBook } from "@surefold/grid/demo";
 import { Grid } from "@surefold/grid-solid";
 
 const whole = new Intl.NumberFormat("en-US");
@@ -57,7 +57,9 @@ function download(name: string, text: string, type: string) {
 }
 
 export function App() {
-  const [book, setBook] = createSignal<TradeBook>();
+  // The rows live in a Web Worker: building them, streaming prices and every
+  // recalculation happen there, and the page only draws.
+  const [book, setBook] = createSignal<WorkerTradeBook>();
   const [lazy, setLazy] = createSignal(false);
   const [size, setSize] = createSignal("50000");
   const [theme, setThemeSignal] = createSignal(document.documentElement.dataset.wgTheme ?? "");
@@ -94,7 +96,7 @@ export function App() {
 
   function drawChart() {
     // Its columns can be added as it runs, so it is read as a table of any columns.
-    const t: AnyTable | undefined = book()?.table;
+    const t: AnyGridTable | undefined = book()?.table;
     const info = columns().find((c) => c.name === chartName() && c.total !== "none");
     if (!t || !info || !chart) return;
     const decimals = info.total === "count" ? 0 : ((looks as Record<string, { decimals?: number }>)[info.name]?.decimals ?? 2);
@@ -157,11 +159,12 @@ export function App() {
     if (view) layout = view.getLayout();
     setLookingBack(null);
     const old = book();
-    const next = new TradeBook();
-    next.table.setValue("fee_bps", fee());
+    const next = await WorkerTradeBook.create();
+    void next.table.setValue("fee_bps", fee());
     const scrolling = chosen === "scroll";
-    if (scrolling) next.streamingRows();
+    if (scrolling) void next.streamingRows();
     setLazy(scrolling);
+    loaded = 0;
     setGroupSignal(-1); // a grid built again starts with its rows not grouped
     setColumns(next.table.columns());
     setBook(next); // <Grid> draws the new table, and calls onView
@@ -172,8 +175,8 @@ export function App() {
       const rows = Number(chosen);
       const chunk = 5000;
       for (let made = 0; made < rows; made += chunk) {
-        next.fill(Math.min(chunk, rows - made));
-        next.table.flush();
+        // The worker builds them; the page stays free to scroll and click.
+        await next.fill(Math.min(chunk, rows - made));
         setProgress(Math.round((100 * (made + chunk)) / rows));
         say(`Building ${whole.format(Math.min(made + chunk, rows))} of ${whole.format(rows)} rows…`);
         await new Promise((done) => setTimeout(done));
@@ -185,13 +188,15 @@ export function App() {
     if (LIVE) setStreaming(true);
   }
 
+  let loaded = 0; // rows loaded as the person scrolled, in the book being shown
   async function loadMore() {
     const mine = book();
     // Stands in for a server: a short wait, then the next block of rows.
     await new Promise((done) => setTimeout(done, 160));
     if (book() !== mine || !mine) return false;
-    mine.fill(BLOCK);
-    return mine.table.size < MOST;
+    await mine.fill(BLOCK);
+    loaded += BLOCK;
+    return loaded < MOST;
   }
 
   // ------------------------------------------------------------- streaming
@@ -211,7 +216,7 @@ export function App() {
     const changes = Math.floor(due);
     if (changes > 0) {
       due -= changes;
-      book()?.tick(changes);
+      void book()?.tick(changes);
     }
     requestAnimationFrame(tick);
   }
@@ -268,9 +273,13 @@ export function App() {
     const [name, source] = [formulaName.value.trim(), formula.value.trim()];
     if (!name || !source) return say("Give the column a name and a formula, such as: bps = pnl / notional * 10000", "bad");
     try {
-      table().addFormula(name, source, formulaTotal.value as "sum");
-      formulaName.value = formula.value = "";
-      say(`Added ${name}.`, "good");
+      table()
+        .addFormula(name, source, formulaTotal.value as "sum")
+        .then(() => {
+          formulaName.value = formula.value = "";
+          say(`Added ${name}.`, "good");
+        })
+        .catch((error: Error) => say(error.message, "bad"));
     } catch (error) {
       say((error as Error).message, "bad");
     }
@@ -283,9 +292,9 @@ export function App() {
     say(`Deleted ${whole.format(count)} row${count === 1 ? "" : "s"}.`, "good");
   }
 
-  function check() {
+  async function check() {
     const started = performance.now();
-    const wrong = table().check();
+    const wrong = await table().check();
     const ms = (performance.now() - started).toFixed(0);
     if (wrong) say(wrong, "bad");
     else say(`Every node matches a full recalculation (${ms} ms).`, "good");
@@ -403,7 +412,7 @@ export function App() {
           </label>
           <span class="grow" />
           <button onClick={removeSelected}>Delete selected</button>
-          <button onClick={() => download("watershed-grid.csv", table().csv(), "text/csv")}>Export CSV</button>
+          <button onClick={async () => download("watershed-grid.csv", await table().csv(), "text/csv")}>Export CSV</button>
           <button class="check" title="Recalculates every node from scratch and compares with the incremental values." onClick={check}>
             Check against full recalculation
           </button>
@@ -430,7 +439,7 @@ export function App() {
                 const value = Number(e.currentTarget.value);
                 if (!Number.isFinite(value)) return;
                 setFee(value);
-                table().setValue("fee_bps", value);
+                void table().setValue("fee_bps", value);
               }}
             />
           </label>

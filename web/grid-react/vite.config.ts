@@ -7,6 +7,8 @@ export default defineConfig({
   // Use the packages' TypeScript source from this repository, not their built dist/.
   resolve: { conditions: ["source", ...defaultClientConditions] },
   plugins: [react()],
+  // The table's worker is a module, with a top-level await for its engine.
+  worker: { format: "es" },
   build: { target: "es2022", outDir: "../dist/grid/react", emptyOutDir: false },
   esbuild: { target: "es2022" },
   optimizeDeps: { esbuildOptions: { target: "es2022" } },

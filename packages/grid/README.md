@@ -123,6 +123,45 @@ says what each does and how it is worked out.
 
 `GroupChart` draws each group's total as a bar, from `table.groups()`.
 
+## In a worker
+
+`WorkerTable` is a table whose engine runs in a Web Worker. Loading,
+recalculating and streaming happen there, so a large load never stops the
+page: on 1,000,000 rows loaded with `putMany`, the page's longest wait was
+21 ms, where with `Table` it waits for every block and the first
+recalculation (seconds).
+
+```ts
+import { WorkerTable, drawGrid } from "@surefold/grid";
+
+const trades = await WorkerTable.create({ fields: { … }, formulas: { … }, totals: { … } });
+await trades.putMany(keys, columns);
+drawGrid(element, trades);                  // the same grid, drawing from the worker
+trades.set("T-1", "mark", 102);             // a message; the grid redraws when the worker has recalculated
+trades.total("pnl");                        // from the last snapshot, at once
+await trades.why("T-1", "pnl");             // answered by the worker
+```
+
+It has `Table`'s methods, with two differences:
+
+- **Writes are messages**, run in order, and return promises (which can be
+  ignored). `batch(() => …)` sends what it gathers as one message: one
+  recalculation, one step for undo.
+- **Reads come in two kinds.** `size`, `columns()`, `total()`, `groups()`,
+  `totalTrend()` and `history()` read the snapshot the worker sends after
+  each recalculation, at once; so do `peek`, `watch` and the Solid and React
+  helpers. `get`, `why`, `whyTotal`, `csv` and `check` ask the worker, and
+  return promises.
+
+The grid draws a `WorkerTable` as it draws a `Table`: rows in view come in
+each snapshot, and rows scrolled to are asked for and drawn when they come.
+Copying from a grid in a worker uses the browser's asynchronous clipboard.
+
+The worker is started from this package (`new Worker(new URL(…),
+{ type: "module" })`, which Vite, webpack 5 and Rollup bundle). With Vite,
+set `worker: { format: "es" }`: the worker is a module. To start it
+yourself, pass `{ worker }` to `create`.
+
 ## How many rows
 
 A row costs about 2 KB in the browser for a table of 7 fields, 3 formulas
@@ -130,9 +169,10 @@ and 6 totals, and a page's WebAssembly memory stops at 4 GB. Loaded with
 `putMany` in blocks, such a table holds about 1.5 million rows; with
 `reserve(2_000_000)` first, about 2 million. Once loaded, a change still
 recalculates only what it reaches: a few price changes take about 0.1 ms
-at a million rows. Loading takes about 400,000 rows a second, on the page's
-thread, and the first recalculation after a large load works out every
-total once (about a second at a million rows).
+at a million rows. Loading takes about 400,000 rows a second, and the first
+recalculation after a large load works out every total once (about a second
+at a million rows). With a `Table` the page waits for both; with a
+`WorkerTable` they happen in the worker.
 
 ## Using it
 

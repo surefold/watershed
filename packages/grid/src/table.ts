@@ -35,6 +35,10 @@ export type Fields = Record<string, Kind>;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyTable = Table<any, any>;
 
+/** A table in the page or in a worker: what a grid can draw. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type AnyGridTable = Table<any, any> | import("./remote.js").WorkerTable<any, any>;
+
 /** A row to put: a value for every field. */
 export type RowOf<F extends Fields> = { [N in keyof F]: ValueOf<F[N]> };
 
