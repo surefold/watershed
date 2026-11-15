@@ -5,32 +5,69 @@
 
 **Describe a calculation once. Choose how it runs afterwards.**
 
-Watershed is a computation engine. You write a model as typed formulas, and
-it records what each one depends on. From that one description it updates
-only what a change touches, runs millions of scenarios on CPU threads or
-GPUs with no GPU code from you, and brings a finished batch up to date
-without running it again.
-
-On one insurance model of 19.9 million calculations, written once:
-
-| | |
-|---|---|
-| **58 µs** | to update after one record changes; 570 calculations rerun |
-| **10.2 s** | for 10,000 scenarios on one GPU |
-| **0.2 s** | to bring all 10,000 results up to date after a change, against 11.2 s to rerun |
-| **70 s** | for 2,000,000 scenarios on eight GPUs |
+Watershed is a computation engine. You write a model as ordinary typed
+formulas, and the same model then updates in microseconds when an input
+changes, runs across millions of scenarios on CPU threads or GPUs, and
+spreads over several GPUs when the batch grows. None of those needs the
+model rewritten.
 
 **[Try it in your browser](https://surefold.dev/watershed/)** ·
-[Guide](https://surefold.dev/guides/watershed/) ·
-[Benchmark study](https://surefold.dev/bench/watershed-gpu/) ·
-[Eight-GPU study](https://surefold.dev/bench/watershed-cluster/)
+[Get started](#get-started) ·
+[Guide](https://surefold.dev/guides/watershed/)
 
-[![The engine, compiled to WebAssembly, on a small model of an order. One input changes; the formulas it reaches are recalculated, an update stops where a value comes out the same, and the rest are not looked at. Then the same model runs as a plan for three prices.](docs/demo.gif)](https://surefold.dev/guides/watershed/#try)
+| | On one model of 19.9 million calculations |
+|---|---|
+| **58 µs** | to update after one record changes |
+| **10.2 s** | for 10,000 scenarios on one GPU |
+| **70 s** | for 2,000,000 scenarios on eight GPUs |
 
-That is the engine itself, compiled to WebAssembly, not a drawing of it:
-the [guide](https://surefold.dev/guides/watershed/#try) has it live.
+## Try it in your browser
 
-## A first example
+The [playground](https://surefold.dev/watershed/) is the engine itself,
+compiled to WebAssembly. Nothing to install.
+
+[![The playground on a model of an online order. The price was changed: four of five formulas were recalculated, the update stopped at free_shipping, whose value came out the same, and shipping was never looked at. Below, the same model run as a plan over a million prices in 126 ms.](docs/playground.png)](https://surefold.dev/watershed/)
+
+- **Change an input** on four example models and see which formulas are
+  recalculated, where an update stops, and which are never looked at.
+- **Ask any value why.** Click a node for the tree of values behind it.
+- **Run a model as scenarios.** The same formulas, compiled to a plan and
+  run over up to a million values of one input. In the screenshot, a
+  million took 126 ms in a browser on one thread.
+- **Time it at scale.** Build a graph of a million nodes and compare one
+  change against recalculating everything.
+- **Watch it live.** A crypto book priced from a public feed, every
+  Wikipedia edit as it happens, and a [data grid](https://surefold.dev/watershed/grid/)
+  of 50,000 rows where every cell is a formula.
+
+## What you can build
+
+Each of these is a working example in the repository, on made-up data,
+with its checks and timings.
+
+- **A book that changes all day.** Amendments, corrections and late trades
+  set on the model, each costing what it touches: 58 µs on a book of a
+  million policies.
+- **Risk across thousands of market paths.** An insurance book, a loan book
+  and a pension scheme valued along 10,000 paths on one GPU, with stress
+  tests that replace a few assumptions and run again.
+- **A search over a large population.** A thousand price reviews over five
+  million policies in 5 seconds, with the population loaded onto the GPU
+  once.
+- **Results that stay current.** After a batch, one input changes and all
+  10,000 results come up to date in 0.2 s, where a rerun takes 11.2 s.
+- **A spreadsheet, ten million times.** Formulas read from an `.xlsx`
+  workbook and run as a plan.
+- **Live tables in the browser.** A grid whose cells, columns and totals are
+  formulas, updated as edits arrive.
+
+The [guide](https://surefold.dev/guides/watershed/#applications) has each
+with its figures.
+
+## How it works
+
+You describe the calculation. Watershed records what every formula reads,
+and everything else follows from that record.
 
 ```rust
 use watershed_core::prelude::*;
@@ -68,14 +105,90 @@ total = 36  ← subtotal * (1 + tax_rate)  [changed]
 ```
 
 Expressions are typed: adding a number to a string does not compile, and
-neither does setting a calculated node. With the `cuda` feature,
-`Gpu::new()?.run(&plan, &inputs)` runs the same plan on a GPU.
+neither does setting a calculated node.
+
+An **update** follows the record forwards from a change, lowest level first,
+and stops at any value that comes out the same. A **plan** follows it
+backwards from the outputs you want and compiles what they need for a batch
+of scenarios. The two are held to the same numbers by tests.
+
+[![The engine on a small model of an order, captured from the browser build. One input changes; the formulas it reaches are recalculated, an update stops where a value comes out the same, and the rest are not looked at. Then the same model runs as a plan for three prices.](docs/demo.gif)](https://surefold.dev/guides/watershed/#try)
+
+More: [internals](docs/internals.md), [how plans work](docs/scenario-plans.md),
+[testing and correctness](docs/testing.md).
+
+## Execution
+
+The same model, run the way the question needs.
+
+- **Incrementally.** Work in proportion to the change, with dynamic
+  dependencies and early cutoff, across cores for large updates.
+- **Across scenarios.** One plan for thousands to millions of input sets,
+  on every CPU core.
+- **On a GPU.** The plan's kernels are generated for it; you write no GPU
+  code. A plan and its data can stay on the GPU between runs, with results
+  totalled there.
+- **Fused.** Groups of formulas that feed one another run in one GPU
+  thread, keeping intermediate values out of memory. Experimental.
+- **Refreshed.** After a batch, only the part of the plan a change reaches
+  is rerun. Experimental.
+- **Across several GPUs.** A saved plan runs in lots, one worker per GPU,
+  with a lot moved if a worker stops. Experimental; run on eight GPUs in one
+  machine.
+
+You choose where a plan runs. Choosing automatically from measured costs is
+research in progress.
+
+### Status
+
+| | State | Where |
+|---|---|---|
+| Incremental updates, typed values, collections and grouping | Built | [core guide](crates/watershed-core/README.md) |
+| History, explanation, change sinks, formulas as text | Built | [core guide](crates/watershed-core/README.md#history-and-change-tracking) |
+| Scenario plans on CPU threads and CUDA; data resident on the GPU | Built | [watershed-gpu](crates/watershed-gpu/README.md), [how plans work](docs/scenario-plans.md) |
+| Python, Kotlin, Scala and WebAssembly interfaces to the incremental engine | Built | [Architecture](#architecture) |
+| Refreshing a batch after a change | Experimental | [watershed-gpu](crates/watershed-gpu/README.md#bringing-a-run-up-to-date-after-a-change) |
+| Fused kernels | Experimental, off by default | [watershed-gpu](crates/watershed-gpu/README.md#working-nodes-out-in-clusters) |
+| Saved plans, and lots across GPUs | Experimental; run on eight GPUs in one machine | [watershed-gpu](crates/watershed-gpu/README.md#running-a-batch-somewhere-else), [watershed-jvm](https://github.com/surefold/watershed-jvm) |
+| Scenario plans from Kotlin, and in the browser on one thread | Experimental | [watershed-jvm](https://github.com/surefold/watershed-jvm), [grid README](crates/watershed-grid/README.md) |
+| Reading a model from an `.xlsx` workbook | Experimental; one workbook tried | [watershed-gpu](crates/watershed-gpu/README.md#running-the-examples) |
+| Choosing CPU or GPU automatically from measured costs | Research | [research note](docs/research/heterogeneous-execution.md) |
+| Workers on several machines; a release on crates.io and PyPI | Planned | |
+
+## Performance
+
+Three measurements, one model: lifelib's
+[`savings.CashValue_ME_EX2`](https://lifelib.io/libraries/savings/index.html),
+20,000 groups of policies projected month by month, 19.9 million
+calculations, on synthetic data.
+
+| What | Result | On |
+|---|---|---|
+| One record changes | 58 µs; 570 calculations rerun | Ryzen 9 5950X, median of five runs |
+| 10,000 scenarios | 10.2 s, including transfers and kernel compilation | One RTX 3090, median of five runs |
+| 2,000,000 scenarios | 18 min 46 s on one GPU, 2 min 43 s on eight, 70 s on eight with fused kernels | A100 (40 GB) GPUs in one machine; eight plain twice, the others once |
+
+Every result is checked: the model agrees with lifelib to 3.1 × 10⁻¹³, and
+a plan on CPU threads is bit-identical to the graph.
+
+The full picture, with hardware, method, the cases where CPU threads are
+the better choice, and what did not pay:
+[benchmark study](https://surefold.dev/bench/watershed-gpu/),
+[eight-GPU study](https://surefold.dev/bench/watershed-cluster/) and
+[docs/benchmarks.md](docs/benchmarks.md).
 
 ## Get started
 
-Everything is pre-release and built from source, so each route needs a
-[Rust toolchain](https://rustup.rs) (1.85 or later). Nothing is published to
-crates.io or PyPI yet.
+Watershed is pre-release. Nothing is published to crates.io, PyPI or Maven
+yet, so every route builds from source and needs a
+[Rust toolchain](https://rustup.rs) (1.85 or later).
+
+| | Install | Covers |
+|---|---|---|
+| Rust | A git dependency | The whole engine |
+| Python | One `pip install` from the repository | Incremental engine, collections, formulas as text |
+| Kotlin, Scala | Clone [watershed-jvm](https://github.com/surefold/watershed-jvm); needs JDK 25 and sbt | Incremental engine; scenario plans in Kotlin, experimental |
+| Browser | Nothing: the [playground](https://surefold.dev/watershed/) | The example models, updates and plans on one thread |
 
 **Rust.** Add the crates and run the example above:
 
@@ -85,15 +198,15 @@ watershed-core = { git = "https://github.com/surefold/watershed" }
 watershed-gpu  = { git = "https://github.com/surefold/watershed" }   # scenario plans; CPU threads by default
 ```
 
-For both ways of running on a model of realistic size, with no data files:
+For a model of realistic size, in a clone of this repository, with no data
+files:
 
 ```bash
 cargo run --release -p watershed-gpu --example loans -- 2000 1000     # 2,000 loans, 1,000 scenarios, on CPU threads
 cargo run --release -p watershed-gpu --features cuda --example loans  # 20,000 × 10,000 on an NVIDIA GPU
 ```
 
-**Python.** The incremental engine, collections and formulas as text;
-scenario plans are not exposed yet. Python 3.9 or later.
+**Python.** Python 3.9 or later.
 
 ```bash
 pip install "git+https://github.com/surefold/watershed#subdirectory=crates/watershed-py"
@@ -115,109 +228,30 @@ print(g.explain(total))  # the tree behind it
 
 More in the [Python guide](crates/watershed-py/README.md).
 
-**Kotlin and Scala.** In
-[surefold/watershed-jvm](https://github.com/surefold/watershed-jvm), with
-typed expressions and failures as values. `sbt exampleKotlin/run` and
-`sbt exampleScala/run` run a first program in each. Scenario plans are in
-Kotlin and experimental.
+**Kotlin and Scala.** `sbt exampleKotlin/run` and `sbt exampleScala/run` in
+[watershed-jvm](https://github.com/surefold/watershed-jvm) run a first
+program in each.
 
-**Browser.** The [playground](https://surefold.dev/watershed/) needs nothing
-installed. To build the WebAssembly module yourself, see the
+**Browser.** To build the WebAssembly module yourself, see the
 [grid README](crates/watershed-grid/README.md#building-and-running).
 
-## What it does
+The [guide](https://surefold.dev/guides/watershed/#example) has the same
+example in every language, with what each prints.
 
-The model says what is calculated. How it runs is decided separately, and
-the pieces combine.
+## Documentation
 
-**Compose.** A model is inputs and typed formulas: `f64`, `i64`, exact
-decimals, booleans and strings, conditionals that depend only on the branch
-they took, keyed collections with totals and groups, and formulas parsed
-from text or read from a workbook. Watershed records what every formula
-reads, and that record is all the rest needs.
+| | |
+|---|---|
+| Guide and playground | [surefold.dev/guides/watershed](https://surefold.dev/guides/watershed/), [surefold.dev/watershed](https://surefold.dev/watershed/) |
+| The engine, feature by feature | [core guide](crates/watershed-core/README.md), [scenario plans](crates/watershed-gpu/README.md) |
+| Examples | [`loans`, `liabilities`, `capital` and the rest](crates/watershed-gpu/README.md#running-the-examples); `cargo run --example tour` |
+| API reference | `cargo doc --open -p watershed-core` (or `-p watershed-gpu`); Python [type stubs](crates/watershed-py/watershed.pyi) |
+| How it is built | [internals](docs/internals.md), [how plans work](docs/scenario-plans.md), [testing](docs/testing.md) |
+| Benchmarks and how to reproduce them | [docs/benchmarks.md](docs/benchmarks.md) |
+| Limits | [docs/limitations.md](docs/limitations.md) |
+| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
-**Execute.** An update follows the record forwards from a change and stops
-at any value that comes out the same. A plan follows it backwards from the
-outputs you want and compiles what they need for a batch of scenarios:
-levels that each run at once, one kernel for every kind of arithmetic, and
-storage reused after a value's last reader. A plan runs on CPU threads or a
-CUDA GPU, as you choose, and its data can stay on the GPU between runs.
-
-**Scale.** One plan runs thousands to millions of scenarios, and a stress
-test replaces a few shared assumptions with nothing recompiled. After a
-batch, a refresh reruns only the part of the plan a change reaches. A saved
-plan runs in lots across several GPUs.
-
-These stack: the 70-second run above is a fused plan, saved to a file, run
-in lots by eight workers, and checked bit for bit against an unfused plan
-in one process.
-
-### Status
-
-| | State | Where |
-|---|---|---|
-| Incremental updates, typed values, collections and grouping | Built | [core guide](crates/watershed-core/README.md) |
-| History, explanation, change sinks, formulas as text | Built | [core guide](crates/watershed-core/README.md#history-and-change-tracking) |
-| Scenario plans on CPU threads and CUDA; data resident on the GPU | Built | [watershed-gpu](crates/watershed-gpu/README.md), [how plans work](docs/scenario-plans.md) |
-| Python, Kotlin, Scala and WebAssembly interfaces to the incremental engine | Built | [Architecture](#architecture) |
-| Refreshing a batch after a change | Experimental | [watershed-gpu](crates/watershed-gpu/README.md#bringing-a-run-up-to-date-after-a-change) |
-| Fused kernels | Experimental, off by default | [watershed-gpu](crates/watershed-gpu/README.md#working-nodes-out-in-clusters) |
-| Saved plans, and lots across GPUs | Experimental; run on eight GPUs in one machine | [watershed-gpu](crates/watershed-gpu/README.md#running-a-batch-somewhere-else), [watershed-jvm](https://github.com/surefold/watershed-jvm) |
-| Scenario plans from Kotlin, and in the browser on one thread | Experimental | [watershed-jvm](https://github.com/surefold/watershed-jvm), [grid README](crates/watershed-grid/README.md) |
-| Reading a model from an `.xlsx` workbook | Experimental; one workbook tried | [watershed-gpu](crates/watershed-gpu/README.md#running-the-examples) |
-| Choosing CPU or GPU automatically from measured costs | Research | [research note](docs/research/heterogeneous-execution.md) |
-| Workers on several machines; a release on crates.io and PyPI | Planned | |
-
-## Measured
-
-All on one synthetic insurance model unless it says otherwise: lifelib's
-[`savings.CashValue_ME_EX2`](https://lifelib.io/libraries/savings/index.html),
-20,000 groups of policies projected month by month, 19.9 million
-calculations. Hardware, runs and method are in
-[docs/benchmarks.md](docs/benchmarks.md) and the two studies linked above.
-
-- **Updates cost what they touch.** One record changing recalculated 570
-  calculations in 58 µs, on a Ryzen 9 5950X.
-- **Large models over many scenarios belong on a GPU.** 10,000 scenarios took
-  10.2 s on one RTX 3090, including transfers and kernel compilation, and
-  about 7.5 minutes on 32 CPU threads (estimated from a sample).
-- **Small models belong on CPU threads, unless the data stays put.** A
-  22-calculation pricing model over five million policies takes 5 ms to
-  execute on a GPU and 280 ms a run once data is copied each way. With the
-  data kept on the GPU, a thousand repricings took 5 seconds.
-- **A change after a batch costs a fraction of the batch.** 0.14 to 0.22 s
-  against 11.2 s to rerun, with identical results.
-- **A batch divides across GPUs, and fusion shortens it again.** Two million
-  scenarios took 18 min 46 s on one A100, 2 min 43 s on eight, and 70 s on
-  eight with fused kernels.
-- **The numbers are checked.** The model agrees with lifelib to 3.1 × 10⁻¹³,
-  and a plan on CPU threads is bit-identical to the graph.
-
-## How it works
-
-**The graph.** Nodes are inputs or expressions over other nodes. Each has a
-height: one more than the highest node it uses. Values, compiled
-expressions and dependency links are stored in flat arrays indexed by node
-id.
-
-**An update.** `set` records a change; `stabilize` applies all pending
-changes, lowest height first, so each affected node is recalculated once,
-after everything it uses. A node whose new value equals its old one does not
-queue its users. A level with tens of thousands of affected nodes is
-recalculated across cores.
-
-**A plan.** `Scenarios` walks back from the outputs, classifies each node as
-per-scenario, shared across scenarios or constant, and translates the
-per-scenario nodes into a flat program ordered by level. It knows the last
-level that reads each node and reuses its storage afterwards: 344,124 values
-of working memory per scenario for the 19.9-million-node model, where one
-per node would be 159 MB. That decides how many scenarios fit on a GPU at
-once.
-
-More: [internals](docs/internals.md), [how plans work](docs/scenario-plans.md),
-[testing and correctness](docs/testing.md).
-
-## Architecture
+### Architecture
 
 | Component | Location | Role |
 |---|---|---|
@@ -229,21 +263,9 @@ More: [internals](docs/internals.md), [how plans work](docs/scenario-plans.md),
 | Data grid | [`crates/watershed-grid`](crates/watershed-grid/README.md), [`web/grid/`](web/grid) | A browser data grid in which every cell is a graph node. |
 | Kotlin and Scala | [surefold/watershed-jvm](https://github.com/surefold/watershed-jvm) | The JVM API, and the experimental cluster that runs a plan's lots across GPUs. |
 
-[surefold/wsb](https://github.com/surefold/wsb), a typed build-file language
-for JVM projects, is a separate project that uses the engine.
+### Limitations
 
-## Documentation
-
-- **Guide and playground:** [surefold.dev/guides/watershed](https://surefold.dev/guides/watershed/), [surefold.dev/watershed](https://surefold.dev/watershed/).
-- **API reference:** `cargo doc --open -p watershed-core` (or `-p watershed-gpu`); Python [type stubs](crates/watershed-py/watershed.pyi).
-- **Examples:** [`loans`, `liabilities`, `capital` and the rest](crates/watershed-gpu/README.md#running-the-examples); `cargo run --example tour` prints a small graph before and after an update.
-- **Benchmarks and how to reproduce them:** [docs/benchmarks.md](docs/benchmarks.md).
-- **Limits:** [docs/limitations.md](docs/limitations.md).
-- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Limitations
-
-The ones that decide whether Watershed fits; the full list is in
+The ones that decide whether Watershed fits; the rest are in
 [docs/limitations.md](docs/limitations.md).
 
 - **Plans cover numeric formulas.** `f64` and `bool` with arithmetic,
@@ -255,11 +277,10 @@ The ones that decide whether Watershed fits; the full list is in
   about a microsecond a node. Watershed earns that back on the second run
   and on every change after.
 - **GPU agreement has documented allowances** for NaN payloads, signed zero
-  and rounding in `exp`, `ln` and `pow`. CPU plans are bit-identical to the
-  graph.
+  and rounding in `exp`, `ln` and `pow`.
 - **CUDA only** on the GPU side.
 
-## Building, releases and licence
+### Building, releases and licence
 
 ```bash
 cargo build --workspace
@@ -268,9 +289,7 @@ cargo test -p watershed-gpu --features cuda      # GPU tests; needs the CUDA too
 ```
 
 There are no tagged releases yet: depend on the repository, and expect APIs
-to change. CI runs formatting, clippy, the tests on stable and Rust 1.85,
-the documentation build, three examples, a WebAssembly build and the Python
-tests. [CONTRIBUTING.md](CONTRIBUTING.md) has the rest.
+to change. [CONTRIBUTING.md](CONTRIBUTING.md) has the checks CI runs.
 
 Licensed under the Apache License 2.0; see [`LICENSE`](LICENSE). Work
 derived from other projects is listed in
