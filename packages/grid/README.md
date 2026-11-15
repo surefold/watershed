@@ -170,9 +170,9 @@ and 6 totals, and a page's WebAssembly memory stops at 4 GB. Loaded with
 `reserve(2_000_000)` first, about 2 million. Once loaded, a change still
 recalculates only what it reaches: a few price changes take about 0.1 ms
 at a million rows. Loading takes about 400,000 rows a second, and the first
-recalculation after a large load works out every total once (about a second
-at a million rows). With a `Table` the page waits for both; with a
-`WorkerTable` they happen in the worker.
+recalculation after a large load works out every total once (about half a
+second at a million rows in the browser). With a `Table` the page waits for
+both; with a `WorkerTable` they happen in the worker.
 
 ## Using it
 

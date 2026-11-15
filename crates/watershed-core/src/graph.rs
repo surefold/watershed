@@ -933,10 +933,7 @@ impl Graph {
 
         // Members waiting to join aggregates are links too: join them now,
         // so the search for a cycle below sees them.
-        for (aggregate, value, present) in std::mem::take(&mut self.pending_members) {
-            self.join_aggregate(aggregate, value, present, self.epoch + 1);
-            self.redefined.insert(aggregate);
-        }
+        self.join_pending_members(self.epoch + 1);
 
         let mut deps: Vec<NodeId> = refs.into_iter().map(|r| r.node).collect();
         deps.sort();
@@ -1379,6 +1376,19 @@ impl Graph {
     /// Adds a member staged by `extend_aggregate` and links it. The caller
     /// queues the aggregate, so that it is recalculated to count the member.
     fn join_aggregate(&mut self, aggregate: NodeId, value: NodeId, present: NodeId, from: u64) {
+        self.join_aggregate_into(aggregate, value, present, from, None);
+    }
+
+    /// As `join_aggregate`; with `links`, the new links are gathered there
+    /// (as the node and its new user) rather than linked one at a time.
+    fn join_aggregate_into(
+        &mut self,
+        aggregate: NodeId,
+        value: NodeId,
+        present: NodeId,
+        from: u64,
+        mut links: Option<&mut Vec<(u32, Use)>>,
+    ) {
         let hot = self.hot[aggregate.index()];
         let code = hot.code as usize;
         self.aggregates[code].joining_from(from);
@@ -1389,11 +1399,45 @@ impl Graph {
             self.need(present);
         }
         let (new_value, new_present) = self.aggregates[code].push(value.0, present.0);
-        if new_value {
-            self.add_user(value, aggregate);
+        let new = [(new_value, value), (new_present, present)];
+        for node in new
+            .into_iter()
+            .filter(|&(new, _)| new)
+            .map(|(_, node)| node)
+        {
+            match links.as_deref_mut() {
+                Some(links) => links.push((
+                    node.0,
+                    Use {
+                        user: aggregate.0,
+                        height: hot.height | AGGREGATE,
+                    },
+                )),
+                None => self.add_user(node, aggregate),
+            }
         }
-        if new_present {
-            self.add_user(present, aggregate);
+    }
+
+    /// Joins the members waiting to join aggregates. Many at once (a table
+    /// just filled) skip the linked lists: their links are gathered, put in
+    /// node order (they come nearly so) and packed with the others in one
+    /// pass, instead of being linked one at a time and copied again later.
+    fn join_pending_members(&mut self, from: u64) {
+        let members = std::mem::take(&mut self.pending_members);
+        let bulk = members.len() >= BULK_JOIN && !self.pull;
+        let mut links = Vec::with_capacity(if bulk { 2 * members.len() } else { 0 });
+        // The aggregates that gained members: a few, each many times over.
+        let mut joined: Vec<NodeId> = Vec::new();
+        for (aggregate, value, present) in members {
+            self.join_aggregate_into(aggregate, value, present, from, bulk.then_some(&mut links));
+            if !joined.contains(&aggregate) {
+                joined.push(aggregate);
+            }
+        }
+        self.redefined.extend(joined);
+        if bulk {
+            sort_nearly_sorted(&mut links);
+            self.repack_with(&links);
         }
     }
 
@@ -1440,12 +1484,10 @@ impl Graph {
         self.last_recalculated.clear();
         if self.relink_pending {
             self.relink();
-        } else if self.edges.len() * 4 > self.packed.len() {
-            self.repack();
         }
-        for (aggregate, value, present) in std::mem::take(&mut self.pending_members) {
-            self.join_aggregate(aggregate, value, present, epoch);
-            self.redefined.insert(aggregate);
+        self.join_pending_members(epoch);
+        if self.edges.len() * 4 > self.packed.len() {
+            self.repack();
         }
         // Parked nodes that have become needed are recalculated whatever
         // their reads say: what they read changed in earlier updates.
@@ -1687,9 +1729,16 @@ impl Graph {
     /// packed ones, so each link is copied a constant number of times on
     /// average, however the graph is built.
     fn repack(&mut self) {
+        self.repack_with(&[]);
+    }
+
+    /// As `repack`, with `extra` links (each node and a new user, in node
+    /// order) packed after each node's others.
+    fn repack_with(&mut self, extra: &[(u32, Use)]) {
         let nodes = self.hot.len();
+        let mut more = extra.iter().peekable();
         let mut start = Vec::with_capacity(nodes + 1);
-        let mut packed = Vec::with_capacity(self.packed.len() + self.edges.len());
+        let mut packed = Vec::with_capacity(self.packed.len() + self.edges.len() + extra.len());
         start.push(0);
         for n in 0..nodes {
             if n + 1 < self.packed_start.len() {
@@ -1701,6 +1750,9 @@ impl Graph {
                 let Edge { user, height, next } = self.edges[edge as usize];
                 packed.push(Use { user, height });
                 edge = next;
+            }
+            while let Some(&(_, link)) = more.next_if(|&&(node, _)| node as usize == n) {
+                packed.push(link);
             }
             start.push(u32::try_from(packed.len()).expect("a graph holds at most u32::MAX links"));
         }
@@ -2609,6 +2661,32 @@ fn evaluate(
     }
 }
 
+/// Puts links in node order. A collection's rows join their totals one row
+/// after another, so each link is at most a few places out: moving each
+/// back into place is a pass over them, with no copy. If one is far out,
+/// they are sorted instead.
+fn sort_nearly_sorted(links: &mut [(u32, Use)]) {
+    for i in 1..links.len() {
+        let item = links[i];
+        let mut j = i;
+        while j > 0 && links[j - 1].0 > item.0 {
+            if i - j >= 64 {
+                // Put back the link being moved, then sort them all.
+                links[j] = item;
+                links.sort_by_key(|&(node, _)| node);
+                return;
+            }
+            links[j] = links[j - 1];
+            j -= 1;
+        }
+        links[j] = item;
+    }
+}
+
+/// Members joining aggregates in one update from which their links are
+/// gathered and packed at once rather than linked one at a time.
+const BULK_JOIN: usize = 4096;
+
 /// One "is used by" link: `user` uses the node whose list this edge is on.
 /// The user's height is kept here too, so passing on an update can queue the
 /// user without looking anything else up.
@@ -2659,6 +2737,31 @@ enum Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_a_few_places_out_or_far_out_are_put_in_node_order_and_none_is_lost() {
+        let link = |node: u32, user: u32| (node, Use { user, height: 0 });
+        let users = |links: &[(u32, Use)]| -> Vec<(u32, u32)> {
+            links.iter().map(|&(n, u)| (n, u.user)).collect()
+        };
+        // A few places out, as a collection's rows give them.
+        let mut near: Vec<_> = (0..1000).map(|n| link(n ^ 3, n)).collect();
+        let mut expected = users(&near);
+        expected.sort_by_key(|&(node, _)| node);
+        sort_nearly_sorted(&mut near);
+        assert_eq!(users(&near), expected);
+        // One far out, which falls back to sorting them all.
+        let mut far: Vec<_> = (0..1000).map(|n| link(n, n)).collect();
+        far.push(link(5, 9999));
+        let mut expected = users(&far);
+        expected.sort_by_key(|&(node, _)| node);
+        sort_nearly_sorted(&mut far);
+        assert_eq!(
+            users(&far),
+            expected,
+            "every link is kept, in node order, ties in arrival order"
+        );
+    }
 
     /// Two names with the same 64-bit hash almost never happen by chance, so
     /// force one: make "b"'s hash already point at "a".

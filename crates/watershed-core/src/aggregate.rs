@@ -199,9 +199,15 @@ pub(crate) struct Aggregate {
     pub(crate) value_type: Type,
     /// Each member's value node and presence node.
     pub(crate) members: Vec<(u32, u32)>,
-    /// From a node to the member it is part of (see `MANY`). Nearly every
-    /// node is part of one, so this holds a number, not a list: eight bytes
-    /// an entry, where a million members are two million entries.
+    /// While members join in node order (each member's value node and
+    /// presence node after the last member's, as a collection's rows do),
+    /// a node's member is found by searching `members`, and `by_node` stays
+    /// empty: no map of a million members. The first member out of order
+    /// builds the map, and it is used from then on.
+    ordered: bool,
+    /// From a node to the member it is part of (see `MANY`), once members
+    /// stop coming in order. Nearly every node is part of one, so this holds
+    /// a number, not a list.
     by_node: HashMap<u32, u32, ById>,
     /// The members of each node that is part of more than one.
     many: Vec<Vec<u32>>,
@@ -253,6 +259,7 @@ impl Aggregate {
             op,
             value_type,
             members: Vec::new(),
+            ordered: true,
             by_node: HashMap::default(),
             many: Vec::new(),
             tree: Tree::new(op, value_type, 2, identity(op, value_type)),
@@ -287,6 +294,25 @@ impl Aggregate {
     /// only the first answer can be true.
     pub(crate) fn push(&mut self, value: u32, present: u32) -> (bool, bool) {
         let index = self.members.len() as u32;
+        if self.ordered {
+            let follows = self
+                .members
+                .last()
+                .is_none_or(|&(v, p)| value > v && present > p);
+            if follows {
+                // Neither node can be part of an earlier member except as
+                // the other kind (a value node that is also a presence node).
+                let new_value = !self.is_present_node(value);
+                let new_present = present != value && !self.is_value_node(present);
+                self.members.push((value, present));
+                if self.members.len() > self.capacity() {
+                    self.grow();
+                }
+                self.changed.push(value);
+                return (new_value, new_present);
+            }
+            self.stop_ordering();
+        }
         self.members.push((value, present));
         let new = (
             self.note(value, index),
@@ -304,10 +330,66 @@ impl Aggregate {
     pub(crate) fn reserve(&mut self, more: usize) {
         let wanted = self.members.len() + more;
         self.members.reserve(more);
-        // A member's value node and its presence node.
-        self.by_node.reserve(2 * more);
+        if !self.ordered {
+            // A member's value node and its presence node.
+            self.by_node.reserve(2 * more);
+        }
         while self.capacity() < wanted {
             self.grow();
+        }
+    }
+
+    /// Whether `node` is some member's value node (members in order).
+    fn is_value_node(&self, node: u32) -> bool {
+        self.members.last().is_some_and(|&(v, _)| node <= v)
+            && self
+                .members
+                .binary_search_by_key(&node, |&(v, _)| v)
+                .is_ok()
+    }
+
+    /// Whether `node` is some member's presence node (members in order).
+    fn is_present_node(&self, node: u32) -> bool {
+        self.members.last().is_some_and(|&(_, p)| node <= p)
+            && self
+                .members
+                .binary_search_by_key(&node, |&(_, p)| p)
+                .is_ok()
+    }
+
+    /// The members `node` is part of, as their indexes.
+    fn members_of(&self, node: u32, out: &mut Vec<usize>) {
+        if self.ordered {
+            if let Ok(i) = self.members.binary_search_by_key(&node, |&(v, _)| v) {
+                out.push(i);
+            }
+            if let Ok(i) = self.members.binary_search_by_key(&node, |&(_, p)| p) {
+                out.push(i);
+            }
+            return;
+        }
+        match self.by_node.get(&node) {
+            Some(&held) if held & MANY != 0 => {
+                out.extend(
+                    self.many[(held & !MANY) as usize]
+                        .iter()
+                        .map(|&i| i as usize),
+                );
+            }
+            Some(&i) => out.push(i as usize),
+            None => {}
+        }
+    }
+
+    /// A member came out of order: from now on, nodes are found through `by_node`.
+    fn stop_ordering(&mut self) {
+        self.ordered = false;
+        for index in 0..self.members.len() {
+            let (value, present) = self.members[index];
+            self.note(value, index as u32);
+            if present != value {
+                self.note(present, index as u32);
+            }
         }
     }
 
@@ -365,16 +447,16 @@ impl Aggregate {
     /// Brings the result up to date with the members that changed, updating
     /// only their paths to the root.
     pub(crate) fn recalculate(&mut self, values: &[Value]) -> Value {
+        // When about as many nodes changed as there are members (a table
+        // just filled, or every price moved), working out every leaf is less
+        // work than looking up and sorting the members they belong to, and
+        // gives the same tree.
+        if self.changed.len() >= self.members.len() / 2 {
+            return self.recalculate_everything(values);
+        }
         let mut indexes: Vec<usize> = Vec::new();
         for node in std::mem::take(&mut self.changed) {
-            match self.by_node.get(&node) {
-                Some(&held) if held & MANY != 0 => {
-                    let list = &self.many[(held & !MANY) as usize];
-                    indexes.extend(list.iter().map(|&i| i as usize));
-                }
-                Some(&i) => indexes.push(i as usize),
-                None => {}
-            }
+            self.members_of(node, &mut indexes);
         }
         indexes.sort_unstable();
         indexes.dedup();
@@ -504,6 +586,51 @@ mod tests {
         a.changed.push(3);
         assert!(a.recalculate(&values).same_as(&Value::F64(30.0)));
         assert!(a.folded_from_scratch(&values).same_as(&Value::F64(30.0)));
+        tree_is_whole(&a);
+    }
+
+    #[test]
+    fn members_joining_in_node_order_are_found_without_a_map_and_out_of_order_with_one() {
+        // Ten rows: value nodes 0, 2, 4…, presence nodes 1, 3, 5…, in order.
+        let mut values: Vec<Value> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Value::F64(f64::from(i))
+                } else {
+                    Value::Bool(true)
+                }
+            })
+            .collect();
+        let mut a = Aggregate::new(AggregateOp::Sum, Type::F64);
+        for row in 0..10 {
+            assert_eq!(a.push(2 * row, 2 * row + 1), (true, true));
+        }
+        assert!(a.recalculate(&values).same_as(&Value::F64(90.0)));
+        assert!(
+            a.ordered && a.by_node.is_empty(),
+            "no map while members come in order"
+        );
+
+        // A value and a presence change: each finds its member.
+        values[6] = Value::F64(100.0);
+        values[9] = Value::Bool(false);
+        a.changed.extend([6, 9]);
+        let total = a.recalculate(&values);
+        assert!(total.same_as(&a.folded_from_scratch(&values)), "{total}");
+        assert!(
+            total.same_as(&Value::F64(90.0 - 6.0 + 100.0 - 8.0)),
+            "{total}"
+        );
+        tree_is_whole(&a);
+
+        // A member out of order builds the map, and everything is still found.
+        values.extend([Value::F64(5.0), Value::Bool(true)]);
+        assert_eq!(a.push(20, 3), (true, false), "presence node 3 is row 1's");
+        assert!(!a.ordered && !a.by_node.is_empty());
+        values[3] = Value::Bool(false);
+        a.changed.extend([20, 3]);
+        let total = a.recalculate(&values);
+        assert!(total.same_as(&a.folded_from_scratch(&values)), "{total}");
         tree_is_whole(&a);
     }
 
