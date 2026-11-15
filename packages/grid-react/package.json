@@ -1,6 +1,6 @@
 {
   "name": "@surefold/grid-react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The watershed grid as a React component, and hooks that follow its totals.",
   "license": "Apache-2.0",
   "homepage": "https://surefold.dev/watershed/grid/",
@@ -28,7 +28,7 @@
     "react": "^18.2 || ^19"
   },
   "dependencies": {
-    "@surefold/grid": "^0.1.0"
+    "@surefold/grid": "^0.2.0"
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
