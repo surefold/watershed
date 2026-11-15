@@ -3,8 +3,8 @@
 // React components follow with hooks. Rows never pass through React state.
 
 import { useEffect, useRef, useState } from "react";
-import { Table, themes, type GridView } from "@watershed/grid";
-import { Grid, useChange, useTable, useTotal } from "@watershed/grid-react";
+import { Table, themes, type GridView } from "@surefold/grid";
+import { Grid, useChange, useTable, useTotal } from "@surefold/grid-react";
 
 const SECTORS = ["Energy", "Health", "Tech", "Finance", "Industry", "Retail"] as const;
 const NAMES = ["Arbor", "Basalt", "Cinder", "Delta", "Ember", "Fjord", "Garnet", "Harbor", "Indigo", "Juniper", "Kestrel", "Lumen"];

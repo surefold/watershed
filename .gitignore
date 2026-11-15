@@ -11,3 +11,4 @@ __pycache__/
 # JavaScript
 node_modules/
 packages/grid/pkg/
+packages/*/dist/

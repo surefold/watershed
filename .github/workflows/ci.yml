@@ -137,3 +137,5 @@ jobs:
       # Builds the engine into packages/grid/pkg and both pages with Vite.
       - run: web/build.sh
       - run: npm run check
+      # What the publish workflow builds: each package's dist/, with its types.
+      - run: npm run build:packages

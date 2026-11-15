@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "build": "web/build.sh",
-    "check": "npm run check --workspaces --if-present"
+    "check": "npm run check --workspaces --if-present",
+    "build:packages": "npm run build --workspace packages/grid --workspace packages/grid-solid --workspace packages/grid-react"
   }
 }

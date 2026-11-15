@@ -5,7 +5,8 @@
 //   <Grid table={trades} theme="dark" columns={{ qty: { decimals: 0 } }} />
 
 import { createEffect, createSignal, on, onCleanup, type Accessor, type JSX } from "solid-js";
-import { drawGrid, type AnyTable, type Change, type GridOptions, type GridView } from "@watershed/grid";
+import { spread } from "solid-js/web";
+import { drawGrid, type AnyTable, type Change, type GridOptions, type GridView } from "@surefold/grid";
 
 export interface GridProps extends Omit<GridOptions, "theme"> {
   table: AnyTable;
@@ -21,7 +22,17 @@ export interface GridProps extends Omit<GridOptions, "theme"> {
  * `columns`, `key` and the rest are read when the grid is drawn.
  */
 export function Grid(props: GridProps): JSX.Element {
-  const root = (<div class={props.class} style={props.style} />) as HTMLDivElement;
+  // Written without JSX, so the package is plain JavaScript that any bundler takes.
+  const root = document.createElement("div");
+  spread(root, { get style() { return props.style; } }, false, false);
+  // The view puts classes of its own on the element, so `class` adds and takes
+  // away only its own names rather than replacing them all.
+  createEffect<string[]>((before) => {
+    const names = (props.class ?? "").split(/\s+/).filter(Boolean);
+    root.classList.remove(...before.filter((name) => !names.includes(name)));
+    root.classList.add(...names);
+    return names;
+  }, []);
   createEffect(
     on(
       () => props.table,

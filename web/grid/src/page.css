@@ -1,4 +1,4 @@
-/* The page around the grid. The grid's own styles are @watershed/grid/grid.css. */
+/* The page around the grid. The grid's own styles are @surefold/grid/grid.css. */
 /* The page's tokens. When a grid theme is chosen (the Theme list puts
    data-wg-theme on <html> as well as on the grid) they take the theme's
    colours, so the page around the grid goes with it. */

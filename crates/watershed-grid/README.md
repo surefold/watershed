@@ -43,11 +43,11 @@ put the engine in `packages/grid/pkg`).
 Three packages in [`packages/`](../../packages), used by the pages in `web/`.
 Each has a README with its whole API:
 
-- [`@watershed/grid`](../../packages/grid/README.md): a `Table` that holds the rows and works out formulas
+- [`@surefold/grid`](../../packages/grid/README.md): a `Table` that holds the rows and works out formulas
   and totals, and `drawGrid`, which draws a table. No framework.
-- [`@watershed/grid-solid`](../../packages/grid-solid/README.md): `<Grid table={…} />`, and `createTotal` and
+- [`@surefold/grid-solid`](../../packages/grid-solid/README.md): `<Grid table={…} />`, and `createTotal` and
   `createReading`, which follow a table as signals.
-- [`@watershed/grid-react`](../../packages/grid-react/README.md): `<Grid table={…} />`, and the hooks `useTable`,
+- [`@surefold/grid-react`](../../packages/grid-react/README.md): `<Grid table={…} />`, and the hooks `useTable`,
   `useTotal`, `useReading` and `useChange`.
 
 The table holds the data and the grid only draws it. Rows never go through
@@ -55,8 +55,8 @@ props or component state: change them on the table, and every grid and
 total that shows them follows.
 
 ```ts
-import { Table, drawGrid } from "@watershed/grid";
-import "@watershed/grid/grid.css";
+import { Table, drawGrid } from "@surefold/grid";
+import "@surefold/grid/grid.css";
 
 const orders = new Table({
   fields: { region: "text", qty: "number", price: "number" },
@@ -94,7 +94,7 @@ const pnl = useTotal(trades, "pnl");
 <Grid table={trades} theme="dark" ref={viewRef} />
 ```
 
-The engine loads when `@watershed/grid` is imported (a top-level `await`),
+The engine loads when `@surefold/grid` is imported (a top-level `await`),
 so a bundler needs to target ES2022 or later. Below the packages is the
 WebAssembly `Grid` class itself (`grid.add_field`, `grid.upsert`…), which
 is what `Table` wraps.

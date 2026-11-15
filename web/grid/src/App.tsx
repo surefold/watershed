@@ -1,12 +1,12 @@
 // The site's grid page: a book of trades whose marks stream, drawn by
-// @watershed/grid-solid. Everything the page shows comes from the table and
+// @surefold/grid-solid. Everything the page shows comes from the table and
 // from what the view reports; the page adds nothing up itself.
 
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { render } from "solid-js/web";
-import { GroupChart, themes, type Column, type Focus, type GridView, type Layout, type Status, type AnyTable } from "@watershed/grid";
-import { TradeBook } from "@watershed/grid/demo";
-import { Grid } from "@watershed/grid-solid";
+import { GroupChart, themes, type Column, type Focus, type GridView, type Layout, type Status, type AnyTable } from "@surefold/grid";
+import { TradeBook } from "@surefold/grid/demo";
+import { Grid } from "@surefold/grid-solid";
 
 const whole = new Intl.NumberFormat("en-US");
 const two = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });

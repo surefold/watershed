@@ -1,15 +1,15 @@
-# @watershed/grid-react
+# @surefold/grid-react
 
-The [watershed grid](../grid) in React: a `<Grid>` component, and hooks that
+The [watershed grid](https://github.com/surefold/watershed/tree/main/packages/grid) in React: a `<Grid>` component, and hooks that
 follow a table. The table holds the rows; the component only draws it. Rows
 never go through props or component state: change them on the table, and
 the grid and any hook that reads it follow.
 
 ```tsx
 import { useRef } from "react";
-import { Table, type GridView } from "@watershed/grid";
-import "@watershed/grid/grid.css";
-import { Grid, useTable, useTotal } from "@watershed/grid-react";
+import { Table, type GridView } from "@surefold/grid";
+import "@surefold/grid/grid.css";
+import { Grid, useTable, useTotal } from "@surefold/grid-react";
 
 function Portfolio() {
   const positions = useTable(() => {
@@ -34,9 +34,27 @@ function Portfolio() {
 }
 ```
 
+## Install
+
+The packages are on GitHub Packages. Tell npm where `@surefold` packages
+come from, with a GitHub token that can read packages (a classic token with
+`read:packages`; GitHub asks for one even for public packages), in a
+`.npmrc` beside your `package.json`:
+
+```
+@surefold:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+Then:
+
+```bash
+npm install @surefold/grid @surefold/grid-react
+```
+
 ## Grid
 
-Takes the table and every option of [`drawGrid`](../grid#drawgrid), plus
+Takes the table and every option of [`drawGrid`](https://github.com/surefold/watershed/tree/main/packages/grid#drawgrid), plus
 `className` and `style`. The ref is the view, for its methods (grouping,
 looking back, explaining the focused cell).
 
@@ -57,5 +75,5 @@ when they are called, so a new one is used without drawing again.
 The hooks read with `table.peek`, so a render never sets off a
 recalculation. They render again after each one.
 
-[`web/grid-react`](../../web/grid-react) is an example built only from this
-and `@watershed/grid`.
+[`web/grid-react`](https://github.com/surefold/watershed/tree/main/web/grid-react) is an example built only from this
+and `@surefold/grid`.
