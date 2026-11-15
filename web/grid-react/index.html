@@ -6,16 +6,25 @@
 <title>Watershed Grid in React</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700&family=Figtree:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<script>
+  // Before anything is drawn: inside the playground's tab (?embed), and the theme chosen last time.
+  if (new URLSearchParams(location.search).has("embed")) document.documentElement.classList.add("embed");
+  try {
+    const theme = localStorage.getItem("watershed-grid-theme");
+    if (theme) document.documentElement.dataset.wgTheme = theme;
+  } catch {}
+</script>
 </head>
 <body>
 <header>
-  <h1>Watershed Grid <span>in React</span></h1>
-  <p>2,000 positions in a <code>Table</code>; <code>&lt;Grid&gt;</code> draws it, and the figures below follow its totals with
-     <code>useTotal</code>. A price change recalculates that row's value and gain and the totals, nothing else.
-     <a href="../">The full grid, in Solid.</a></p>
+  <h1>Watershed <span>Grid</span> in React</h1>
+  <span class="tag">Rust → WebAssembly · React</span>
+  <p>A data grid whose rows, formulas, totals, sorting, filtering and grouping all run in WebAssembly on the watershed engine.
+     Every cell is a node, so a change recalculates only the cells and totals that depend on it. <a href="../">The same table in Solid.</a></p>
+  <span id="pill-slot" style="display: contents"></span>
 </header>
-<div id="root"></div>
+<div id="root" style="display: contents"></div>
 <script type="module" src="./src/main.tsx"></script>
 </body>
 </html>
