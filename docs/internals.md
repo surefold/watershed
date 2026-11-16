@@ -105,6 +105,7 @@ crates/watershed-gpu/
   tests/scenarios.rs   plan against graph, CPU against GPU
   examples/            the scenario models and their reference scripts (examples/shared)
 crates/watershed-parquet/  a ChangeSink that writes changes to Parquet files
+crates/watershed-xlsx/     an Excel workbook's formulas, between chosen inputs and outputs, as a graph
 crates/watershed-py/       Python bindings (PyO3, maturin, uv)
 crates/watershed-web/      the engine as WebAssembly, with preset models
 crates/watershed-grid/     the data grid as WebAssembly

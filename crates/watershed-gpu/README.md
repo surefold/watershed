@@ -501,7 +501,9 @@ Its model's numbers are as recalled from the paper it names and have not
 been checked against it; it shows the method and is not advice on dosing.
 
 `spreadsheet` takes an `.xlsx` workbook, the cells to vary and the cells to
-read. The one above is Aswath Damodaran's `fcffsimpleginzu.xlsx`:
+read, and translates the formulas between them with
+[watershed-xlsx](../watershed-xlsx/README.md), which says what it
+understands. The one above is Aswath Damodaran's `fcffsimpleginzu.xlsx`:
 
 ```bash
 cargo run --release --features cuda --example spreadsheet -- fcffsimpleginzu.xlsx \
@@ -550,5 +552,3 @@ detail, with the slot allocation worked through.
   still needs every scenario's answer copied back.
 - Making a plan reads the graph's nodes one after another to find the order
   to work them out in, and that part uses one core.
-- The spreadsheet example has been tried on one workbook. It reads `.xlsx`
-  only, and understands the functions listed at the top of the file.

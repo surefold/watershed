@@ -57,7 +57,8 @@ with its checks and timings.
 - **Results that stay current.** After a batch, one input changes and all
   10,000 results come up to date in 0.2 s, where a rerun takes 11.2 s.
 - **A spreadsheet, ten million times.** Formulas read from an `.xlsx`
-  workbook and run as a plan.
+  workbook, checked cell by cell against the values Excel saved, and run as
+  a plan.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
   for [Solid](packages/grid-solid) and [React](packages/grid-react). The
@@ -153,7 +154,7 @@ research in progress.
 | Fused kernels | Experimental, off by default | [watershed-gpu](crates/watershed-gpu/README.md#working-nodes-out-in-clusters) |
 | Saved plans, and lots across GPUs | Built; lots run on eight GPUs in one machine, not yet on several machines | [watershed-gpu](crates/watershed-gpu/README.md#running-a-batch-somewhere-else), [watershed-jvm](https://github.com/surefold/watershed-jvm) |
 | Scenario plans from Kotlin, and in the browser on one thread | Experimental | [watershed-jvm](https://github.com/surefold/watershed-jvm), [grid README](crates/watershed-grid/README.md) |
-| Reading a model from an `.xlsx` workbook | Experimental; one workbook tried | [watershed-gpu](crates/watershed-gpu/README.md#running-the-examples) |
+| Reading a model from an `.xlsx` workbook | Built; 25 functions, each checked against LibreOffice for 24 inputs | [watershed-xlsx](crates/watershed-xlsx/README.md) |
 | Choosing CPU or GPU automatically from measured costs | Research | [research note](docs/research/heterogeneous-execution.md) |
 | Workers on several machines; a release on crates.io and PyPI | Planned | |
 
@@ -267,6 +268,7 @@ example in every language, with what each prints.
 | Core | [`crates/watershed-core`](crates/watershed-core/README.md) | The graph, incremental update, collections, decimals, history, formulas. No `unsafe`. |
 | Scenario plans | [`crates/watershed-gpu`](crates/watershed-gpu/README.md) | Plans on CPU threads; the `cuda` feature adds the NVIDIA GPU executor. CUDA is found at run time, so the workspace builds without it. |
 | Parquet sink | [`crates/watershed-parquet`](crates/watershed-parquet) | Writes each update's changes to Parquet files on a background thread. |
+| Excel workbooks | [`crates/watershed-xlsx`](crates/watershed-xlsx/README.md) | Translates a workbook's formulas between chosen inputs and outputs into a graph. |
 | Python | [`crates/watershed-py`](crates/watershed-py/README.md) | A PyO3 package over the core. |
 | WebAssembly | [`crates/watershed-web`](crates/watershed-web), [`web/`](web) | The engine behind the playground: updates, and plans on one thread. |
 | Data grid | [`crates/watershed-grid`](crates/watershed-grid/README.md), [`packages/`](packages/grid/README.md), [`web/grid/`](web/grid), [`web/grid-react/`](web/grid-react) | A browser data grid in which every cell is a graph node: the engine as WebAssembly, the TypeScript packages (a `Table`, and components for Solid and React), and the pages built with them. |
