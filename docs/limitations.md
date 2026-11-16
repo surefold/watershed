@@ -13,8 +13,8 @@ it contains.
 
 | | Constructs | In a model meant for both |
 |---|---|---|
-| Both patterns | `f64` and `bool` nodes: `+ - * /`, `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, comparisons, and/or/not, conditionals (`when`) | Use directly |
-| Incremental only; could be lowered to a plan, not implemented | Aggregate totals (`sum`, `count`, `min`, `max` over a collection, and groupings); `choose`; a table looked up by a value that varies per scenario; `i64` arithmetic | Totals: an explicit tree of `+` nodes, as the examples build. `choose` and lookups: nested conditionals, or the looked-up value fixed per entity when the graph is built. Integers: `f64` |
+| Both patterns | `f64` and `bool` nodes: `+ - * /`, `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, comparisons, and/or/not, conditionals (`when`); `sum`, `min` and `max` totals of `f64` over a collection or a grouping | Use directly |
+| Incremental only; could be lowered to a plan, not implemented | `count` totals (whole numbers); `choose`; a table looked up by a value that varies per scenario; `i64` arithmetic | Counts: a `sum` of a column that is `1.0`. `choose` and lookups: nested conditionals, or the looked-up value fixed per entity when the graph is built. Integers: `f64` |
 | Incremental only | Exact decimals, text and lists of text, errors as values | No equivalent. `f64` in place of a decimal gives up exactness |
 
 A plan refuses an unsupported node when it is compiled, naming the node, so
@@ -33,6 +33,10 @@ of the graph as it was when compiled.
   `-0.0` follow x86-64, and `exp`, `ln` and `pow` may differ in the last one
   or two digits. This is established by tests, not by proof.
 - An expression that needs an evaluation stack deeper than 32 is refused.
+- A total is worked out in one node of the plan, so on a GPU each scenario
+  adds its members up in one thread, and every member's value is kept until
+  the total has read it. A large total runs, but uses the GPU poorly and
+  takes a slot a member ([Totals](scenario-plans.md#totals)).
 - A conditional evaluates both branches in a plan and selects one, which
   matches the graph only because nothing in the supported subset can fail.
 - Loops are unrolled when the graph is built, so step counts are fixed.

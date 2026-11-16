@@ -37,6 +37,49 @@ The plan is a snapshot. Later changes to the graph do not reach it, and a
 change to the graph's structure needs a new plan. Shared inputs are the
 exception: `set_shared` replaces their values without recompiling.
 
+## Totals
+
+A total (`sum`, `min` or `max` of `f64` over a collection or a grouping) has
+no expression: the graph keeps a balanced binary tree of its members' partial
+results, with room for the next power of two, and updates only the paths
+above the members that changed. The tree's shape depends only on the number
+of members, so its result is exactly what folding that tree from scratch
+gives.
+
+A plan lowers a total into that same fold. Walking the tree from the root,
+each half is lowered the same way, down to the members:
+
+- Room no member holds, and a member absent in every scenario, hold the
+  operation's identity (`-0.0` for a sum, `+∞` for a minimum, `-∞` for a
+  maximum). Combined with anything, the identity gives it back unchanged, so
+  such a half is left out.
+- A half whose members are the same in every scenario is combined when the
+  plan is made, in the same order, into one constant.
+- A member present in only some scenarios is `when(present, value, identity)`.
+- Two halves that vary are combined by one of three instructions, `AGG_SUM`,
+  `AGG_MIN` and `AGG_MAX`, which do what the graph's totals do: a NaN wins, the
+  left one first. (`MIN` and `MAX` let a number win over a NaN, as `f64::min`
+  does; a total does not, so that its result does not depend on the tree.)
+
+The result is the graph's total, bit for bit, on the CPU; a test checks forty
+random totals over members that vary, are shared, are fixed, or come and go.
+On a 1,000,000-row collection whose column reads the varied input, a plan of
+the sum and the maximum compiled in 0.9 s and ran a scenario in 7.3 ms on
+the CPU, where the graph took 130 ms to bring every row and both totals up
+to date.
+
+What it does not do yet:
+
+- **One node a total.** On a GPU, each scenario adds a total's members up in
+  one thread, one after another. A total longer than a kernel is worth
+  writing is run by the general kernel. Splitting the tree into nodes of a
+  fixed number of members (whole subtrees, so the order of adding is the
+  same) would spread the work over the GPU, and give those nodes one shape.
+- **Members are kept.** A member's value has a slot until the total reads
+  it, so a million-row total needs a million slots a scenario (8 MB).
+  Working each member's value out inside the total would need none.
+- **Counts** are whole numbers, which a plan does not give.
+
 ## Memory reuse
 
 A naive executor keeps one value per node per scenario. For the insurance
