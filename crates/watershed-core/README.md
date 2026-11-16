@@ -186,7 +186,8 @@ is stored behind a pointer, so every value is still 16 bytes and a graph of
 floats pays nothing for the feature. Recalculating a decimal node costs
 roughly four times a float node.
 
-Not supported: more than 28 digits, and decimal columns in the grid.
+Not supported: more than 28 digits. The [grid](../watershed-grid/README.md)
+has decimal columns (`Kind::Decimal`, `"decimal"` in JavaScript).
 
 ## History and change tracking
 

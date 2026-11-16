@@ -183,7 +183,9 @@ graph.
 
 ## Limitations
 
-- No decimal columns; numbers are `f64`.
+- A decimal column is exact to 28 significant digits; a total that needs
+  more is rounded to 28. A selection's sum and average in the status line,
+  and trends, use the nearest `f64`.
 - A grid grouped by a formula column recomputes its view after every edit.
   Grouped by a field, only the rows that were set are moved.
 - Group totals fall back to direct summation above the group budget, as

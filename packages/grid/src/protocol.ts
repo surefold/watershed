@@ -49,7 +49,8 @@ export interface Snapshot {
   groups: number;
   viewLen: number;
   columns: unknown[];
-  totals: (number | null)[];
+  /** Each column's total: a number, a decimal as text, or null. */
+  totals: (number | string | null)[];
   /** Each column's total over the last 120 recalculations (with history). */
   totalTrends: Record<number, number[] | null>;
   history: [number, number] | null;

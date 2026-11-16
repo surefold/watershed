@@ -871,7 +871,7 @@ fn a_columns_total_can_be_changed() {
     assert_eq!(t.totals_json(), "[5,3.4,1,72]");
     assert_eq!(
         t.set_agg(REGION, Agg::Sum).unwrap_err(),
-        "region: only number columns have totals (any column can have a count)"
+        "region: only number and decimal columns have totals (any column can have a count)"
     );
     assert_eq!(t.check(), Ok(()));
 }
@@ -1250,4 +1250,167 @@ fn the_views_sort_filters_search_and_grouping_can_be_read_back() {
         t.view_state_json(),
         r#"{"sort":[[3,true],[0,false]],"filters":{"1":">1"},"search":"Eu","group":0}"#
     );
+}
+
+// ------------------------------------------------------------- decimals
+
+/// Payments: desk, an exact amount, and `fee = amount * 0.015d`, with each
+/// amount's total.
+fn payments() -> Table {
+    let mut t = Table::new();
+    t.add_field("desk", Kind::Text, Agg::None).unwrap();
+    t.add_field("amount", Kind::Decimal, Agg::Sum).unwrap();
+    t.add_formula("fee", "amount * 0.015d", Agg::Sum).unwrap();
+    for (key, desk, amount) in [
+        ("p-1", "Rates", "0.10"),
+        ("p-2", "Rates", "0.20"),
+        ("p-3", "FX", "1234567890.12"),
+        ("p-4", "FX", "-0.30"),
+    ] {
+        t.upsert(key, vec![text(desk), Kind::Decimal.read(amount).unwrap()])
+            .unwrap();
+    }
+    t.update();
+    t
+}
+
+const AMOUNT: usize = 1;
+
+#[test]
+fn a_decimal_column_holds_and_adds_up_exact_decimals() {
+    let mut t = payments();
+    // As text, so that JavaScript does not round them.
+    assert_eq!(
+        t.row_json("p-1").as_deref(),
+        Some(r#"["Rates","0.10","0.00150"]"#)
+    );
+    // 0.10 + 0.20 - 0.30 is 0, exactly: as numbers it is 5.55e-17.
+    assert_eq!(
+        t.totals_json(),
+        r#"[null,"1234567890.12","18518518.35180"]"#
+    );
+    t.set_cell("p-3", AMOUNT, "0").unwrap();
+    t.update();
+    assert_eq!(t.totals_json(), r#"[null,"0.00","0.00000"]"#);
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn what_is_typed_into_a_decimal_cell_is_read_exactly() {
+    let mut t = payments();
+    t.set_cell("p-1", AMOUNT, " 1,234.5678 ").unwrap();
+    t.update();
+    assert_eq!(
+        t.row_json("p-1").as_deref(),
+        Some(r#"["Rates","1234.5678","18.5185170"]"#)
+    );
+    assert_eq!(
+        t.set_cell("p-1", AMOUNT, "twelve").unwrap_err(),
+        r#""twelve" is not a decimal of up to 28 digits"#
+    );
+    // A number column is not a decimal column: formulas do not mix them.
+    let mut mixed = payments();
+    assert!(mixed.add_formula("bad", "amount * 2", Agg::None).is_err());
+    let doubled = mixed
+        .add_formula("approx", "float(amount) * 2", Agg::Sum)
+        .unwrap();
+    mixed.update();
+    assert_eq!(
+        mixed.row_json("p-1").as_deref(),
+        Some(r#"["Rates","0.10","0.00150",0.2]"#)
+    );
+    assert_eq!(doubled, 3);
+}
+
+#[test]
+fn decimal_filters_and_sorting_compare_exactly() {
+    let mut t = payments();
+    // 0.1 is 0.10, exactly; a filter's bounds are read as decimals.
+    t.set_filter(AMOUNT, "=0.1").unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["p-1"]);
+    t.set_filter(AMOUNT, "0.1..0.2").unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["p-1", "p-2"]);
+    // With a filter on, the grid adds the total up itself, exactly too.
+    assert_eq!(t.totals_json(), r#"[null,"0.30","0.00450"]"#);
+    t.set_filter(AMOUNT, "<0").unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["p-4"]);
+    assert!(t.set_filter(AMOUNT, ">ten").is_err());
+    t.set_filter(AMOUNT, "").unwrap();
+    t.set_sort(&[(AMOUNT, true)]).unwrap();
+    t.update();
+    assert_eq!(t.view_keys(), ["p-3", "p-2", "p-1", "p-4"]);
+}
+
+#[test]
+fn decimal_group_totals_and_averages_are_exact() {
+    let mut t = payments();
+    t.set_agg(AMOUNT, Agg::Avg).unwrap();
+    t.set_group(Some(0)).unwrap();
+    t.update();
+    // Kept by the graph: a sum per group, and an average of it over the rows.
+    assert_eq!(
+        t.groups_json(),
+        concat!(
+            r#"[{"g":"FX","n":2,"c":[null,"617283944.91","18518518.34730"]},"#,
+            r#"{"g":"Rates","n":2,"c":[null,"0.15","0.00450"]}]"#
+        )
+    );
+    // Added up by the grid when the graph is not asked to keep them.
+    let mut plain = payments();
+    plain.set_group_budget(0);
+    plain.set_agg(AMOUNT, Agg::Avg).unwrap();
+    plain.set_group(Some(0)).unwrap();
+    plain.update();
+    assert_eq!(plain.groups_json(), t.groups_json());
+    // An average that does not come out even keeps 28 digits.
+    let mut thirds = Table::new();
+    thirds.add_field("x", Kind::Decimal, Agg::Avg).unwrap();
+    for (k, x) in ["1", "1", "2"].iter().enumerate() {
+        thirds
+            .upsert(&format!("r{k}"), vec![Kind::Decimal.read(x).unwrap()])
+            .unwrap();
+    }
+    thirds.update();
+    assert_eq!(
+        thirds.totals_json(),
+        r#"["1.3333333333333333333333333333"]"#
+    );
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
+fn many_rows_with_decimals_come_in_as_text_and_a_bad_one_adds_none() {
+    let mut t = payments();
+    let keys = vec!["p-5".to_string(), "p-6".to_string()];
+    let columns = |amounts: &[&str]| Columns {
+        numbers: &[],
+        bools: &[],
+        codes: &[0, 0, 0, 1],
+        texts: vec![text("Rates"), text(amounts[0]), text(amounts[1])],
+        starts: &[0, 1, 3],
+    };
+    let bad = t.upsert_columns(&keys, &columns(&["1.5", "a lot"]));
+    assert_eq!(
+        bad,
+        Err(r#"amount: "a lot" is not a decimal of up to 28 digits"#.into())
+    );
+    t.update();
+    assert_eq!(t.row_count(), 4);
+    // A decimal has 28 significant digits: the total of these needs 37, so
+    // it is rounded to 28, and a fee too small for 28 places is 0.
+    t.upsert_columns(&keys, &columns(&["1.5", "0.000000000000000000000000001"]))
+        .unwrap();
+    t.update();
+    assert_eq!(
+        t.row_json("p-6").as_deref(),
+        Some(r#"["Rates","0.000000000000000000000000001","0.0000000000000000000000000000"]"#)
+    );
+    assert_eq!(
+        t.totals_json(),
+        r#"[null,"1234567891.6200000000000000000","18518518.37430"]"#
+    );
+    assert_eq!(t.check(), Ok(()));
 }

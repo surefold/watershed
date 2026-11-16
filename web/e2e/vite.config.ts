@@ -26,6 +26,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         onedit: resolve(__dirname, "fixtures/onedit.html"),
+        decimal: resolve(__dirname, "fixtures/decimal.html"),
         "unmount-solid": resolve(__dirname, "fixtures/unmount-solid.html"),
         "unmount-react": resolve(__dirname, "fixtures/unmount-react.html"),
       },

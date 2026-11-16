@@ -14,3 +14,13 @@ export function viewStateOf(json: string, names: string[]): ViewState {
     group: raw.group < 0 ? null : names[raw.group],
   };
 }
+
+/** A total as the engine gives it (a number, a decimal as text, or nothing), as text. */
+export function textOf(total: number | string | null | undefined): string | null {
+  return total === null || total === undefined ? null : String(total);
+}
+
+/** A total as text, as the nearest number. */
+export function numberOf(total: string | null): number | null {
+  return total === null ? null : Number(total);
+}

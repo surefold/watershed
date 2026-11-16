@@ -25,6 +25,11 @@ function json(value) {
   return typeof value === "string" ? JSON.parse(value) : value;
 }
 
+/** Whether a column of this kind holds numbers: a number or a decimal. */
+function numeric(kind) {
+  return kind === "number" || kind === "decimal";
+}
+
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -189,12 +194,12 @@ export class GridView {
     this.cols = json(this.grid.columns());
     for (let col = this.order.length; col < this.cols.length; col++) this.order.push(col);
     this.numbers = this.cols.map((c) => {
-      const decimals = c.agg === "count" && c.kind !== "number" ? 0 : (this.formats[c.name]?.decimals ?? 2);
+      const decimals = c.agg === "count" && !numeric(c.kind) ? 0 : (this.formats[c.name]?.decimals ?? 2);
       return new Intl.NumberFormat("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
     });
     for (let pos = this.widths.length; pos <= this.cols.length; pos++) {
       const col = this.cols[pos - 1];
-      this.widths[pos] = pos === 0 ? this.keyWidth : (this.formats[col.name]?.width ?? (col.kind === "number" ? 112 : 124));
+      this.widths[pos] = pos === 0 ? this.keyWidth : (this.formats[col.name]?.width ?? (numeric(col.kind) ? 112 : 124));
     }
     this.rebuildColumns();
   }
@@ -220,7 +225,7 @@ export class GridView {
     this.filterInputs = [];
     for (const pos of this.display) {
       const col = this.cols[pos - 1];
-      const cell = el("div", "wg-hcell" + (col?.kind === "number" ? " wg-num" : ""));
+      const cell = el("div", "wg-hcell" + (numeric(col?.kind) ? " wg-num" : ""));
       this.place(cell, pos);
       cell.setAttribute("role", "columnheader");
       cell.append(el("span", "wg-hname", pos === 0 ? this.keyTitle : col.name));
@@ -309,7 +314,7 @@ export class GridView {
     input.type = "text";
     input.spellcheck = false;
     input.value = info.filter;
-    input.placeholder = info.kind === "number" ? ">100, 5..10" : info.kind === "bool" ? "true / false" : "contains";
+    input.placeholder = numeric(info.kind) ? ">100, 5..10" : info.kind === "bool" ? "true / false" : "contains";
     input.setAttribute("aria-label", `Filter ${info.name}`);
     this.filterInputs[col] = input;
     let timer = 0;
@@ -333,7 +338,7 @@ export class GridView {
 
   makeCell(pos) {
     const col = this.cols[pos - 1];
-    const cell = el("div", "wg-cell" + (col?.kind === "number" ? " wg-num" : "") + (col?.formula ? " wg-calc" : ""));
+    const cell = el("div", "wg-cell" + (numeric(col?.kind) ? " wg-num" : "") + (col?.formula ? " wg-calc" : ""));
     this.place(cell, pos);
     cell.setAttribute("role", pos === 0 ? "rowheader" : "gridcell");
     cell._text = "";
@@ -649,7 +654,7 @@ export class GridView {
   totalChoice(menu, col, info) {
     menu.append(el("div", "wg-menu-title", "Total"));
     const chips = el("div", "wg-chips");
-    for (const agg of info.kind === "number" ? ["sum", "avg", "min", "max", "count", "none"] : ["count", "none"]) {
+    for (const agg of numeric(info.kind) ? ["sum", "avg", "min", "max", "count", "none"] : ["count", "none"]) {
       const chip = el("button", "wg-chip", agg);
       chip.type = "button";
       chip.setAttribute("aria-pressed", String(info.agg === agg));
@@ -920,6 +925,9 @@ export class GridView {
   format(col, value) {
     if (value === null) return "";
     if (typeof value === "number") return this.numbers[col].format(value);
+    // A decimal comes as text, and is formatted as text: exactly, without
+    // becoming a JavaScript number on the way.
+    if (typeof value === "string" && this.cols[col].kind === "decimal") return this.numbers[col].format(value);
     if (typeof value === "object") return "#ERROR";
     return String(value);
   }
@@ -1031,13 +1039,18 @@ export class GridView {
       (cell._label ?? cell).textContent = cell._text = text;
       cell.title = value !== null && typeof value === "object" ? value.e : "";
     }
+    // A decimal's sign and which way it moved, from its nearest number.
+    const decimal = this.cols[col].kind === "decimal";
+    const number = (v) => (typeof v === "number" ? v : decimal && typeof v === "string" ? Number(v) : null);
+    const now = number(value);
+    const before = number(was);
     if (this.formats[this.cols[col].name]?.signed) {
-      cell.classList.toggle("wg-neg", typeof value === "number" && value < 0);
-      cell.classList.toggle("wg-pos", typeof value === "number" && value > 0);
+      cell.classList.toggle("wg-neg", now !== null && now < 0);
+      cell.classList.toggle("wg-pos", now !== null && now > 0);
     }
-    if (typeof value === "number" && typeof was === "number" && value !== was) {
+    if (now !== null && before !== null && value !== was) {
       cell.animate(
-        [{ backgroundColor: `var(${value > was ? "--wg-up" : "--wg-down"})` }, { backgroundColor: "transparent" }],
+        [{ backgroundColor: `var(${now > before ? "--wg-up" : "--wg-down"})` }, { backgroundColor: "transparent" }],
         { duration: 900, easing: "cubic-bezier(0.2, 0.6, 0.2, 1)" },
       );
     }

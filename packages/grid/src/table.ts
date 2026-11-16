@@ -17,15 +17,22 @@
 // inside `peek`, reads see the last recalculation.
 
 import init, { Grid } from "../pkg/watershed_grid.js";
-import { viewStateOf } from "./table-view.js";
+import { numberOf, textOf, viewStateOf } from "./table-view.js";
 
 await init();
 
-export type Kind = "number" | "text" | "bool";
+/**
+ * What a field holds. A `decimal` is exact, to 28 digits, for money and the
+ * like (`0.1 + 0.2` is `0.3`, and so are its totals); it is given and read
+ * back as a string, such as `"19.99"`, since a JavaScript number would round
+ * it. Formulas do not mix decimals with numbers: write `price * 2d` for a
+ * decimal, or `float(price) * qty` for a number.
+ */
+export type Kind = "number" | "decimal" | "text" | "bool";
 export type Total = "sum" | "avg" | "min" | "max" | "count";
 
 /** What a value of each kind of field is in JavaScript. */
-export type ValueOf<K extends Kind> = K extends "number" ? number : K extends "text" ? string : boolean;
+export type ValueOf<K extends Kind> = K extends "number" ? number : K extends "decimal" | "text" ? string : boolean;
 
 /** A cell as the engine gives it back: a calculated one can be an error. */
 export type Cell = number | string | boolean | null | { error: string };
@@ -75,7 +82,7 @@ export interface Column {
 export interface Group {
   key: string;
   rows: number;
-  /** Each column's total over the group's rows, by column name. */
+  /** Each column's total over the group's rows, by column name (a decimal column's as the nearest number). */
   totals: Record<string, number | null>;
 }
 
@@ -199,7 +206,8 @@ export class Table<F extends Fields = Fields, C extends string = string> {
     const count = (kind: Kind) => kinds.filter((k) => k === kind).length;
     const numbers = new Float64Array(rows * count("number"));
     const bools = new Uint8Array(rows * count("bool"));
-    const codes = new Uint32Array(rows * count("text"));
+    // A decimal goes as text, so that it is exact.
+    const codes = new Uint32Array(rows * (count("text") + count("decimal")));
     const texts: string[] = [];
     const starts: number[] = [0];
     const given = columns as Record<string, ArrayLike<unknown> | undefined>;
@@ -215,7 +223,8 @@ export class Table<F extends Fields = Fields, C extends string = string> {
           for (let r = 0; r < rows; r++) bools[b * rows + r] = column[r] ? 1 : 0;
           b++;
           break;
-        case "text": {
+        case "text":
+        case "decimal": {
           // Each distinct text once, and for each row which one it is.
           const seen = new Map<string, number>();
           for (let r = 0; r < rows; r++) {
@@ -354,11 +363,20 @@ export class Table<F extends Fields = Fields, C extends string = string> {
     return Object.fromEntries(this.#names.map((name, k) => [name, readCell(cells[k])])) as RowOf<F> & Record<C, Cell>;
   }
 
-  /** A column's total over the rows that pass the filters, or `null` if it has none. */
+  /**
+   * A column's total over the rows that pass the filters, or `null` if it has
+   * none. A decimal column's total is exact in the engine and comes here as
+   * the nearest number: `totalExact` gives it exactly.
+   */
   total(column: Extract<keyof F, string> | C): number | null {
+    return numberOf(this.totalExact(column));
+  }
+
+  /** A column's total as text, exactly: a decimal column's as the engine keeps it (`"0.30"`), a number's as JavaScript writes it. */
+  totalExact(column: Extract<keyof F, string> | C): string | null {
     this.#settle();
-    const totals = JSON.parse(this.engine.totals()) as (number | null)[];
-    return totals[this.#col(column)] ?? null;
+    const totals = JSON.parse(this.engine.totals()) as (number | string | null)[];
+    return textOf(totals[this.#col(column)]);
   }
 
   /** Why a cell has its value: what it was worked out from, as an indented tree. */
@@ -377,10 +395,10 @@ export class Table<F extends Fields = Fields, C extends string = string> {
   groups(): Group[] {
     this.#settle();
     const names = this.#names;
-    return (JSON.parse(this.engine.groups()) as { g: string; n: number; c: (number | null)[] }[]).map((g) => ({
+    return (JSON.parse(this.engine.groups()) as { g: string; n: number; c: (number | string | null)[] }[]).map((g) => ({
       key: g.g,
       rows: g.n,
-      totals: Object.fromEntries(names.map((name, k) => [name, g.c[k] ?? null])),
+      totals: Object.fromEntries(names.map((name, k) => [name, numberOf(textOf(g.c[k]))])),
     }));
   }
 

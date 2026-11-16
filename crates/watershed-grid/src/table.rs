@@ -7,7 +7,9 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use watershed_core::{AggregateOp, Collection, Graph, Ir, NodeId, Report, Type, Value};
+use std::sync::Arc;
+
+use watershed_core::{AggregateOp, Collection, Decimal, Graph, Ir, NodeId, Report, Type, Value};
 
 use crate::formula;
 
@@ -15,6 +17,9 @@ use crate::formula;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Number,
+    /// An exact decimal of up to 28 digits, for money and the like: `0.1 +
+    /// 0.2` is `0.3`. Its totals are exact too.
+    Decimal,
     Text,
     Bool,
 }
@@ -23,10 +28,11 @@ impl Kind {
     pub fn parse(text: &str) -> Result<Kind, String> {
         match text {
             "number" => Ok(Kind::Number),
+            "decimal" => Ok(Kind::Decimal),
             "text" => Ok(Kind::Text),
             "bool" => Ok(Kind::Bool),
             other => Err(format!(
-                "{other:?} is not a kind of column (there are number, text and bool)"
+                "{other:?} is not a kind of column (there are number, decimal, text and bool)"
             )),
         }
     }
@@ -34,14 +40,22 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Number => "number",
+            Kind::Decimal => "decimal",
             Kind::Text => "text",
             Kind::Bool => "bool",
         }
     }
 
+    /// Whether a column of this kind can have a sum, average, minimum or
+    /// maximum.
+    fn totalled(self) -> bool {
+        matches!(self, Kind::Number | Kind::Decimal)
+    }
+
     fn value_type(self) -> Type {
         match self {
             Kind::Number => Type::F64,
+            Kind::Decimal => Type::Decimal,
             Kind::Text => Type::Str,
             Kind::Bool => Type::Bool,
         }
@@ -59,6 +73,11 @@ impl Kind {
                 .filter(|x| x.is_finite())
                 .map(Value::F64)
                 .ok_or_else(|| format!("{text:?} is not a number")),
+            Kind::Decimal => text
+                .replace([',', '_'], "")
+                .parse::<Decimal>()
+                .map(|x| Value::Decimal(Arc::new(x)))
+                .map_err(|_| format!("{text:?} is not a decimal of up to 28 digits")),
             Kind::Bool => match text.to_ascii_lowercase().as_str() {
                 "true" | "yes" | "y" | "1" => Ok(Value::Bool(true)),
                 "false" | "no" | "n" | "0" => Ok(Value::Bool(false)),
@@ -76,10 +95,12 @@ pub struct Columns<'a> {
     pub numbers: &'a [f64],
     /// The true/false fields, one after another (0 is false).
     pub bools: &'a [u8],
-    /// The text fields, one after another: for each row, which of its
-    /// field's distinct texts it holds.
+    /// The text and decimal fields, one after another: for each row, which
+    /// of its field's distinct texts it holds. A decimal comes as text, so
+    /// that it is exact.
     pub codes: &'a [u32],
-    /// Every text field's distinct texts, one field after another.
+    /// Every text and decimal field's distinct texts, one field after
+    /// another.
     pub texts: Vec<Value>,
     /// Where each text field's distinct texts start in `texts`, and one
     /// more entry for where the last one ends.
@@ -151,28 +172,83 @@ impl Agg {
         }
     }
 
-    /// What to show for a total the graph keeps, over `rows` rows: the
-    /// graph's number, or for an average that sum over the rows.
-    fn of_graph(self, number: Option<f64>, rows: usize) -> f64 {
+    /// The total of these decimal cells, worked out the plain way, exactly.
+    /// As with numbers, a cell that holds no decimal (an error) makes a sum
+    /// or an average nothing to show, and a minimum or maximum leaves it out.
+    fn fold_decimals<'v>(self, cells: impl ExactSizeIterator<Item = &'v Value>) -> Value {
+        let rows = cells.len();
+        let nothing = Value::F64(f64::NAN);
+        let decimal = |x: Decimal| Value::Decimal(Arc::new(x));
         match self {
-            Agg::None => f64::NAN,
-            Agg::Count => rows as f64,
-            Agg::Avg => number.unwrap_or(f64::NAN) / rows as f64,
-            Agg::Sum | Agg::Min | Agg::Max => number.unwrap_or(f64::NAN),
+            Agg::None => nothing,
+            Agg::Count => Value::F64(rows as f64),
+            Agg::Sum | Agg::Avg => {
+                let mut sum = Decimal::ZERO;
+                for cell in cells {
+                    match cell {
+                        Value::Decimal(x) => match sum.checked_add(**x) {
+                            Some(more) => sum = more,
+                            None => return nothing,
+                        },
+                        _ => return nothing,
+                    }
+                }
+                match self {
+                    Agg::Avg => sum
+                        .checked_div(Decimal::from(rows as i64))
+                        .map_or(nothing, decimal),
+                    _ => decimal(sum),
+                }
+            }
+            Agg::Min | Agg::Max => cells
+                .filter_map(|cell| match cell {
+                    Value::Decimal(x) => Some(**x),
+                    _ => None,
+                })
+                .reduce(|a, b| if self == Agg::Min { a.min(b) } else { a.max(b) })
+                .map_or(nothing, decimal),
+        }
+    }
+
+    /// What to show for a total the graph keeps, over `rows` rows: the
+    /// graph's number or decimal, or for an average that sum over the rows.
+    fn of_graph(self, total: Option<&Value>, rows: usize) -> Value {
+        let nothing = Value::F64(f64::NAN);
+        match (self, total) {
+            (Agg::None, _) => nothing,
+            (Agg::Count, _) => Value::F64(rows as f64),
+            (Agg::Avg, Some(Value::F64(x))) => Value::F64(x / rows as f64),
+            (Agg::Avg, Some(Value::Decimal(x))) => x
+                .checked_div(Decimal::from(rows as i64))
+                .map_or(nothing, |x| Value::Decimal(Arc::new(x))),
+            (Agg::Sum | Agg::Min | Agg::Max, Some(total @ (Value::F64(_) | Value::Decimal(_)))) => {
+                total.clone()
+            }
+            _ => nothing,
+        }
+    }
+
+    /// What a total the graph keeps is multiplied by to show it, over `rows`
+    /// rows: for an average, one over the rows.
+    fn scale(self, rows: usize) -> f64 {
+        match self {
+            Agg::Avg => 1.0 / rows as f64,
+            _ => 1.0,
         }
     }
 }
 
 /// A column's filter, from what someone typed in its filter box.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 enum Filter {
     /// Text containing this (already lower case).
     Contains(String),
     /// Text equal to this, ignoring case (already lower case).
     Exactly(Vec<String>),
-    Compare(Ordering, bool, f64),
-    NotEqual(f64),
-    Between(f64, f64),
+    /// Numbers or decimals, compared with a bound of the column's kind.
+    Compare(Ordering, bool, Value),
+    NotEqual(Value),
+    Between(Value, Value),
     Is(bool),
 }
 
@@ -184,10 +260,7 @@ impl Filter {
         if text.is_empty() {
             return Ok(None);
         }
-        let number = |s: &str| match Kind::Number.read(s)? {
-            Value::F64(x) => Ok::<f64, String>(x),
-            _ => unreachable!("a number reads as a number"),
-        };
+        let number = |s: &str| kind.read(s);
         Ok(Some(match kind {
             Kind::Text => match text.strip_prefix('=') {
                 // `=a|b` is any of several values.
@@ -200,7 +273,7 @@ impl Filter {
                 Value::Bool(b) => Filter::Is(b),
                 _ => unreachable!("a bool reads as a bool"),
             },
-            Kind::Number => {
+            Kind::Number | Kind::Decimal => {
                 if let Some((low, high)) = text.split_once("..") {
                     Filter::Between(number(low)?, number(high)?)
                 } else if let Some(rest) = text.strip_prefix(">=") {
@@ -215,7 +288,7 @@ impl Filter {
                     Filter::Compare(Ordering::Less, false, number(rest)?)
                 } else {
                     let x = number(text.strip_prefix('=').unwrap_or(text))?;
-                    Filter::Between(x, x)
+                    Filter::Between(x.clone(), x)
                 }
             }
         }))
@@ -231,16 +304,31 @@ impl Filter {
                     s.to_lowercase() == *want
                 }
             }),
-            (Filter::Compare(side, or_equal, limit), Value::F64(x)) => match x.partial_cmp(limit) {
+            (Filter::Compare(side, or_equal, limit), value) => match numeric_order(value, limit) {
                 Some(Ordering::Equal) => *or_equal,
                 Some(found) => found == *side,
                 None => false,
             },
-            (Filter::NotEqual(limit), Value::F64(x)) => x != limit,
-            (Filter::Between(low, high), Value::F64(x)) => low <= x && x <= high,
+            (Filter::NotEqual(limit), value) => {
+                numeric_order(value, limit).is_some_and(|order| order != Ordering::Equal)
+            }
+            (Filter::Between(low, high), value) => {
+                numeric_order(low, value).is_some_and(|order| order != Ordering::Greater)
+                    && numeric_order(value, high).is_some_and(|order| order != Ordering::Greater)
+            }
             (Filter::Is(want), Value::Bool(b)) => b == want,
             _ => false,
         }
+    }
+}
+
+/// How two numbers, or two decimals, compare; `None` for anything else, or
+/// a number that is not a number.
+fn numeric_order(a: &Value, b: &Value) -> Option<Ordering> {
+    match (a, b) {
+        (Value::F64(a), Value::F64(b)) => a.partial_cmp(b),
+        (Value::Decimal(a), Value::Decimal(b)) => Some(a.cmp(b)),
+        _ => None,
     }
 }
 
@@ -280,6 +368,7 @@ fn compare_directed(a: &Value, b: &Value, descending: bool) -> Ordering {
 fn compare(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
         (Value::F64(a), Value::F64(b)) => a.total_cmp(b),
+        (Value::Decimal(a), Value::Decimal(b)) => a.cmp(b),
         (Value::I64(a), Value::I64(b)) => a.cmp(b),
         (Value::Str(a), Value::Str(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
@@ -339,7 +428,7 @@ struct Group {
     len: usize,
     /// Each column's total over the group's filtered rows, when a filter is
     /// on. Without one, the totals are read from the graph.
-    plain: Vec<f64>,
+    plain: Vec<Value>,
 }
 
 /// The most row-and-column pairs the graph is asked to keep group totals for
@@ -362,7 +451,7 @@ struct Bucket {
     rows: Vec<u32>,
     /// Each column's total over these rows, if it is already known: the
     /// bucket is a group that did not change since it was last added up.
-    plain: Option<Vec<f64>>,
+    plain: Option<Vec<Value>>,
 }
 
 impl Bucket {
@@ -416,8 +505,9 @@ pub struct Table {
     group_by: Option<usize>,
     /// For each column that has been grouped by, each column's grouping in the collection.
     groupings: HashMap<usize, Vec<[Option<usize>; 3]>>,
-    /// For each column with a total worked out from its numbers, every
-    /// row's number in that column, side by side (empty for other columns).
+    /// For each number column with a total worked out from its numbers,
+    /// every row's number in that column, side by side (empty for other
+    /// columns: a decimal column's totals are added up from its cells).
     /// The grid adds totals up from these rather than from the graph, whose
     /// values for one column are scattered among every other node's. Kept
     /// up to date only while the grid is adding totals up: see `copies_fresh`.
@@ -437,7 +527,7 @@ pub struct Table {
     view: Vec<u32>,
     filter_on: bool,
     /// Each column's total over the filtered rows, when a filter is on.
-    plain_totals: Vec<f64>,
+    plain_totals: Vec<Value>,
 
     /// Rows, columns, sorting, filters or grouping changed since the last update.
     structural: bool,
@@ -543,9 +633,9 @@ impl Table {
     /// Adds a column that holds what rows are given. Fields come before the first row.
     pub fn add_field(&mut self, name: &str, kind: Kind, agg: Agg) -> Result<usize, String> {
         self.check_name(name)?;
-        if !matches!(agg, Agg::None | Agg::Count) && kind != Kind::Number {
+        if !matches!(agg, Agg::None | Agg::Count) && !kind.totalled() {
             return Err(format!(
-                "{name}: only number columns have totals (any column can have a count)"
+                "{name}: only number and decimal columns have totals (any column can have a count)"
             ));
         }
         let part = self
@@ -577,11 +667,12 @@ impl Table {
             .map_err(|e| e.to_string())?;
         let kind = match ty {
             Type::F64 => Kind::Number,
+            Type::Decimal => Kind::Decimal,
             Type::Str => Kind::Text,
             Type::Bool => Kind::Bool,
             other => return Err(format!("{name}: a column can't hold a {other}")),
         };
-        let agg = if kind == Kind::Number || agg == Agg::Count {
+        let agg = if kind.totalled() || agg == Agg::Count {
             agg
         } else {
             Agg::None
@@ -748,7 +839,8 @@ impl Table {
         let kinds = self.field_kinds();
         let rows = keys.len();
         let of = |kind: Kind| kinds.iter().filter(|&&k| k == kind).count();
-        let (numbers, bools, texts) = (of(Kind::Number), of(Kind::Bool), of(Kind::Text));
+        let (numbers, bools) = (of(Kind::Number), of(Kind::Bool));
+        let texts = of(Kind::Text) + of(Kind::Decimal);
         let names: Vec<&str> = self
             .cols
             .iter()
@@ -762,9 +854,11 @@ impl Table {
             || columns.starts.last().copied() != Some(columns.texts.len() as u32)
         {
             return Err(format!(
-                "{rows} rows need {numbers} number, {bools} true/false and {texts} text columns of {rows} values each"
+                "{rows} rows need {numbers} number, {bools} true/false and {texts} text or decimal columns of {rows} values each"
             ));
         }
+        // A decimal field's distinct texts, read as decimals.
+        let mut texts_read = columns.texts.clone();
         // Check every value first, so that a bad one adds no rows at all.
         let mut n = 0;
         let mut t = 0;
@@ -777,7 +871,7 @@ impl Table {
                     }
                     n += 1;
                 }
-                Kind::Text => {
+                Kind::Text | Kind::Decimal => {
                     let distinct = columns.starts[t + 1] - columns.starts[t];
                     let column = &columns.codes[t * rows..(t + 1) * rows];
                     if let Some(r) = column.iter().position(|&code| code >= distinct) {
@@ -785,6 +879,16 @@ impl Table {
                             "{name} of {} refers to text {} of {distinct}",
                             keys[r], column[r]
                         ));
+                    }
+                    if *kind == Kind::Decimal {
+                        let range = columns.starts[t] as usize..columns.starts[t + 1] as usize;
+                        for text in &mut texts_read[range] {
+                            let read = match &*text {
+                                Value::Str(s) => Kind::Decimal.read(s),
+                                other => Err(format!("{other} is not a decimal")),
+                            };
+                            *text = read.map_err(|e| format!("{name}: {e}"))?;
+                        }
                     }
                     t += 1;
                 }
@@ -805,10 +909,10 @@ impl Table {
                         b += 1;
                         Value::Bool(columns.bools[(b - 1) * rows + r] != 0)
                     }
-                    Kind::Text => {
+                    Kind::Text | Kind::Decimal => {
                         t += 1;
                         let code = columns.codes[(t - 1) * rows + r];
-                        columns.texts[(columns.starts[t - 1] + code) as usize].clone()
+                        texts_read[(columns.starts[t - 1] + code) as usize].clone()
                     }
                 })
                 .collect();
@@ -970,9 +1074,9 @@ impl Table {
     /// Changes a column's total: in the bottom row, and in each group's row.
     pub fn set_agg(&mut self, col: usize, agg: Agg) -> Result<(), String> {
         let c = self.col(col)?;
-        if !matches!(agg, Agg::None | Agg::Count) && c.kind != Kind::Number {
+        if !matches!(agg, Agg::None | Agg::Count) && !c.kind.totalled() {
             return Err(format!(
-                "{}: only number columns have totals (any column can have a count)",
+                "{}: only number and decimal columns have totals (any column can have a count)",
                 c.name
             ));
         }
@@ -1042,12 +1146,17 @@ impl Table {
         for r in self.rows_on(start, count) {
             for &col in cols.iter().filter(|&&c| c < self.cols.len()) {
                 cells += 1;
-                if let Value::F64(x) = self.cell(r, col) {
-                    numbers += 1;
-                    sum += x;
-                    least = least.min(*x);
-                    greatest = greatest.max(*x);
-                }
+                let x = match self.cell(r, col) {
+                    Value::F64(x) => *x,
+                    // A decimal is counted as the nearest number: these are
+                    // a glance at a selection, not its exact total.
+                    Value::Decimal(x) => to_f64(x),
+                    _ => continue,
+                };
+                numbers += 1;
+                sum += x;
+                least = least.min(x);
+                greatest = greatest.max(x);
             }
         }
         let mut out = format!(r#"{{"cells":{cells},"numbers":{numbers}"#);
@@ -1704,13 +1813,16 @@ impl Table {
             self.copies_fresh = false;
         }
         let fold = |col: usize, rows: &[u32]| {
-            let numbers = &self.copies[col];
             let agg = self.cols[col].agg;
+            if self.cols[col].kind == Kind::Decimal {
+                return agg.fold_decimals(rows.iter().map(|&r| self.cell(r, col)));
+            }
+            let numbers = &self.copies[col];
             if numbers.is_empty() {
                 // A count, or no total: nothing to read.
-                return agg.fold(rows.iter().map(|_| f64::NAN));
+                return Value::F64(agg.fold(rows.iter().map(|_| f64::NAN)));
             }
-            agg.fold(rows.iter().map(|&r| numbers[r as usize]))
+            Value::F64(agg.fold(rows.iter().map(|&r| numbers[r as usize])))
         };
         let mut groups: Vec<Group> = Vec::new();
         let rows = match self.group_by {
@@ -1732,14 +1844,7 @@ impl Table {
                         if self.failed_group(by, &bucket.rows) {
                             bucket.plain = Some(
                                 (0..n)
-                                    .map(|col| {
-                                        self.cols[col].agg.fold(bucket.rows.iter().map(|&r| {
-                                            match self.cell(r, col) {
-                                                Value::F64(x) => *x,
-                                                _ => f64::NAN,
-                                            }
-                                        }))
-                                    })
+                                    .map(|col| self.fold_cells(col, &bucket.rows))
                                     .collect(),
                             );
                         }
@@ -1752,17 +1857,17 @@ impl Table {
                     .filter(|&&(col, _)| col != by && self.cols[col].agg != Agg::None)
                     .copied();
                 let name_desc = matches!(self.sort.first(), Some(&(col, true)) if col == by);
-                let mut order: Vec<(f64, usize)> = buckets
+                let mut order: Vec<(Value, usize)> = buckets
                     .iter()
                     .enumerate()
                     .map(|(k, bucket)| {
                         let total = match (by_total, &bucket.plain) {
-                            (Some((col, _)), Some(plain)) => plain[col],
+                            (Some((col, _)), Some(plain)) => plain[col].clone(),
                             (Some((col, _)), None) => self.cols[col].agg.of_graph(
-                                self.group_number(by, &bucket.key, col),
+                                self.group_value(by, &bucket.key, col),
                                 bucket.rows.len(),
                             ),
-                            (None, _) => 0.0,
+                            (None, _) => Value::F64(0.0),
                         };
                         (total, k)
                     })
@@ -1771,7 +1876,7 @@ impl Table {
                     let by_name = buckets[a.1].key.cmp(&buckets[b.1].key);
                     match by_total {
                         Some((_, desc)) => {
-                            let order = a.0.total_cmp(&b.0);
+                            let order = compare(&a.0, &b.0);
                             (if desc { order.reverse() } else { order }).then(by_name)
                         }
                         None if name_desc => by_name.reverse(),
@@ -1792,7 +1897,7 @@ impl Table {
                 rows
             }
         };
-        let plain_totals: Vec<f64> = if filter_on {
+        let plain_totals: Vec<Value> = if filter_on {
             (0..n).map(|col| fold(col, &rows)).collect()
         } else {
             Vec::new()
@@ -1815,10 +1920,12 @@ impl Table {
         let mut copies = std::mem::take(&mut self.copies);
         copies.resize_with(n, Vec::new);
         for (col, numbers) in copies.iter_mut().enumerate() {
-            if !matches!(
-                self.cols[col].agg,
-                Agg::Sum | Agg::Avg | Agg::Min | Agg::Max
-            ) {
+            if self.cols[col].kind != Kind::Number
+                || !matches!(
+                    self.cols[col].agg,
+                    Agg::Sum | Agg::Avg | Agg::Min | Agg::Max
+                )
+            {
                 numbers.clear();
                 continue;
             }
@@ -1861,10 +1968,20 @@ impl Table {
         self.c.group_node(&self.g, index, &Value::Str(key.into()))
     }
 
-    fn group_number(&self, by: usize, key: &str, col: usize) -> Option<f64> {
-        match self.read(self.group_node(by, key, col)?) {
-            Value::F64(x) => Some(*x),
-            _ => None,
+    /// A group's total of a column over every row, from the graph.
+    fn group_value(&self, by: usize, key: &str, col: usize) -> Option<&Value> {
+        Some(self.read(self.group_node(by, key, col)?))
+    }
+
+    /// A column's total over these rows, added up from their cells.
+    fn fold_cells(&self, col: usize, rows: &[u32]) -> Value {
+        let agg = self.cols[col].agg;
+        match self.cols[col].kind {
+            Kind::Decimal => agg.fold_decimals(rows.iter().map(|&r| self.cell(r, col))),
+            _ => Value::F64(agg.fold(rows.iter().map(|&r| match self.cell(r, col) {
+                Value::F64(x) => *x,
+                _ => f64::NAN,
+            }))),
         }
     }
 
@@ -1962,7 +2079,7 @@ impl Table {
                     if col > 0 {
                         out.push(',');
                     }
-                    write_number(&mut out, self.group_total(by, group, col));
+                    write_total(&mut out, &self.group_total(by, group, col));
                 }
             }
             out.push_str("]}");
@@ -2011,17 +2128,14 @@ impl Table {
                 out.push(',');
             }
             let total = if col.agg == Agg::None {
-                f64::NAN
+                Value::F64(f64::NAN)
             } else if self.filter_on {
-                self.plain_totals[k]
+                self.plain_totals[k].clone()
             } else {
-                let number = col.total().and_then(|id| match self.read(id) {
-                    Value::F64(x) => Some(*x),
-                    _ => None,
-                });
-                col.agg.of_graph(number, self.sorted.len())
+                col.agg
+                    .of_graph(col.total().map(|id| self.read(id)), self.sorted.len())
             };
-            write_number(&mut out, total);
+            write_total(&mut out, &total);
         }
         out.push(']');
         out
@@ -2117,14 +2231,14 @@ impl Table {
     }
 
     /// A group's total of a column, as its line shows it.
-    fn group_total(&self, by: usize, group: &Group, col: usize) -> f64 {
+    fn group_total(&self, by: usize, group: &Group, col: usize) -> Value {
         let agg = self.cols[col].agg;
         if agg == Agg::None {
-            f64::NAN
+            Value::F64(f64::NAN)
         } else if self.filter_on || self.plain_groups || !group.plain.is_empty() {
-            group.plain[col]
+            group.plain[col].clone()
         } else {
-            agg.of_graph(self.group_number(by, &group.key, col), group.len)
+            agg.of_graph(self.group_value(by, &group.key, col), group.len)
         }
     }
 
@@ -2147,7 +2261,7 @@ impl Table {
                     if col > 0 {
                         out.push(',');
                     }
-                    write_number(&mut out, self.group_total(by, group, col));
+                    write_total(&mut out, &self.group_total(by, group, col));
                 }
                 out.push_str("]}");
             }
@@ -2259,6 +2373,7 @@ impl Table {
         let numbers: Vec<f64> = (0..n)
             .filter_map(|i| match self.g.value_at(id, oldest + span * i / (n - 1)) {
                 Ok(Value::F64(x)) if x.is_finite() => Some(x * scale),
+                Ok(Value::Decimal(x)) => Some(to_f64(x) * scale),
                 _ => None,
             })
             .collect();
@@ -2291,7 +2406,7 @@ impl Table {
                 self.group_by
                     .filter(|_| !self.filter_on && !self.plain_groups)
                     .and_then(|by| self.group_node(by, &group.key, col))
-                    .and_then(|id| self.trend(id, points, agg.of_graph(Some(1.0), group.len)))
+                    .and_then(|id| self.trend(id, points, agg.scale(group.len)))
             };
             write_numbers(&mut out, trend.as_deref());
         }
@@ -2307,9 +2422,7 @@ impl Table {
             .get(col)
             .filter(|_| !self.filter_on)
             .and_then(|c| Some((c.total()?, c.agg)))
-            .and_then(|(id, agg)| {
-                self.trend(id, points, agg.of_graph(Some(1.0), self.sorted.len()))
-            });
+            .and_then(|(id, agg)| self.trend(id, points, agg.scale(self.sorted.len())));
         let mut out = String::new();
         write_numbers(&mut out, trend.as_deref());
         out
@@ -2378,6 +2491,22 @@ fn write_number(out: &mut String, x: f64) {
     }
 }
 
+/// A total: a number, a decimal (as text, exactly), or null for nothing to
+/// show.
+fn write_total(out: &mut String, total: &Value) {
+    match total {
+        Value::F64(x) => write_number(out, *x),
+        Value::Decimal(_) => write_value(out, total),
+        _ => out.push_str("null"),
+    }
+}
+
+/// A decimal as the nearest number, for what does not need it exactly (a
+/// trend line, a glance at a selection).
+fn to_f64(x: &Decimal) -> f64 {
+    x.to_string().parse().unwrap_or(f64::NAN)
+}
+
 fn write_numbers(out: &mut String, numbers: Option<&[f64]>) {
     let Some(numbers) = numbers else {
         out.push_str("null");
@@ -2399,8 +2528,7 @@ fn write_value(out: &mut String, value: &Value) {
         Value::I64(x) => {
             let _ = write!(out, "{x}");
         }
-        // As text: JavaScript's numbers would lose its exactness. (The grid
-        // has no decimal columns yet; this is for values that reach it.)
+        // As text: JavaScript's numbers would lose its exactness.
         Value::Decimal(x) => out.push_str(&json_str(&x.to_string())),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Str(s) => out.push_str(&json_str(s)),

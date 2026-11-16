@@ -57,7 +57,7 @@ npm install @surefold/grid
 
 | Key | What it is |
 |---|---|
-| `fields` | The columns you give values for, and their kinds: `"number"`, `"text"` or `"bool"`. |
+| `fields` | The columns you give values for, and their kinds: `"number"`, `"decimal"`, `"text"` or `"bool"`. |
 | `formulas` | Calculated columns, by name, such as `"qty * (mark - price)"` or `if(side == "Buy", 1, -1)`. |
 | `values` | Named numbers formulas can use, changed later with `setValue`. |
 | `totals` | Each column's total: `"sum"`, `"avg"`, `"min"`, `"max"` or `"count"`. |
@@ -101,6 +101,17 @@ they always see what was written, with two exceptions:
 changed, nodes recalculated, how long it took) and returns a function that
 stops it. `dispose()` frees the engine's memory at once; otherwise it is freed
 when the table is garbage collected.
+
+**Decimals.** A `"decimal"` field holds an exact decimal of up to 28 digits,
+for money and the like: `0.10 + 0.20` is `0.30`, and so is its total. It is
+given and read back as a string (`put("p-1", { amount: "19.99" })`, and
+`get("p-1").amount` is `"19.99"`), since a JavaScript number would round it;
+`putMany` takes a column of strings. `total(column)` gives the nearest
+number and `totalExact(column)` the total as text, exactly (`"0.30"`). A grid
+shows a decimal with its column's places, formatted from the text, so a
+17-digit amount shows as it is. Formulas do not mix decimals with numbers:
+`amount * 0.015d` is a decimal, `float(amount) * qty` a number. Decimal
+columns filter (`>100`, `0.1..0.2`), sort and total like number columns.
 
 Names are checked by TypeScript: `orders.set("o-1", "qyt", 5)` does not
 compile, and `put` needs every field, of its kind. Code that takes any table
