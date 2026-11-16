@@ -88,10 +88,12 @@ for (const { name, path } of COOKBOOKS) {
     test("paged API: a page that fails to load is asked for again", async ({ page, net }) => {
       // The browser logs the failed request.
       net.allow(/500/);
-      // The second page fails once, then loads.
+      // The second page fails until `failing` is turned off.
+      let failing = true;
       let failed = 0;
       await page.route(/dummyjson\.com\/products\?.*skip=20/, async (route) => {
-        if (route.request().method() === "GET" && failed++ === 0) {
+        if (route.request().method() === "GET" && failing) {
+          failed++;
           return route.fulfill({ status: 500, headers: { "access-control-allow-origin": "*" }, json: { message: "down" } });
         }
         return route.fallback();
@@ -103,13 +105,20 @@ for (const { name, path } of COOKBOOKS) {
         await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
         await expect(recipe).toContainText("That page did not load", { timeout: 1000 });
       }).toPass();
-      expect(failed).toBe(1);
-      // Scrolling again asks for it again, and the rest follow.
+      // The button shows once the failure has settled, with nothing asked for since.
+      await expect(recipe.getByRole("button", { name: "Try again" })).toBeVisible();
+      expect(failed).toBeGreaterThanOrEqual(1);
+      await expect(row(recipe, "P-21")).toHaveCount(0);
+      // A list at its end cannot be scrolled further, so the recipe offers to try again.
+      failing = false;
+      await recipe.getByRole("button", { name: "Try again" }).click();
+      await expect(recipe.getByRole("button", { name: "Try again" })).toHaveCount(0);
+      await expect(row(recipe, "P-21")).toBeAttached();
       await expect(async () => {
+        await body.evaluate((b) => (b.scrollTop = 0));
         await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
         await expect(recipe).toContainText("50 of 50 products loaded", { timeout: 1000 });
       }).toPass();
-      expect(failed).toBe(2);
     });
 
     test.describe("edit and save", () => {

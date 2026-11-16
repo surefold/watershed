@@ -53,7 +53,7 @@ export const recipes: Recipe[] = [
       "Scroll down: each page is twenty more products from the same API.",
     ],
     notes: [
-      "If <code>loadMore</code> throws, the grid passes the message to <code>onError</code>, calls <code>onStatus</code> with <code>{ failed: true, error }</code>, and asks again on the next scroll near the end (or when you call <code>fetchMore()</code>). Here the status says the page did not load.",
+      "If <code>loadMore</code> throws, the grid passes the message to <code>onError</code>, calls <code>onStatus</code> with <code>{ failed: true, error }</code>, and asks again on the next scroll near the end, or when you call <code>fetchMore()</code>. A list already at its end cannot scroll further, so a person there needs a way to ask: here the status says the page did not load, and a Try again button calls <code>fetchMore()</code>.",
       "Sorting, filtering and grouping work over the rows loaded so far, and totals are of those rows.",
     ],
   },
