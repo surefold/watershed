@@ -1,6 +1,6 @@
 {
   "name": "@surefold/grid-solid",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The watershed grid as a Solid component, and its totals as signals.",
   "license": "Apache-2.0",
   "homepage": "https://surefold.dev/watershed/grid/",
@@ -28,7 +28,7 @@
     "solid-js": "^1.8"
   },
   "dependencies": {
-    "@surefold/grid": "^0.3.0"
+    "@surefold/grid": "^0.4.0"
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",

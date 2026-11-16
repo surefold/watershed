@@ -43,6 +43,7 @@ export const Grid = forwardRef<GridView | null, GridProps>(function Grid(props, 
       onGroup: (c) => latest.current.onGroup?.(c),
       onError: (m) => (latest.current.onError ? latest.current.onError(m) : console.warn(m)),
       onNote: (m) => latest.current.onNote?.(m),
+      onEdit: (e) => latest.current.onEdit?.(e),
     });
     setView(v);
     return () => {

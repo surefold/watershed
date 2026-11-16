@@ -31,6 +31,8 @@ orders.total("line");           // 60
 orders.why("o-1", "line");      // what line was worked out from
 ```
 
+**[The cookbook](https://surefold.dev/watershed/grid/cookbook/)** has whole, running examples in Solid and React: a first grid, rows from an API, pages loaded as you scroll, edits saved back to an API, live updates over a WebSocket or SSE, charts that follow the table, and a large table in a worker.
+
 ## Install
 
 The packages are on GitHub Packages. Tell npm where `@surefold` packages
@@ -116,6 +118,7 @@ and returns the view. Options:
 | `theme` | One of `themes` (light, dark, paper, dusk, terminal, high contrast), or a `[data-wg-theme="name"]` rule of your own. With none, it takes the page's colours. |
 | `loadMore` | `async () => boolean`, called as the person nears the end: add rows to the table, and resolve to whether there may be more. |
 | `onStatus`, `onFocus`, `onGroup`, `onError`, `onNote` | What happened: each recalculation and its cost, the cell the person is on, grouping, and messages to show them. |
+| `onEdit` | What a person changed: `{ cause, cells, removed }`, with each cell's `key`, `column`, `before` and `after`, and the keys of rows they deleted. Not called for changes made from code, so an app can save what people did. |
 
 The view's methods group (`setGroup`, `expandAll`, `revealGroup`), sort and
 filter (`setSort`, `setFilter`, `setQuickFilter`, the same as the table's

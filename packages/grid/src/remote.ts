@@ -370,18 +370,17 @@ export class RemoteEngine {
   }
 
   /**
-   * Sets many cells as one step to undo: each `[key, col, text]`. A cell
-   * that will not take its text is skipped, and the rest are still set.
+   * Runs engine calls (`[method, ...args]` each) as one message, in order, and
+   * gives back each one's result: nothing else runs in the worker between
+   * them. With `batch` they are one step to undo; with `tolerant` a call that
+   * fails gives `{ error }` and the rest still run.
    */
-  async setCells(cells: [string, number, string][]): Promise<{ set: number; skipped: number }> {
-    if (!cells.length) return { set: 0, skipped: 0 };
-    const results = await this.table.engineCalls(
-      cells.map(([key, col, text]) => ({ on: "engine", method: "set_cell", args: [key, col, text] })),
-      true,
-      true,
+  sequence(calls: [string, ...unknown[]][], batch = false, tolerant = false): Promise<unknown[]> {
+    return this.table.engineCalls(
+      calls.map(([method, ...args]) => ({ on: "engine", method, args })),
+      batch,
+      tolerant,
     );
-    const skipped = results.filter((r) => r !== null && typeof r === "object" && "error" in r).length;
-    return { set: cells.length - skipped, skipped };
   }
 
   /** Lines of the view from the worker itself, not the snapshot: for ranges out of view. */

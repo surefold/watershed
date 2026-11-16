@@ -923,6 +923,51 @@ fn several_cells_set_together_undo_together_and_removed_rows_are_left_out() {
 }
 
 #[test]
+fn recording_notes_each_cell_set_undone_or_done_again_with_before_and_after() {
+    let mut t = orders();
+    // Not recording: nothing is noted.
+    t.set_cell("o-1", QTY, "5").unwrap();
+    assert_eq!(t.take_edits_json(), "[]");
+    t.update();
+
+    t.record_edits();
+    t.set_cell("o-2", REGION, "EU").unwrap();
+    t.set_cell("o-2", QTY, "1").unwrap(); // what it held already: not a change
+    assert_eq!(
+        t.take_edits_json(),
+        r#"[{"k":"o-2","c":0,"b":"US","a":"EU"}]"#
+    );
+    // Taking them stops the noting.
+    t.set_cell("o-3", QTY, "7").unwrap();
+    assert_eq!(t.take_edits_json(), "[]");
+    t.update();
+
+    // A fill notes each cell it set; undoing and doing again note what they put back.
+    t.record_edits();
+    t.fill(0, 2, &[PRICE, LINE], "8");
+    assert_eq!(
+        t.take_edits_json(),
+        r#"[{"k":"o-1","c":2,"b":10,"a":8},{"k":"o-2","c":2,"b":5,"a":8}]"#
+    );
+    t.update();
+    t.record_edits();
+    t.undo().unwrap();
+    assert_eq!(
+        t.take_edits_json(),
+        r#"[{"k":"o-2","c":2,"b":8,"a":5},{"k":"o-1","c":2,"b":8,"a":10}]"#
+    );
+    t.update();
+    t.record_edits();
+    t.redo().unwrap();
+    assert_eq!(
+        t.take_edits_json(),
+        r#"[{"k":"o-1","c":2,"b":10,"a":8},{"k":"o-2","c":2,"b":5,"a":8}]"#
+    );
+    t.update();
+    assert_eq!(t.check(), Ok(()));
+}
+
+#[test]
 fn grouped_by_a_formula_the_graphs_group_totals_are_the_ones_adding_up_gives() {
     let regions = ["EU", "US", "APAC"];
     let mut seed = 0x5EED_F00D_1234_5678_u64;

@@ -320,6 +320,7 @@ fn slot(op: AggregateOp) -> usize {
 }
 
 /// A cell someone set, and what it held before.
+#[derive(Clone)]
 struct Edit {
     key: String,
     col: usize,
@@ -451,6 +452,9 @@ pub struct Table {
     redo: Vec<Vec<Edit>>,
     /// The step being gathered between `begin_edits` and `end_edits`.
     batch: Option<Vec<Edit>>,
+    /// Every cell changed since `record_edits`, by setting, undoing or doing
+    /// again, until `take_edits_json`; `None` when not recording.
+    journal: Option<Vec<Edit>>,
     /// The rows with cells set since the last update (a row may be noted twice).
     changed_rows: Vec<u32>,
     /// More rows were set than `changed_rows` holds.
@@ -510,6 +514,7 @@ impl Table {
             undo: Vec::new(),
             redo: Vec::new(),
             batch: None,
+            journal: None,
             changed_rows: Vec::new(),
             changed_unknown: false,
             as_of: None,
@@ -833,6 +838,9 @@ impl Table {
             after: value,
         };
         self.redo.clear();
+        if let Some(journal) = &mut self.journal {
+            journal.push(edit.clone());
+        }
         match &mut self.batch {
             Some(batch) => batch.push(edit),
             None => self.push_undo(vec![edit]),
@@ -861,6 +869,38 @@ impl Table {
         if let Some(step) = self.batch.take() {
             self.push_undo(step);
         }
+    }
+
+    /// Starts noting every cell that [`set_cell`](Table::set_cell),
+    /// [`undo`](Table::undo) and [`redo`](Table::redo) change (and so
+    /// [`fill`](Table::fill)), for [`take_edits_json`](Table::take_edits_json).
+    /// A view does this around what a person does, to say what they changed.
+    pub fn record_edits(&mut self) {
+        self.journal = Some(Vec::new());
+    }
+
+    /// The cells changed since [`record_edits`](Table::record_edits), in
+    /// the order they changed, and stops noting them:
+    /// `[{"k": key, "c": column, "b": before, "a": after}]`. Empty if not recording.
+    pub fn take_edits_json(&mut self) -> String {
+        let mut out = String::from("[");
+        for (k, edit) in self.journal.take().unwrap_or_default().iter().enumerate() {
+            if k > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                r#"{{"k":{},"c":{},"b":"#,
+                json_str(&edit.key),
+                edit.col
+            );
+            write_value(&mut out, &edit.before);
+            out.push_str(r#","a":"#);
+            write_value(&mut out, &edit.after);
+            out.push('}');
+        }
+        out.push(']');
+        out
     }
 
     /// Puts back what the last [`set_cell`](Table::set_cell) (or step of
@@ -897,9 +937,21 @@ impl Table {
             let Some(&row) = self.index.get(&edit.key) else {
                 continue;
             };
-            let value = if back { &edit.before } else { &edit.after };
+            let (from, value) = if back {
+                (&edit.after, &edit.before)
+            } else {
+                (&edit.before, &edit.after)
+            };
             if self.set_at(row as usize, edit.col, value.clone()).is_ok() {
                 set += 1;
+                if let Some(journal) = &mut self.journal {
+                    journal.push(Edit {
+                        key: edit.key.clone(),
+                        col: edit.col,
+                        before: from.clone(),
+                        after: value.clone(),
+                    });
+                }
             }
         }
         let what = match step.as_slice() {
