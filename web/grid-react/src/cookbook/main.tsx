@@ -58,20 +58,7 @@ function Source({ file }: { file: string }) {
 
 function Cookbook() {
   return (
-    <div className="page">
-      <header>
-        <h1>
-          Watershed <span>Grid</span> cookbook
-        </h1>
-        <p>
-          Small, whole examples of the grid in an app: a first table, rows from an API, pages loaded as you scroll, edits saved back to an API, live updates over a WebSocket or SSE, charts that follow the table, and a large table in a worker. Each one runs
-          here, and the code under it is the file that runs. <a href="../">Back to the grid</a>.
-        </p>
-        <div className="switch" aria-label="Framework">
-          <a href="../../cookbook/">Solid</a>
-          <span>React</span>
-        </div>
-      </header>
+    <>
 
       <nav className="toc" aria-label="Recipes">
         <a href="#setup">Setting up</a>
@@ -136,11 +123,12 @@ function Cookbook() {
           runs.
         </p>
       </section>
-    </div>
+    </>
   );
 }
 
-createRoot(document.getElementById("root")!).render(
+// The page's header is in its HTML, so it shows before this runs; the recipes go under it.
+createRoot(document.getElementById("cookbook")!).render(
   <StrictMode>
     <Cookbook />
   </StrictMode>,
