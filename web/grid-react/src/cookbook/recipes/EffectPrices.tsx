@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Duration, Effect, Fiber, Queue, Schedule, Stream } from "effect";
+import { Duration, Effect, Fiber, Filter, Schedule, Schema, Stream } from "effect";
+import { Socket } from "effect/socket";
 import { Table } from "@surefold/grid";
 import { Grid, useTable, useTotal } from "@surefold/grid-react";
 
@@ -8,12 +9,11 @@ const FEED = "wss://ws-feed.exchange.coinbase.com";
 const HOLDINGS: Record<string, number> = { "BTC-USD": 0.5, "ETH-USD": 8, "SOL-USD": 120, "DOGE-USD": 40000, "LTC-USD": 60, "LINK-USD": 400 };
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
-interface Ticker {
-  type: "ticker";
-  product_id: string;
-  price: string;
-}
-const isTicker = (message: { type?: string; product_id?: string }): message is Ticker => message.type === "ticker" && !!message.product_id;
+// A ticker message, as JSON text. Decoding checks its shape and reads the price as a
+// finite number; the feed's other messages (the subscription's answer) do not decode.
+const Ticker = Schema.Struct({ type: Schema.Literal("ticker"), product_id: Schema.String, price: Schema.FiniteFromString });
+type Ticker = typeof Ticker.Type;
+const asTicker = Filter.fromPredicateOption(Schema.decodeUnknownOption(Schema.fromJsonString(Ticker)));
 
 /**
  * Coinbase's ticker as an Effect: it connects, reconnects with a backoff after
@@ -21,27 +21,21 @@ const isTicker = (message: { type?: string; product_id?: string }): message is T
  * nothing of React or the table, and nothing happens until it is run.
  */
 function livePrices(say: (status: string) => void, write: (batch: readonly Ticker[]) => void) {
-  // One connection, as a stream of its messages. The socket opens when the stream
-  // starts and is closed when the stream ends, fails or is interrupted. When the
-  // server closes it, the stream fails, so that `retry` below opens another.
-  const connection = Stream.callback<{ type?: string }, Error>((queue) =>
+  // One connection, as a stream of its messages. Effect's Socket dials when the
+  // reader is acquired and closes the socket when the stream ends, fails or is
+  // interrupted. Every close fails the stream (the server's included), so that
+  // `retry` below dials again. What runs between dialling and the first read
+  // runs once a connection: here, the subscription.
+  const connection = Stream.unwrap(
     Effect.gen(function* () {
-      const socket = yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          say("Connecting…");
-          return new WebSocket(FEED);
-        }),
-        (socket) => Effect.sync(() => socket.close()),
-      );
-      socket.onopen = () => {
-        say("Live");
-        socket.send(JSON.stringify({ type: "subscribe", product_ids: Object.keys(HOLDINGS), channels: ["ticker"] }));
-      };
-      socket.onmessage = (event) => Queue.offerUnsafe(queue, JSON.parse(event.data as string));
-      // Wait for the socket to close (a failed connection closes too).
-      yield* Effect.callback<never, Error>((resume) => {
-        socket.onclose = (event) => resume(Effect.fail(new Error(`Closed with code ${event.code}`)));
-      });
+      say("Connecting…");
+      const socket = yield* Socket.makeWebSocket(FEED);
+      const read = yield* Socket.readerString(socket); // dials, and waits for the socket to open
+      const { write: send } = yield* socket.writer;
+      yield* send(JSON.stringify({ type: "subscribe", product_ids: Object.keys(HOLDINGS), channels: ["ticker"] }));
+      say("Live");
+      // Each read is the frames that came in together; one message a frame.
+      return Stream.fromEffectRepeat(read).pipe(Stream.flattenIterable);
     }),
   );
 
@@ -56,9 +50,10 @@ function livePrices(say: (status: string) => void, write: (batch: readonly Ticke
 
   return connection.pipe(
     Stream.retry(backoff), // the backoff starts again from 0.5 s once a message comes through
-    Stream.filter(isTicker),
+    Stream.filterMap(asTicker), // tickers only, decoded
     Stream.groupedWithin(500, "50 millis"), // what came in 50 ms (or 500 messages), as one array
     Stream.runForEach((batch) => Effect.sync(() => write(batch))),
+    Effect.provide(Socket.layerWebSocketConstructorGlobal), // the browser's WebSocket
   );
 }
 
@@ -80,17 +75,14 @@ export function EffectPrices() {
   const [ticks, setTicks] = useState(0);
   const [connected, setConnected] = useState(false);
   const running = useRef<Fiber.Fiber<void, Error>>(undefined);
-  const known = useRef(new Set<string>()); // coins with a row
 
   // Keep the latest price of each coin in a batch, and write them all at once (one recalculation).
   function write(batch: readonly Ticker[]) {
-    const latest = new Map(batch.map((message) => [message.product_id, Number(message.price)]));
+    const latest = new Map(batch.map((ticker) => [ticker.product_id, ticker.price]));
     coins.batch(() => {
       for (const [coin, price] of latest) {
-        if (!Number.isFinite(price)) continue;
-        if (known.current.has(coin)) coins.set(coin, "price", price);
+        if (coins.get(coin)) coins.set(coin, "price", price);
         else coins.put(coin, { units: HOLDINGS[coin], open: price, price }); // its first price: add its row
-        known.current.add(coin);
       }
     });
     setTicks((n) => n + batch.length);

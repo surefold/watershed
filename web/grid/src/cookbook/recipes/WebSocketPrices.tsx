@@ -25,7 +25,6 @@ export function WebSocketPrices() {
   let socket: WebSocket | undefined;
   let frame = 0;
   const latest = new Map<string, number>(); // coin → its latest price, since the last frame
-  const known = new Set<string>(); // coins with a row
 
   // Many messages can come in a frame: keep the latest price of each coin, and
   // write them all to the table once a frame, as one batch (one recalculation).
@@ -33,9 +32,8 @@ export function WebSocketPrices() {
     frame = 0;
     coins.batch(() => {
       for (const [coin, price] of latest) {
-        if (known.has(coin)) coins.set(coin, "price", price);
+        if (coins.get(coin)) coins.set(coin, "price", price);
         else coins.put(coin, { units: HOLDINGS[coin], open: price, price }); // its first price: add its row
-        known.add(coin);
       }
     });
     latest.clear();
