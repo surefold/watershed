@@ -87,7 +87,8 @@ export function InAWorker() {
         // Sent to the worker, which adds the rows and recalculates there. Waiting for
         // each block keeps the page's memory small; the page is free meanwhile.
         await table.putMany(keys, columns);
-        setLoading(`Loaded ${whole.format(first + BLOCK)} of ${whole.format(ROWS)} rows. Scroll, sort or click about meanwhile.`);
+        // Resolved once the page has the snapshot with these rows: size counts them.
+        setLoading(`Loaded ${whole.format(table.size)} of ${whole.format(ROWS)} rows. Scroll, sort or click about meanwhile.`);
       }
       setLoading("");
     } catch (e) {

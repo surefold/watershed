@@ -125,7 +125,7 @@ export const recipes: Recipe[] = [
       "Press the button to load 300,000 rows in blocks of 50,000. Scroll and sort while they load, then move a thousand prices at once.",
     ],
     notes: [
-      "Writes (<code>put</code>, <code>putMany</code>, <code>set</code>, <code>batch</code>) are messages to the worker, run in order. Each returns a promise, which you can ignore or wait for. It resolves once the worker has taken the write; the totals it changes come a moment later, with the recalculation's snapshot, so read them in <code>watch</code>, <code>createTotal</code> or <code>useTotal</code>.",
+      "Writes (<code>put</code>, <code>putMany</code>, <code>set</code>, <code>batch</code>) are messages to the worker, run in order. Each returns a promise, which you can ignore or wait for. It resolves once the worker has recalculated and the page has the snapshot that includes the write, so after <code>await table.putMany(…)</code>, <code>size</code> and <code>total</code> count those rows. To follow totals as they change, whoever changed them, read them in <code>watch</code>, <code>createTotal</code> or <code>useTotal</code>.",
       "<code>size</code>, <code>total</code>, <code>groups</code> and <code>columns</code> read the snapshot the worker sends after each recalculation, so they answer at once. <code>get</code>, <code>why</code> and <code>csv</code> ask the worker, so they return promises.",
       "With Vite, set <code>worker: { format: \"es\" }</code> in the config: the worker is a module. Webpack 5 and Rollup bundle it as they are.",
       "<code>dispose()</code> stops the worker. A table made in a component should be disposed when the component goes, and promises still waiting on it reject.",

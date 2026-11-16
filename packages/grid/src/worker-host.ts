@@ -105,8 +105,12 @@ export function handle(message: ToWorker) {
         const all = () => message.calls.forEach((call) => results.push(one(call)));
         if (message.batch) table!.batch(all);
         else all();
+        // Recalculate before replying, so the snapshot with these changes
+        // reaches the page first: once a write resolves, its totals are in.
+        table!.flushWaiting();
         post({ type: "reply", id: message.id, results });
       } catch (error) {
+        table?.flushWaiting();
         post({ type: "reply", id: message.id, error: (error as Error).message });
       }
       break;

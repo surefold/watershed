@@ -147,7 +147,7 @@ recalculation (seconds).
 import { WorkerTable, drawGrid } from "@surefold/grid";
 
 const trades = await WorkerTable.create({ fields: { … }, formulas: { … }, totals: { … } });
-await trades.putMany(keys, columns);
+await trades.putMany(keys, columns);       // resolves once the page has the totals with these rows
 drawGrid(element, trades);                  // the same grid, drawing from the worker
 trades.set("T-1", "mark", 102);             // a message; the grid redraws when the worker has recalculated
 trades.total("pnl");                        // from the last snapshot, at once
@@ -157,8 +157,13 @@ await trades.why("T-1", "pnl");             // answered by the worker
 It has `Table`'s methods, with two differences:
 
 - **Writes are messages**, run in order, and return promises (which can be
-  ignored). `batch(() => …)` sends what it gathers as one message: one
-  recalculation, one step for undo.
+  ignored). A write's promise resolves once the worker has recalculated and
+  the page has the snapshot that includes it, so after `await
+  trades.putMany(…)`, `size` and `total()` count those rows. A write that
+  changes nothing resolves as soon as the worker answers. `batch(() => …)`
+  sends what it gathers as one message: one recalculation, one step for
+  undo; the writes inside it resolve with it. `sort`, `filter`, `search` and
+  `group` resolve the same way.
 - **Reads come in two kinds.** `size`, `columns()`, `total()`, `groups()`,
   `totalTrend()` and `history()` read the snapshot the worker sends after
   each recalculation, at once; so do `peek`, `watch` and the Solid and React
