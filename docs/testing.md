@@ -97,6 +97,10 @@ corresponding features were written. CI does not repeat them.
 - Never move a row whose calculated group changed during an update.
 - Count a row that joins a group during an update from the next update
   instead.
+- When a reused row takes a removed row's membership node, leave the old
+  group's member in place (the old group keeps counting the new row), or
+  leave the node comparing with the old group's key (the new group never
+  counts it). Both fail `collections_match_a_plain_map_added_up_from_scratch`.
 - Leave the links to a removed node in place.
 - Remove a node that something still uses.
 - Treat a decimal written differently (`1.50` for `1.5`) as no change.

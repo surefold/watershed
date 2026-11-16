@@ -99,8 +99,8 @@ bit-identical to adding every row from scratch; a running total that
 subtracted and added would drift in floating point.
 
 A removed row is marked absent and its nodes are reused by the next new
-row, so a collection's graph grows to its largest size and no further. (A
-row's group membership nodes are the exception; see below.)
+row, so a collection's graph grows to its largest size and no further. That
+includes its group membership nodes (see below), unless history is on.
 
 ## Grouping
 
@@ -130,12 +130,23 @@ let size = orders.column(
 let by_size = orders.group_sum(&mut g, "revenue_by_size", size, line)?;
 ```
 
-Cost: a row has one `bool` membership node for each group it has ever been
-in, per grouping, and these are kept when the row leaves the group or is
-removed. A grouping over many rows and many totalled columns is therefore
-expensive in memory; the [grid](../watershed-grid/README.md#grouping) falls
-back to summing groups outside the graph above a size budget for this
-reason. Nodes a grouping is built on cannot be removed, and in pull mode
+Cost: a row has one `bool` membership node for each group it has been in
+during its life, per grouping; a row that moves back to a group it was in
+uses the same node again. When a row is removed and its nodes are reused by
+a new row, its membership nodes are reused too: the new row takes one, the
+group it named loses that member (an emptied place in the group's tree,
+which the next row to join the group fills), and it joins its own group.
+So a collection whose rows come and go, as a stream's window does, keeps a
+membership node for each row it holds, not for every row and group there has
+ever been: 100,000 edits through a 1,000-row window over 300 groups end with
+4,306 nodes, where they used to end with 88,308 and growing. With history
+on, membership nodes are kept, so that an earlier update's group totals are
+still explained by the members they had.
+
+Each grouping (each totalled column) has its own membership nodes, so a
+grouping over many rows and many totalled columns is still expensive in
+memory; the [grid](../watershed-grid/README.md#grouping) falls back to
+summing groups outside the graph above a size budget for this reason. Nodes a grouping is built on cannot be removed, and in pull mode
 they are always calculated.
 
 ## Exact decimals
@@ -246,8 +257,9 @@ expression is an error. Its id is never reissued, so a handle kept from
 before cannot come to refer to a different node, and with history on it can
 still be read as of the updates it was part of.
 
-Removal frees the node's name and its work, not its memory: the slot stays
-in the graph's arrays. Both `redefine` and `remove` cause the next update to
+Removal frees the node's name, its work, a total's members and tree, and
+(without history) a text or list value it held; the node's slot itself, some
+tens of bytes, stays in the graph's arrays, since its id is never reissued. Both `redefine` and `remove` cause the next update to
 rebuild the graph's reverse links, which takes time proportional to the size
 of the graph (any number of edits before one update cost one rebuild). They
 suit model edits, not a stream of changes.
