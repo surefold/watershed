@@ -4,11 +4,12 @@
 //
 //   const trades = useTable(() => new Table({ fields: { qty: "number" }, totals: { qty: "sum" } }));
 //   const qty = useTotal(trades, "qty");
+//   const groups = useGroups(trades);       // a new array only when a group changes
 //   <Grid table={trades} theme="dark" />
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
-import { drawGrid, type AnyGridTable, type AnyTable, type Change, type GridOptions, type GridView } from "@surefold/grid";
+import { drawGrid, type AnyGridTable, type AnyTable, type Change, type GridOptions, type GridView, type Group } from "@surefold/grid";
 
 export interface GridProps extends Omit<GridOptions, "theme"> {
   table: AnyGridTable;
@@ -82,21 +83,57 @@ export function useTable<T extends AnyTable>(make: () => T): T {
 }
 
 /**
- * Follows anything read from a table, such as `(t) => t.total("pnl")`. Return
- * a value that compares with `===`. It reads the table as of its last
- * recalculation (`peek`), so rendering never sets off a recalculation, and
- * renders again after the next one.
+ * Follows anything read from a table, such as `(t) => t.total("pnl")`. It
+ * reads the table as of its last recalculation (`peek`), so rendering never
+ * sets off a recalculation, and renders again after the next one if the value
+ * changed. Values are compared with `===`; for a list or an object, pass
+ * `isEqual`, and the value stays the same object until it compares unequal.
  */
-export function useReading<T>(table: AnyGridTable, read: (table: AnyGridTable) => T): T {
+export function useReading<T, Tb extends AnyGridTable = AnyGridTable>(
+  table: Tb,
+  read: (table: Tb) => T,
+  isEqual?: (a: T, b: T) => boolean,
+): T {
   const reader = useRef(read);
   reader.current = read;
+  const same = useRef(isEqual);
+  same.current = isEqual;
+  const last = useRef<{ table: Tb; value: T }>(undefined);
   const subscribe = useCallback((changed: () => void) => table.watch(changed), [table]);
-  return useSyncExternalStore(subscribe, () => table.peek(reader.current));
+  const snapshot = () => {
+    const value = (table as AnyGridTable).peek(() => reader.current(table));
+    const before = last.current;
+    // The same value as last time, if it compares equal, so React sees no change.
+    if (before && before.table === table && same.current?.(before.value, value)) return before.value;
+    last.current = { table, value };
+    return value;
+  };
+  return useSyncExternalStore(subscribe, snapshot);
 }
 
 /** A column's total. */
 export function useTotal(table: AnyGridTable, column: string): number | null {
   return useReading(table, (t) => t.total(column));
+}
+
+/**
+ * The table's groups (`groups()`), each with its row count and totals. The
+ * list is a new array only when a group, a count or a total changed, so it
+ * can go to a chart, `useMemo` or `memo` as it is.
+ */
+export function useGroups(table: AnyGridTable): Group[] {
+  return useReading(table, (t) => t.groups(), sameGroups);
+}
+
+/** Whether two lists of groups have the same keys, counts and totals, in the same order. */
+function sameGroups(a: Group[], b: Group[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((g, k) => {
+    const h = b[k];
+    if (g.key !== h.key || g.rows !== h.rows) return false;
+    const names = Object.keys(g.totals);
+    return names.length === Object.keys(h.totals).length && names.every((name) => g.totals[name] === h.totals[name]);
+  });
 }
 
 /** The last recalculation of a table; `undefined` until there is one. */

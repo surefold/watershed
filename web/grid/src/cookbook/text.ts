@@ -113,7 +113,7 @@ export const recipes: Recipe[] = [
     notes: [
       "With <code>history</code> set on the table, <code>totalTrend(column)</code> gives how a total moved over recent recalculations, for a line or sparkline.",
       "<code>groups()</code> follows the grid's filters and group order: filter the grid and the bars are of the rows that pass.",
-      "In React, <code>useReading</code> wants a value that compares with <code>===</code>, so a list such as <code>groups()</code> is read as a string and parsed. In Solid, <code>createReading</code> follows any value.",
+      "<code>useGroups</code> (React) and <code>createGroups</code> (Solid) follow <code>groups()</code>, and change only when a group, its row count or a total does. For other lists or objects, give <code>useReading</code> or <code>createReading</code> a third argument, <code>isEqual(a, b)</code>, so a value that compares equal is kept rather than drawn again.",
     ],
   },
   {

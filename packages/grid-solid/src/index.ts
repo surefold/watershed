@@ -2,11 +2,12 @@
 //
 //   const trades = new Table({ fields: { qty: "number", price: "number" }, totals: { qty: "sum" } });
 //   const qty = createTotal(trades, "qty");      // a signal that follows the total
+//   const groups = createGroups(trades);         // changes only when a group does
 //   <Grid table={trades} theme="dark" columns={{ qty: { decimals: 0 } }} />
 
 import { createEffect, createSignal, on, onCleanup, type Accessor, type JSX } from "solid-js";
 import { spread } from "solid-js/web";
-import { drawGrid, type AnyGridTable, type Change, type GridOptions, type GridView } from "@surefold/grid";
+import { drawGrid, type AnyGridTable, type Change, type GridOptions, type GridView, type Group } from "@surefold/grid";
 
 export interface GridProps extends Omit<GridOptions, "theme"> {
   table: AnyGridTable;
@@ -68,11 +69,38 @@ export function createChange(table: AnyGridTable): Accessor<Change | undefined> 
   return change;
 }
 
-/** Follows anything read from a table, such as `(t) => t.total("pnl")`, as a signal. */
-export function createReading<T>(table: AnyGridTable, read: (table: AnyGridTable) => T): Accessor<T> {
-  const [value, setValue] = createSignal<T>(read(table), { equals: false });
+/**
+ * Follows anything read from a table, such as `(t) => t.total("pnl")`, as a
+ * signal. It is set after every recalculation; with `isEqual`, only when the
+ * value compares unequal to the last, so what follows it runs only then.
+ */
+export function createReading<T, Tb extends AnyGridTable = AnyGridTable>(
+  table: Tb,
+  read: (table: Tb) => T,
+  isEqual?: (a: T, b: T) => boolean,
+): Accessor<T> {
+  const [value, setValue] = createSignal<T>(read(table), { equals: isEqual ?? false });
   onCleanup(table.watch(() => setValue(() => read(table))));
   return value;
+}
+
+/**
+ * The table's groups (`groups()`), each with its row count and totals, as a
+ * signal that changes only when a group, a count or a total changed.
+ */
+export function createGroups(table: AnyGridTable): Accessor<Group[]> {
+  return createReading(table, (t) => t.groups(), sameGroups);
+}
+
+/** Whether two lists of groups have the same keys, counts and totals, in the same order. */
+function sameGroups(a: Group[], b: Group[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((g, k) => {
+    const h = b[k];
+    if (g.key !== h.key || g.rows !== h.rows) return false;
+    const names = Object.keys(g.totals);
+    return names.length === Object.keys(h.totals).length && names.every((name) => g.totals[name] === h.totals[name]);
+  });
 }
 
 /** A column's total, as a signal. */
