@@ -72,6 +72,6 @@ of the graph as it was when compiled.
   `redefine` or scenario evaluation.
 - In a browser a plan runs on one thread, and only the example models are
   exposed.
-- The grid has no decimal columns, and falls back to summing groups outside
-  the graph for large grouped tables.
+- The grid falls back to summing groups outside the graph for large grouped
+  tables. Its decimal columns hold 28 significant digits.
 - The Rust crates are not published on crates.io.

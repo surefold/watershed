@@ -14,7 +14,7 @@
 
 import type { Call, FromWorker, Snapshot, ToWorker, Window } from "./protocol.js";
 import type { Cell, Change, Column, ColumnsOf, Fields, Group, Kind, RowOf, TableSpec, Total, ValueOf, ViewState } from "./table.js";
-import { viewStateOf } from "./table-view.js";
+import { numberOf, textOf, viewStateOf } from "./table-view.js";
 
 type Name<F extends Fields, C extends string> = Extract<keyof F, string> | C;
 
@@ -247,8 +247,14 @@ export class WorkerTable<F extends Fields = Fields, C extends string = string> {
 
   /** A column's total, as of the last snapshot. */
   total(column: Name<F, C>): number | null {
-    return this.#snapshot.totals[this.#col(column)] ?? null;
+    return numberOf(this.totalExact(column));
   }
+
+  /** A column's total as text, exactly (see `Table.totalExact`). */
+  totalExact(column: Name<F, C>): string | null {
+    return textOf(this.#snapshot.totals[this.#col(column)]);
+  }
+
 
   /** How a column's total moved, as of the last snapshot (needs `history`). */
   totalTrend(column: Name<F, C>, points = 120): number[] {
@@ -257,10 +263,10 @@ export class WorkerTable<F extends Fields = Fields, C extends string = string> {
 
   groups(): Group[] {
     const names = this.columns().map((c) => c.name);
-    return (this.#snapshot.groupList as { g: string; n: number; c: (number | null)[] }[]).map((g) => ({
+    return (this.#snapshot.groupList as { g: string; n: number; c: (number | string | null)[] }[]).map((g) => ({
       key: g.g,
       rows: g.n,
-      totals: Object.fromEntries(names.map((name, k) => [name, g.c[k] ?? null])),
+      totals: Object.fromEntries(names.map((name, k) => [name, numberOf(textOf(g.c[k]))])),
     }));
   }
 
@@ -420,7 +426,7 @@ export class RemoteEngine {
   columns(): unknown[] {
     return this.snapshot().columns;
   }
-  totals(): (number | null)[] {
+  totals(): (number | string | null)[] {
     return this.snapshot().totals;
   }
   history_range(): [number, number] | null {
