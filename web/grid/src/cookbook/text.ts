@@ -58,6 +58,33 @@ export const recipes: Recipe[] = [
     ],
   },
   {
+    id: "websocket",
+    title: "Prices over a WebSocket",
+    intro: [
+      "A stream sends many small changes. Each message only needs to <code>set</code> the cell it names, and the table recalculates what that cell feeds. " +
+        "Messages can come faster than the screen draws, so gather them as they come and write them once a frame, inside <code>batch</code>: one recalculation, and one redraw, however many came.",
+      "This one subscribes to <a href=\"https://docs.cdp.coinbase.com/exchange/websocket-feed/overview\">Coinbase's public ticker</a> (no key needed). Each coin's row is added with its first price, and its gain is worked out from there. Press Connect.",
+    ],
+    notes: [
+      "Only the latest price of each coin is kept between frames, so a burst of messages costs one <code>set</code> a coin.",
+      "With <code>history</code> on the table, a column's <code>trend</code> draws how each cell moved, here the last 120 recalculations of each price.",
+      "Close the socket when the component goes. A real app would also reconnect after a dropped connection, waiting a little longer each time.",
+    ],
+  },
+  {
+    id: "sse",
+    title: "Events over SSE",
+    intro: [
+      "Server-sent events come through the browser's <code>EventSource</code>, a message at a time. Here each message is a new row: they are gathered and <code>put</code> once a frame, in a <code>batch</code> that also <code>drop</code>s the oldest rows, so the table keeps the latest 2,000.",
+      "This one reads <a href=\"https://stream.wikimedia.org/?doc\">Wikimedia's stream of recent changes</a>: every edit to every Wikimedia wiki, as it happens. The rows are grouped by wiki, so each group's row counts its edits and adds up the bytes they changed. Press Connect.",
+    ],
+    notes: [
+      "<code>EventSource</code> reconnects by itself after a dropped connection; <code>onerror</code> says when it is trying.",
+      "The grouping, sorting and filters are the table's, so they hold while rows come and go. Open a group, or sort by bytes, while it streams.",
+      "Browsers stop calling <code>requestAnimationFrame</code> in a hidden tab, so edits gather until the tab is shown again; only the latest 2,000 of them are written.",
+    ],
+  },
+  {
     id: "charts",
     title: "Charts from the table",
     intro: [

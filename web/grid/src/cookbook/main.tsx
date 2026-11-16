@@ -9,6 +9,8 @@ import { install, recipes } from "./text";
 import { FirstGrid } from "./recipes/FirstGrid";
 import { FromAnApi } from "./recipes/FromAnApi";
 import { PagedApi } from "./recipes/PagedApi";
+import { WebSocketPrices } from "./recipes/WebSocketPrices";
+import { ServerSentEvents } from "./recipes/ServerSentEvents";
 import { Charts } from "./recipes/Charts";
 import { InAWorker } from "./recipes/InAWorker";
 
@@ -18,6 +20,8 @@ const live: Record<string, { file: string; run: () => JSX.Element }> = {
   "first-grid": { file: "FirstGrid.tsx", run: FirstGrid },
   fetch: { file: "FromAnApi.tsx", run: FromAnApi },
   paged: { file: "PagedApi.tsx", run: PagedApi },
+  websocket: { file: "WebSocketPrices.tsx", run: WebSocketPrices },
+  sse: { file: "ServerSentEvents.tsx", run: ServerSentEvents },
   charts: { file: "Charts.tsx", run: Charts },
   worker: { file: "InAWorker.tsx", run: InAWorker },
 };
@@ -47,7 +51,7 @@ function Cookbook() {
           Watershed <span>Grid</span> cookbook
         </h1>
         <p>
-          Small, whole examples of the grid in an app: a first table, rows from an API, pages loaded as you scroll, charts that follow the table, and a large table in a worker. Each one runs
+          Small, whole examples of the grid in an app: a first table, rows from an API, pages loaded as you scroll, live updates over a WebSocket or SSE, charts that follow the table, and a large table in a worker. Each one runs
           here, and the code under it is the file that runs. <a href="../">Back to the grid</a>.
         </p>
         <div class="switch" aria-label="Framework">
