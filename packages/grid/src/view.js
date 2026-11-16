@@ -15,6 +15,11 @@ const OVERSCAN = 6;
 const TREND_POINTS = 32;
 const SVG = "http://www.w3.org/2000/svg";
 
+/** A cell as the engine gives it, as the table's `Cell`: an error is `{ error }`. */
+function cellOf(value) {
+  return value !== null && typeof value === "object" ? { error: String(value.e) } : value;
+}
+
 /** The engine gives JSON as text; a WorkerTable's engine gives it parsed. */
 function json(value) {
   return typeof value === "string" ? JSON.parse(value) : value;
@@ -63,6 +68,7 @@ export class GridView {
     this.onFocus = options.onFocus ?? (() => {});
     this.onGroup = options.onGroup ?? (() => {});
     this.onNote = options.onNote ?? (() => {});
+    this.onEdit = options.onEdit ?? null;
     this.onError = options.onError ?? ((message) => console.warn(message));
 
     this.cols = [];
@@ -1411,12 +1417,8 @@ export class GridView {
     editing.cell.classList.remove("wg-editing");
     editing.cell._text = null; // draw it again
     if (commit) {
-      try {
-        // From a worker, an error comes later.
-        Promise.resolve(this.grid.set_cell(editing.key, editing.col, text)).catch((error) => this.onError(error.message));
-      } catch (error) {
-        this.onError(error.message);
-      }
+      // With a Table this runs at once; from a worker, an error comes later.
+      this.personEdit("edit", [["set_cell", editing.key, editing.col, text]]).catch((error) => this.onError(error.message));
     }
     if (quiet) return;
     this.body.focus({ preventScroll: true });
@@ -1431,7 +1433,7 @@ export class GridView {
   /** Puts back the last edit (or pasted block), or with `again` does it again. */
   async undo(again = false) {
     try {
-      const what = await (again ? this.grid.redo() : this.grid.undo());
+      const [what] = await this.personEdit(again ? "redo" : "undo", [[again ? "redo" : "undo"]]);
       this.refresh();
       this.onNote(what ? `${again ? "Did again" : "Undid"}: ${what}.` : `Nothing to ${again ? "do again" : "undo"}.`);
     } catch (error) {
@@ -1508,19 +1510,60 @@ export class GridView {
 
   /** Sets cells (`[key, col, text]`) as one step to undo, skipping those that will not take their text. */
   async setCells(cells) {
-    if (typeof this.grid.setCells === "function") return this.grid.setCells(cells);
-    let [set, skipped] = [0, 0];
-    this.grid.begin_edits();
-    for (const [key, col, text] of cells) {
+    if (!cells.length) return { set: 0, skipped: 0 };
+    const results = await this.personEdit(
+      "paste",
+      cells.map(([key, col, text]) => ["set_cell", key, col, text]),
+      { batch: true, tolerant: true },
+    );
+    const skipped = results.filter((r) => r !== null && typeof r === "object" && "error" in r).length;
+    return { set: cells.length - skipped, skipped };
+  }
+
+  /**
+   * Runs engine calls a person made (`[method, ...args]` each) with the cells
+   * they change noted, tells `onEdit` what changed, and gives back each
+   * call's result. With `batch` they are one step to undo; with `tolerant` a
+   * call that fails gives `{ error }` and the rest still run. In a worker
+   * they go as one message, so nothing else is set between them, and what
+   * `onEdit` hears is only what the person did.
+   */
+  async personEdit(cause, calls, { batch = false, tolerant = false } = {}) {
+    const all = [["record_edits"], ...calls, ["take_edits"]];
+    let results;
+    if (typeof this.grid.sequence === "function") {
       try {
-        this.grid.set_cell(key, col, text);
-        set += 1;
-      } catch {
-        skipped += 1;
+        results = await this.grid.sequence(all, batch, tolerant);
+      } catch (error) {
+        // A call failed before the noting was taken: stop it.
+        void this.grid.take_edits();
+        throw error;
+      }
+    } else {
+      results = [];
+      if (batch) this.grid.begin_edits();
+      try {
+        for (const [method, ...args] of all) {
+          try {
+            results.push(this.grid[method](...args));
+          } catch (error) {
+            if (!tolerant) throw error;
+            results.push({ error: error.message });
+          }
+        }
+      } finally {
+        if (batch) this.grid.end_edits();
+        // Stop noting, even if a call failed.
+        if (results.length < all.length) this.grid.take_edits();
       }
     }
-    this.grid.end_edits();
-    return { set, skipped };
+    const noted = json(results.pop());
+    results.shift();
+    if (this.onEdit && noted.length) {
+      const cells = noted.map((e) => ({ key: e.k, column: this.cols[e.c].name, before: cellOf(e.b), after: cellOf(e.a) }));
+      this.onEdit({ cause, cells, removed: [] });
+    }
+    return results;
   }
 
   /** Lines of the view, which in a worker may be out of the rows it has sent. */
@@ -1532,7 +1575,8 @@ export class GridView {
   async fillRange(text) {
     const box = this.rangeBox();
     if (!box) return;
-    const { set, skipped } = json(await this.grid.fill(box.l0, box.l1 - box.l0 + 1, this.rangeCols(box), text));
+    const [filled] = await this.personEdit("fill", [["fill", box.l0, box.l1 - box.l0 + 1, this.rangeCols(box), text]]);
+    const { set, skipped } = json(filled);
     this.body.focus({ preventScroll: true });
     this.refresh();
     const count = (n) => `${n.toLocaleString("en-US")} cell${n === 1 ? "" : "s"}`;
@@ -1558,5 +1602,6 @@ export class GridView {
     this.selected.clear();
     this.anchor = null;
     this.refresh();
+    if (this.onEdit && keys.length) this.onEdit({ cause: "delete", cells: [], removed: keys });
   }
 }

@@ -1,16 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Table } from "@surefold/grid";
+import { useEffect, useRef, useState } from "react";
+import { Table, type Edits } from "@surefold/grid";
 import { Grid, useTable } from "@surefold/grid-react";
 
 // DummyJSON answers a PATCH as if it had saved it, but keeps nothing: fetch again and the old values are back.
 const API = "https://dummyjson.com/products";
-const FIELDS = ["title", "price", "stock"] as const;
 type Product = { title: string; price: number; stock: number };
-
-/** What changed in a row since it was last saved: only the fields that differ. */
-function changes(now: Product, saved: Product): Partial<Product> {
-  return Object.fromEntries(FIELDS.filter((f) => now[f] !== saved[f]).map((f) => [f, now[f]]));
-}
+type Field = keyof Product;
 
 // Made outside the component so TypeScript keeps the field names and kinds.
 const makeProducts = () =>
@@ -22,27 +17,29 @@ const makeProducts = () =>
 
 export function EditAndSave() {
   const products = useTable(makeProducts);
-  // The rows as the server last had them, by key (the product's id).
+  // The rows as the server last had them, and the fields people changed since, by key (the product's id).
   const saved = useRef(new Map<string, Product>());
+  const changed = useRef(new Map<string, Partial<Product>>());
   const [unsaved, setUnsaved] = useState<[string, Partial<Product>][]>([]);
   const [saving, setSaving] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const say = (line: string) => setLog((l) => [line, ...l].slice(0, 6));
+  const show = () => setUnsaved([...changed.current].map(([key, fields]) => [key, { ...fields }]));
 
-  // After each recalculation that changed an input (a person typing, pasting,
-  // filling a block or undoing), compare every row with what the server has.
-  // Undoing back to the saved value makes a row clean again.
-  const compare = useCallback(() => {
-    const dirty: [string, Partial<Product>][] = [];
-    for (const [key, before] of saved.current) {
-      const row = products.get(key);
-      if (!row) continue;
-      const diff = changes(row, before);
-      if (Object.keys(diff).length) dirty.push([key, diff]);
+  // The grid says what a person changed: typing, pasting, filling a block,
+  // undoing. Changes made from code (loading, discarding) are not reported.
+  function onEdit(edits: Edits) {
+    for (const { key, column, after } of edits.cells) {
+      const field = column as Field; // only fields can be edited, never formulas
+      const fields = changed.current.get(key) ?? {};
+      // Back to what the server has (undone, or typed back): nothing to save.
+      if (after === saved.current.get(key)?.[field]) delete fields[field];
+      else Object.assign(fields, { [field]: after });
+      if (Object.keys(fields).length) changed.current.set(key, fields);
+      else changed.current.delete(key);
     }
-    setUnsaved(dirty);
-  }, [products]);
-  useEffect(() => products.watch((change) => void (change.inputsChanged && compare())), [products, compare]);
+    show();
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -50,7 +47,7 @@ export function EditAndSave() {
       .then((response) => response.json() as Promise<{ products: (Product & { id: number })[] }>)
       .then(({ products: list }) => {
         for (const { id, title, price, stock } of list) {
-          saved.current.set(String(id), { title, price, stock }); // first, so the rows are clean when they arrive
+          saved.current.set(String(id), { title, price, stock });
           products.put(String(id), { title, price, stock });
         }
       })
@@ -58,36 +55,42 @@ export function EditAndSave() {
     return () => controller.abort();
   }, [products]);
 
-  // One PATCH a changed row, with only its changed fields. A row that saves is
-  // clean from then on; one that fails stays unsaved, to try again.
+  // One PATCH a changed row, with only its changed fields. A row that fails
+  // stays unsaved, to try again; a field changed again while saving stays too.
   async function save() {
     setSaving(true);
     await Promise.all(
-      unsaved.map(async ([key, diff]) => {
+      [...changed.current].map(async ([key, fields]) => {
+        const sent = { ...fields };
         try {
           const response = await fetch(`${API}/${key}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(diff),
+            body: JSON.stringify(sent),
           });
           if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-          // What was sent is now the server's. (An edit made while saving stays unsaved.)
-          saved.current.set(key, { ...saved.current.get(key)!, ...diff });
-          say(`PATCH /products/${key} ${JSON.stringify(diff)} → saved`);
+          saved.current.set(key, { ...saved.current.get(key)!, ...sent });
+          const now = changed.current.get(key) ?? {};
+          for (const field of Object.keys(sent) as Field[]) if (now[field] === sent[field]) delete now[field];
+          if (!Object.keys(now).length) changed.current.delete(key);
+          say(`PATCH /products/${key} ${JSON.stringify(sent)} → saved`);
         } catch (e) {
           say(`PATCH /products/${key} failed (${(e as Error).message}); still unsaved`);
         }
       }),
     );
     setSaving(false);
-    compare();
+    show();
   }
 
-  // Put the server's values back, as one batch: one recalculation, one step to undo.
+  // Put the server's values back, as one batch. Changes from code are not
+  // reported to onEdit, so forget the unsaved ones here.
   function discard() {
     products.batch(() => {
-      for (const [key] of unsaved) products.put(key, saved.current.get(key)!);
+      for (const key of changed.current.keys()) products.put(key, saved.current.get(key)!);
     });
+    changed.current.clear();
+    show();
   }
 
   return (
@@ -101,11 +104,17 @@ export function EditAndSave() {
         </button>
         <span className="muted">
           {unsaved.length
-            ? `Unsaved: ${unsaved.map(([key, diff]) => `#${key} ${Object.keys(diff).join(", ")}`).join(" · ")}`
+            ? `Unsaved: ${unsaved.map(([key, fields]) => `#${key} ${Object.keys(fields).join(", ")}`).join(" · ")}`
             : "Double-click a title, price or stock (or press Enter on it) to edit. Paste and ⌘Z work too."}
         </span>
       </div>
-      <Grid className="grid" table={products} keyColumn={{ title: "id", width: 70 }} columns={{ title: { width: 260 }, stock: { decimals: 0 } }} />
+      <Grid
+        className="grid"
+        table={products}
+        onEdit={onEdit}
+        keyColumn={{ title: "id", width: 70 }}
+        columns={{ title: { width: 260 }, stock: { decimals: 0 } }}
+      />
       {log.length > 0 && (
         <pre className="log">
           {log.map((line, k) => (

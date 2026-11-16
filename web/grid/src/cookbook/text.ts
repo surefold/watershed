@@ -61,16 +61,17 @@ export const recipes: Recipe[] = [
     id: "save",
     title: "Edit and save back to an API",
     intro: [
-      "People edit in the grid itself: double-click a cell or press Enter, paste from a spreadsheet, fill a block with ⌘Enter, and undo with ⌘Z. Each edit goes to the table and recalculates what it feeds. " +
-        "To save, keep what the server last had, and after each recalculation that changed an input, compare the rows with it. What differs is unsaved, however it was edited, and undoing back to the saved value makes a row clean again.",
-      "Saving sends one <code>PATCH</code> a changed row, with only its changed fields. Edit some titles, prices or stock, then save. DummyJSON answers as if it had saved, but keeps nothing.",
+      "People edit in the grid itself: double-click a cell or press Enter, paste from a spreadsheet, fill a block with ⌘Enter, and undo with ⌘Z. " +
+        "The grid's <code>onEdit</code> says what they changed: each cell, with what it held before and after, and whether it was typed, pasted, filled, undone or deleted. " +
+        "Changes made from code (<code>put</code>, <code>set</code>, loading, discarding) are not reported, so what <code>onEdit</code> hears is what needs saving.",
+      "Keep what the server last had, so an edit undone or typed back to it stops counting. Saving sends one <code>PATCH</code> a changed row, with only its changed fields. Edit some titles, prices or stock, then save. DummyJSON answers as if it had saved, but keeps nothing.",
     ],
     notes: [
-      "<code>watch</code> says what each recalculation did. <code>inputsChanged</code> is more than 0 when cells were set, so sorting and filtering do not start a compare.",
-      "Comparing every row costs a <code>get</code> a row: right for hundreds of rows. For many thousands, compare only the rows on screen, or keep the keys your own code and the server touch.",
-      "A row that fails to save stays unsaved, so pressing Save again retries it. An edit made while a save is on its way also stays unsaved, because only what was sent is marked as saved.",
-      "To save as people type, call the same <code>save</code> from <code>watch</code>, after a pause of a second or so with no edits.",
-      "New rows (<code>POST</code>) and deleted rows (<code>DELETE</code>) work the same way: a key in the table but not in what was saved is new, and a saved key no longer in the table was deleted.",
+      "<code>onEdit</code> gets <code>{ cause, cells, removed }</code>: <code>cause</code> is <code>\"edit\"</code>, <code>\"paste\"</code>, <code>\"fill\"</code>, <code>\"undo\"</code>, <code>\"redo\"</code> or <code>\"delete\"</code>; each cell is <code>{ key, column, before, after }</code>; <code>removed</code> is the keys of deleted rows.",
+      "It costs only what was edited, so it suits a table of any size, in the page or in a worker. With a <code>WorkerTable</code> it is called once the worker has made the change.",
+      "A row that fails to save stays unsaved, so pressing Save again retries it. A field changed again while a save is on its way also stays unsaved, because only what was sent is marked as saved.",
+      "To save as people type, call the same <code>save</code> from <code>onEdit</code>, after a pause of a second or so with no edits.",
+      "Deleted rows come in <code>removed</code>, for a <code>DELETE</code> each; new rows are ones your code puts, so it knows to <code>POST</code> them.",
     ],
   },
   {

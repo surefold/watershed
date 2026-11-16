@@ -1,4 +1,4 @@
-import type { AnyGridTable, Change } from "./table.js";
+import type { AnyGridTable, Cell, Change } from "./table.js";
 
 export interface Theme {
   /** What `setTheme` takes; "" takes the page's colours. */
@@ -55,6 +55,25 @@ export interface Layout {
   widths: Record<string, number>;
 }
 
+/** One cell a person changed in the grid. */
+export interface CellEdit {
+  key: string;
+  /** The column's name. */
+  column: string;
+  before: Cell;
+  after: Cell;
+}
+
+/** What a person changed in the grid, in one go. */
+export interface Edits {
+  /** Typed into a cell, pasted, filled a block, undid, did again, or deleted rows. */
+  cause: "edit" | "paste" | "fill" | "undo" | "redo" | "delete";
+  /** Each cell that changed, in the order it changed, with what it held before and after. */
+  cells: CellEdit[];
+  /** The keys of the rows deleted. */
+  removed: string[];
+}
+
 export interface GridOptions {
   /** The first column, which shows each row's key. */
   keyColumn?: { title?: string; width?: number };
@@ -71,6 +90,12 @@ export interface GridOptions {
   onFocus?: (focus: Focus | null) => void;
   /** Rows were grouped by a column (its position), or -1 for none. */
   onGroup?: (col: number) => void;
+  /**
+   * A person changed cells or deleted rows in the grid. Not called for
+   * changes made from code (`table.set`, `put`, `drop`…), so an app can save
+   * what people did. With a WorkerTable it is called once the worker has made the change.
+   */
+  onEdit?: (edits: Edits) => void;
   /** Something went wrong, said for a person. */
   onError?: (message: string) => void;
   /** Something worked (copied, pasted, undone), said for a person. */

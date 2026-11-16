@@ -148,6 +148,17 @@ impl Grid {
         self.table.end_edits();
     }
 
+    /// Starts noting the cells that setting, undoing and doing again change.
+    pub fn record_edits(&mut self) {
+        self.table.record_edits();
+    }
+
+    /// The cells changed since `record_edits`, as JSON
+    /// (`[{"k": key, "c": column, "b": before, "a": after}]`), and stops noting.
+    pub fn take_edits(&mut self) -> String {
+        self.table.take_edits_json()
+    }
+
     /// Puts back what the last `set_cell` (or step of several) changed.
     /// Returns what was put back, in words, if anything was.
     pub fn undo(&mut self) -> Result<Option<String>, JsError> {
