@@ -60,7 +60,8 @@ with its checks and timings.
   workbook and run as a plan.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
-  for [Solid](packages/grid-solid) and [React](packages/grid-react).
+  for [Solid](packages/grid-solid) and [React](packages/grid-react). The
+  [cookbook](https://surefold.dev/watershed/grid/cookbook/) shows it in an app.
 
 The [guide](https://surefold.dev/guides/watershed/#applications) has each
 with its figures.
@@ -234,7 +235,12 @@ More in the [Python guide](crates/watershed-py/README.md).
 program in each.
 
 **Browser.** The [grid package](packages/grid/README.md) holds rows in a
-`Table` and draws them, with components for Solid and React. To build the
+`Table` and draws them, with components for Solid and React. The
+[cookbook](https://surefold.dev/watershed/grid/cookbook/) has whole examples
+that run on the page, in Solid and
+[React](https://surefold.dev/watershed/grid/react/cookbook/): rows from an API,
+loading as you scroll, saving edits back, WebSocket and SSE streams, charts and
+a table in a worker. To build the
 WebAssembly module and the pages yourself, see the
 [grid README](crates/watershed-grid/README.md#building-and-running).
 
