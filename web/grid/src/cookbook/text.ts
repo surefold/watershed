@@ -107,18 +107,21 @@ export const recipes: Recipe[] = [
     title: "Streams and retries with Effect",
     intro: [
       "The WebSocket recipe again, with <a href=\"https://effect.website\">Effect</a> doing the parts a real app needs and the hand-written one leaves out. " +
-        "The connection is Effect's own WebSocket, <code>Socket.makeWebSocket</code>, read as a <code>Stream</code> of messages: the socket is opened when the stream starts and closed however it stops, and the subscription is sent each time it connects. " +
+        "The connection is Effect's own WebSocket, <code>Socket.makeWebSocket</code>, read as a <code>Stream</code> of messages: the socket is opened when the stream starts and closed however it stops, and the subscription is sent each time it connects. Each message is decoded with a <code>Schema</code>, which checks its shape and reads the price as a number. " +
         "When the server drops it, <code>Stream.retry</code> opens another on a <code>Schedule</code>: an exponential backoff, capped, with jitter, which starts again once messages come. " +
         "Batching is a step of the stream, <code>groupedWithin</code>, in place of the frame timer, and each batch is one <code>table.batch</code>.",
       "Connect runs it all as a fiber. Disconnect, or the component going, interrupts the fiber: the socket closes, or the wait to reconnect stops, and nothing is left running. The table and the grid are the same as before. Press Connect.",
     ],
     notes: [
       "<code>npm install effect</code>. This page uses Effect 4. The grid packages do not depend on it: Effect lives in your app, and the table only sees <code>batch</code>, <code>put</code> and <code>set</code>.",
-      "It costs some bundle. The parts of Effect this recipe uses come to about 110 KB minified, 38 KB gzipped, half of it the runtime and streams and half <code>Socket</code> (which brings in Effect's channels and layers); with the recipe and its source, this page's JavaScript went from 55 KB to 96 KB gzipped (Solid), and from 118 KB to 159 KB (React). The runtime is shared with any other Effect in the app.",
+      "It costs some bundle. The parts of Effect this recipe uses come to about 110 KB minified, 38 KB gzipped, half of it the runtime and streams and half <code>Socket</code> and <code>Schema</code> (which bring in Effect's channels, layers and decoding); with the recipe and its source, this page's JavaScript went from 55 KB to 96 KB gzipped (Solid), and from 118 KB to 159 KB (React). The runtime is shared with any other Effect in the app.",
       "The schedule's <code>tap</code> sees each wait before it starts, with its length and the attempt: that is where the status line comes from. To give up after ten failed tries in a row, add <code>Schedule.upTo({ times: 10 })</code> to the schedule's <code>pipe</code>; the fiber then ends with the last error.",
-      "<code>Socket</code> is in <code>effect/socket</code>, which Effect marks unstable: its API may change in a minor release, so pin Effect's version.",
-      "The same shape fits SSE or polling. Effect has no <code>EventSource</code> of its own, so for SSE make the stream with <code>Stream.callback</code>: open the <code>EventSource</code> with <code>Effect.acquireRelease</code> (so it is closed however the stream stops), offer its messages to the queue, and fail on its <code>error</code>, so that your schedule decides when to try again rather than the browser. " +
-        "For polling, the stream is <code>Stream.fromEffectSchedule(load, Schedule.spaced(\"5 seconds\"))</code>, where <code>load</code> is an <code>Effect.tryPromise((signal) =&gt; fetch(url, { signal }))</code>: interrupting the fiber aborts the request, and the same <code>retry</code> backs off while the server is down.",
+      "<code>Socket</code> (<code>effect/socket</code>), and <code>HttpClient</code> and <code>Sse</code> below, are modules Effect marks unstable: their API may change in a minor release, so pin Effect's version.",
+      "The same shape fits SSE: Effect's <code>HttpClient</code> fetches the stream and <code>Sse.decode</code> (from <code>effect/encoding</code>) reads its events, so your schedule, not the browser, decides when to try again: " +
+        "<code>Stream.unwrap(HttpClient.get(url).pipe(Effect.map((r) =&gt; r.stream))).pipe(Stream.decodeText(), Stream.pipeThroughChannel(Sse.decode()), Stream.retry(backoff))</code>, run with <code>FetchHttpClient.layer</code>.",
+      "Effect's <code>HttpClient</code> adds tracing headers (<code>traceparent</code>, <code>b3</code>) to each request, and a browser asks another site's leave before sending those; most public APIs, Wikimedia's among them, refuse. " +
+        "For an API that is not yours, turn them off with <code>Effect.provideService(HttpClient.TracerPropagationEnabled, false)</code>.",
+      "For polling, the stream is <code>Stream.fromEffectSchedule(load, Schedule.spaced(\"5 seconds\"))</code>, where <code>load</code> is <code>HttpClient.get(url)</code> and its JSON: interrupting the fiber aborts the request, and the same <code>retry</code> backs off while the server is down.",
     ],
   },
   {

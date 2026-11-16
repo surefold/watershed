@@ -27,18 +27,17 @@ export function WebSocketPrices() {
 
   // The connection and what has come since the last frame live in a ref, not in state:
   // they change with every message, and rendering does not need them.
-  const live = useRef({ socket: undefined as WebSocket | undefined, frame: 0, latest: new Map<string, number>(), known: new Set<string>() });
+  const live = useRef({ socket: undefined as WebSocket | undefined, frame: 0, latest: new Map<string, number>() });
 
   // Many messages can come in a frame: keep the latest price of each coin, and
   // write them all to the table once a frame, as one batch (one recalculation).
   function flush() {
-    const { latest, known } = live.current;
+    const { latest } = live.current;
     live.current.frame = 0;
     coins.batch(() => {
       for (const [coin, price] of latest) {
-        if (known.has(coin)) coins.set(coin, "price", price);
+        if (coins.get(coin)) coins.set(coin, "price", price);
         else coins.put(coin, { units: HOLDINGS[coin], open: price, price }); // its first price: add its row
-        known.add(coin);
       }
     });
     latest.clear();

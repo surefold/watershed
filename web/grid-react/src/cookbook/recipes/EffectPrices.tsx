@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Duration, Effect, Fiber, Schedule, Stream } from "effect";
+import { Duration, Effect, Fiber, Filter, Schedule, Schema, Stream } from "effect";
 import { Socket } from "effect/socket";
 import { Table } from "@surefold/grid";
 import { Grid, useTable, useTotal } from "@surefold/grid-react";
@@ -9,12 +9,11 @@ const FEED = "wss://ws-feed.exchange.coinbase.com";
 const HOLDINGS: Record<string, number> = { "BTC-USD": 0.5, "ETH-USD": 8, "SOL-USD": 120, "DOGE-USD": 40000, "LTC-USD": 60, "LINK-USD": 400 };
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
-interface Ticker {
-  type: "ticker";
-  product_id: string;
-  price: string;
-}
-const isTicker = (message: { type?: string; product_id?: string }): message is Ticker => message.type === "ticker" && !!message.product_id;
+// A ticker message, as JSON text. Decoding checks its shape and reads the price as a
+// finite number; the feed's other messages (the subscription's answer) do not decode.
+const Ticker = Schema.Struct({ type: Schema.Literal("ticker"), product_id: Schema.String, price: Schema.FiniteFromString });
+type Ticker = typeof Ticker.Type;
+const asTicker = Filter.fromPredicateOption(Schema.decodeUnknownOption(Schema.fromJsonString(Ticker)));
 
 /**
  * Coinbase's ticker as an Effect: it connects, reconnects with a backoff after
@@ -36,10 +35,7 @@ function livePrices(say: (status: string) => void, write: (batch: readonly Ticke
       yield* send(JSON.stringify({ type: "subscribe", product_ids: Object.keys(HOLDINGS), channels: ["ticker"] }));
       say("Live");
       // Each read is the frames that came in together; one message a frame.
-      return Stream.fromEffectRepeat(read).pipe(
-        Stream.flattenIterable,
-        Stream.map((text) => JSON.parse(text) as { type?: string; product_id?: string }),
-      );
+      return Stream.fromEffectRepeat(read).pipe(Stream.flattenIterable);
     }),
   );
 
@@ -54,7 +50,7 @@ function livePrices(say: (status: string) => void, write: (batch: readonly Ticke
 
   return connection.pipe(
     Stream.retry(backoff), // the backoff starts again from 0.5 s once a message comes through
-    Stream.filter(isTicker),
+    Stream.filterMap(asTicker), // tickers only, decoded
     Stream.groupedWithin(500, "50 millis"), // what came in 50 ms (or 500 messages), as one array
     Stream.runForEach((batch) => Effect.sync(() => write(batch))),
     Effect.provide(Socket.layerWebSocketConstructorGlobal), // the browser's WebSocket
@@ -79,17 +75,14 @@ export function EffectPrices() {
   const [ticks, setTicks] = useState(0);
   const [connected, setConnected] = useState(false);
   const running = useRef<Fiber.Fiber<void, Error>>(undefined);
-  const known = useRef(new Set<string>()); // coins with a row
 
   // Keep the latest price of each coin in a batch, and write them all at once (one recalculation).
   function write(batch: readonly Ticker[]) {
-    const latest = new Map(batch.map((message) => [message.product_id, Number(message.price)]));
+    const latest = new Map(batch.map((ticker) => [ticker.product_id, ticker.price]));
     coins.batch(() => {
       for (const [coin, price] of latest) {
-        if (!Number.isFinite(price)) continue;
-        if (known.current.has(coin)) coins.set(coin, "price", price);
+        if (coins.get(coin)) coins.set(coin, "price", price);
         else coins.put(coin, { units: HOLDINGS[coin], open: price, price }); // its first price: add its row
-        known.current.add(coin);
       }
     });
     setTicks((n) => n + batch.length);
