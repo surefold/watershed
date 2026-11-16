@@ -477,6 +477,9 @@ pub struct Graph {
     /// presence of a total's member that has been emptied. Made when first
     /// needed.
     hole: Option<NodeId>,
+    /// The membership nodes of groupings by the same key, shared (see the
+    /// `keyed` module).
+    pools: Vec<keyed::Pool>,
     /// Calculated nodes whose value names a row's group: for each, the
     /// groupings and rows that follow it.
     watched: HashMap<u32, Vec<(u32, u32)>>,
@@ -553,6 +556,7 @@ impl Graph {
             changed: Vec::new(),
             keyed: Vec::new(),
             hole: None,
+            pools: Vec::new(),
             watched: HashMap::new(),
             rekey: Vec::new(),
             updating: false,

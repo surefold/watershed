@@ -107,13 +107,23 @@ for (const { name, path, unmount } of COOKBOOKS) {
         await expect(recipe).toContainText("That page did not load", { timeout: 1000 });
       }).toPass();
       // The button shows once the failure has settled, with nothing asked for since.
-      await expect(recipe.getByRole("button", { name: "Try again" })).toBeVisible();
+      // Showing the failure changes the bar above the grid, which can move the grid
+      // and give it one more scroll event near the end, and so one more request for
+      // the page (which fails too). Wait until half a second has passed with none.
+      const tryAgain = recipe.getByRole("button", { name: "Try again" });
+      await expect
+        .poll(async () => {
+          const before = failed;
+          await page.waitForTimeout(500);
+          return failed === before && (await tryAgain.isVisible());
+        })
+        .toBe(true);
       expect(failed).toBeGreaterThanOrEqual(1);
       await expect(row(recipe, "P-21")).toHaveCount(0);
       // A list at its end cannot be scrolled further, so the recipe offers to try again.
       failing = false;
-      await recipe.getByRole("button", { name: "Try again" }).click();
-      await expect(recipe.getByRole("button", { name: "Try again" })).toHaveCount(0);
+      await tryAgain.click();
+      await expect(tryAgain).toHaveCount(0);
       await expect(row(recipe, "P-21")).toBeAttached();
       await expect(async () => {
         await body.evaluate((b) => (b.scrollTop = 0));

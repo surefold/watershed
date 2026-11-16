@@ -170,14 +170,16 @@ Rows group by any text column: a field, or a formula such as
 `if(line >= 100, "big", "small")`, where a row changes group as its cells
 change.
 
-Group totals are aggregates in the graph only for small tables. A
+Group totals are aggregates in the graph only for tables up to a size. A
 [grouping in the graph](../watershed-core/README.md#grouping) costs a
-membership node for each row in each totalled column, for every column ever
+membership node for each row, shared by the totalled columns, and a member
+of a total for each row in each totalled column, for every column ever
 grouped by (a removed row's are reused by the next row, but a column no
-longer grouped by keeps its): 50,000 rows with six totals took about 175 MB
-per grouping column. Above 100,000 row-and-column pairs
-(`set_group_budget`), the grid adds each group's totals up over its rows
-instead, which adds nothing to the graph.
+longer grouped by keeps its): 50,000 rows with six totals take 74 MB per
+grouping column (256 MB when each totalled column had its own membership
+nodes). Above 300,000 row-and-column pairs (`set_group_budget`), the grid
+adds each group's totals up over its rows instead, which adds nothing to the
+graph.
 
 ## Limitations
 

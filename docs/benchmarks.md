@@ -218,6 +218,6 @@ were not repeated on 13 November 2026:
 - A row moving between groups recalculating 4 nodes (1,000 rows in 10
   groups).
 - The grid's streaming figures (about 1 ms and 2 ms per frame of 100 price
-  changes on 100,000 rows) and its 175 MB per grouping column.
+  changes on 100,000 rows).
 - GPU utilisation of 96 to 98% and about 335 W during a long run, sampled
   once.
