@@ -74,7 +74,6 @@ pub(crate) enum Source {
 }
 
 /// How many values an instruction takes off the stack.
-#[cfg(feature = "gpu")]
 pub(crate) fn arity(code: u32) -> usize {
     match code {
         LOAD | CONST | LOAD_SHARED | crate::fuse::LOCAL => 0,
@@ -167,7 +166,9 @@ pub enum PlanError {
     /// Pull mode is on and this node is not being calculated, so its value
     /// may be out of date.
     NotCalculated(String),
-    /// One node's expression needs a deeper stack than [`MAX_STACK`].
+    /// One node's expression needs a deeper stack than [`MAX_STACK`]. No
+    /// longer returned: such an expression is now split into nodes that
+    /// each need less.
     TooDeep(String),
     /// More nodes or constants than a plan can number.
     TooLarge,
@@ -286,10 +287,21 @@ pub struct Scenarios {
 #[derive(Clone, Copy)]
 enum Place {
     /// Worked out for every scenario. A calculated node's slot is
-    /// provisional until the levels are sorted.
+    /// provisional until the levels are sorted. [`INLINE`] for a node worked
+    /// out inside the totals that read it.
     Slot(u32),
     /// Worked out once for all scenarios.
     Shared(u32),
+}
+
+impl Place {
+    /// The instruction that reads a value from here.
+    fn load(self) -> u32 {
+        match self {
+            Place::Slot(slot) => LOAD | slot << CODE_BITS,
+            Place::Shared(at) => LOAD_SHARED | at << CODE_BITS,
+        }
+    }
 }
 
 /// A node worked out for every scenario, before the nodes are put in level
@@ -299,12 +311,29 @@ struct Draft {
     ops: Range<usize>,
 }
 
-/// What an expression leaves on the stack.
+/// What an expression leaves on the stack. A whole number (a count, or
+/// what is made from one by comparing or choosing) is held as the `f64` of
+/// the same value, which is exact up to 2^53.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Float,
     Bool,
+    Int,
 }
+
+/// The largest whole number a plan holds: every whole number up to it is an
+/// `f64` exactly.
+const MAX_EXACT: i64 = 1 << 53;
+
+/// A whole number as the `f64` a plan holds it as, if it is exact.
+fn exact(x: i64) -> Option<f64> {
+    (x.unsigned_abs() <= MAX_EXACT as u64).then_some(x as f64)
+}
+
+/// The slot numbers from here up mark the nodes worked out inside the totals
+/// that read them, in place of slots of their own: `INLINE + k` is the `k`th
+/// of them. It is above any real slot.
+const INLINE: u32 = 1 << 30;
 
 struct Builder<'a> {
     g: &'a Graph,
@@ -315,11 +344,225 @@ struct Builder<'a> {
     level_of: Vec<u32>,
     consts: Vec<f64>,
     const_of: HashMap<u64, u32>,
+    /// How many slots the varied (and cut) inputs take, and how many shared
+    /// inputs there are.
+    vary: usize,
+    shared_inputs: usize,
+    /// The nodes worked out for every scenario, before they are put in level
+    /// order, and their instructions.
+    drafts: Vec<Draft>,
+    ops: Vec<u32>,
+    /// The instructions of the nodes that depend only on shared inputs: per
+    /// node, a start in `shared_ops` and a length.
+    shared_programs: Vec<u32>,
+    shared_ops: Vec<u32>,
+    /// The instructions of the nodes worked out inside the totals that read
+    /// them, one after another, and where each one's are.
+    inline: Vec<u32>,
+    inlined: Vec<(u32, u32)>,
+    /// Room for `folded` to work in, kept from one node to the next.
+    constant_scratch: Vec<bool>,
 }
 
 impl Builder<'_> {
+    /// Adds a node with these instructions, and says where its value is: in
+    /// a slot, if it reads one, or else a shared value. Its constant parts
+    /// are worked out now, and an expression that needs a deeper stack than
+    /// [`MAX_STACK`] is split into nodes that need less.
+    fn node(&mut self, ops: Vec<u32>) -> Result<Place, PlanError> {
+        let ops = self.folded(ops)?;
+        let ops = self.shallow(ops)?;
+        let mut level = None;
+        for &op in &ops {
+            if op & CODE == LOAD {
+                let read = self.level_of[(op >> CODE_BITS) as usize] + 1;
+                level = Some(level.unwrap_or(0).max(read));
+            }
+        }
+        match level {
+            Some(level) => {
+                let start = self.ops.len();
+                self.ops.extend_from_slice(&ops);
+                let slot = self.vary + self.drafts.len();
+                if self.ops.len() > u32::MAX as usize || slot > MAX_ARG {
+                    return Err(PlanError::TooLarge);
+                }
+                self.level_of.push(level);
+                self.drafts.push(Draft {
+                    level,
+                    ops: start..self.ops.len(),
+                });
+                Ok(Place::Slot(slot as u32))
+            }
+            None => {
+                let start = self.shared_ops.len();
+                self.shared_ops.extend_from_slice(&ops);
+                let at = self.shared_inputs + self.shared_programs.len() / 2;
+                if self.shared_ops.len() > u32::MAX as usize || at > MAX_ARG {
+                    return Err(PlanError::TooLarge);
+                }
+                self.shared_programs.push(start as u32);
+                self.shared_programs.push(ops.len() as u32);
+                Ok(Place::Shared(at as u32))
+            }
+        }
+    }
+
+    /// The instructions with every part that reads nothing worked out now:
+    /// an operation on constants becomes its result, and a condition that
+    /// is constant keeps only the branch it takes. The result is what
+    /// running them would give, since it is worked out by running them.
+    fn folded(&mut self, ops: Vec<u32>) -> Result<Vec<u32>, PlanError> {
+        // Most nodes have nothing to fold: find out first, without making
+        // anything, whether any operation is on constants only.
+        let mut constant = std::mem::take(&mut self.constant_scratch);
+        constant.clear();
+        let mut any = false;
+        for &op in &ops {
+            let code = op & CODE;
+            let takes = arity(code);
+            if takes == 0 {
+                constant.push(code == CONST);
+                continue;
+            }
+            let args = constant.len() - takes;
+            if constant[args..].iter().all(|&c| c) || (code == SELECT && constant[args]) {
+                any = true;
+                break;
+            }
+            constant.truncate(args);
+            constant.push(false);
+        }
+        self.constant_scratch = constant;
+        if !any {
+            return Ok(ops);
+        }
+        // For each value on the stack: where its instructions start in
+        // `out`, and the value, if it is a constant.
+        let mut stack: Vec<(usize, Option<f64>)> = Vec::new();
+        let mut out: Vec<u32> = Vec::with_capacity(ops.len());
+        for &op in &ops {
+            let code = op & CODE;
+            let takes = arity(code);
+            if takes == 0 {
+                let value = (code == CONST).then(|| self.consts[(op >> CODE_BITS) as usize]);
+                stack.push((out.len(), value));
+                out.push(op);
+                continue;
+            }
+            let args = stack.split_off(stack.len() - takes);
+            let start = args[0].0;
+            if let (SELECT, Some(condition)) = (code, args[0].1) {
+                // Keep the branch taken.
+                let (from, value) = match condition != 0.0 {
+                    true => (args[1].0, args[1].1),
+                    false => (args[2].0, args[2].1),
+                };
+                let to = match condition != 0.0 {
+                    true => args[2].0,
+                    false => out.len(),
+                };
+                let kept = out[from..to].to_vec();
+                out.truncate(start);
+                out.extend(kept);
+                stack.push((start, value));
+                continue;
+            }
+            if args.iter().all(|(_, value)| value.is_some()) {
+                let given: Vec<f64> = args.iter().map(|(_, value)| value.unwrap()).collect();
+                let program: Vec<u32> = (0..takes as u32)
+                    .map(|k| CONST | k << CODE_BITS)
+                    .chain([code])
+                    .collect();
+                let value = eval(&program, &given, &[], &[]);
+                out.truncate(start);
+                out.push(CONST | self.constant(value)? << CODE_BITS);
+                stack.push((start, Some(value)));
+                continue;
+            }
+            out.push(op);
+            stack.push((start, None));
+        }
+        Ok(out)
+    }
+
+    /// The instructions, needing a stack no deeper than [`MAX_STACK`]: if
+    /// they need more, parts of them are made nodes of their own, and read.
+    fn shallow(&mut self, ops: Vec<u32>) -> Result<Vec<u32>, PlanError> {
+        if need(&ops) <= MAX_STACK {
+            return Ok(ops);
+        }
+        // The expression as a tree: each instruction's operands, which come
+        // before it, and the stack it needs. An operand made a node of its
+        // own needs one.
+        let mut operands: Vec<Vec<usize>> = Vec::with_capacity(ops.len());
+        let mut needs: Vec<usize> = Vec::with_capacity(ops.len());
+        let mut cut = vec![false; ops.len()];
+        let mut stack: Vec<usize> = Vec::new();
+        for (at, &op) in ops.iter().enumerate() {
+            let args = stack.split_off(stack.len() - arity(op & CODE));
+            let need_of = |args: &[usize], needs: &[usize], cut: &[bool]| {
+                args.iter()
+                    .enumerate()
+                    .map(|(k, &a)| k + if cut[a] { 1 } else { needs[a] })
+                    .max()
+                    .unwrap_or(1)
+            };
+            // Make the operand that needs most a node of its own until this
+            // needs no more than is allowed. Each operand already does, so
+            // this ends: with every operand cut, it needs three at most.
+            while need_of(&args, &needs, &cut) > MAX_STACK {
+                let deepest = *args
+                    .iter()
+                    .filter(|&&a| !cut[a])
+                    .max_by_key(|&&a| needs[a])
+                    .expect("an operand left to cut");
+                cut[deepest] = true;
+            }
+            needs.push(need_of(&args, &needs, &cut));
+            operands.push(args);
+            stack.push(at);
+        }
+        // Each cut part, lowest first, then the rest, made into instructions
+        // that read the parts below them.
+        let mut place_of: HashMap<usize, Place> = HashMap::new();
+        let written = |at: usize, place_of: &HashMap<usize, Place>| {
+            let mut out = Vec::new();
+            let mut visit = vec![(at, false)];
+            while let Some((n, done)) = visit.pop() {
+                if n != at && cut[n] {
+                    out.push(place_of[&n].load());
+                } else if done || operands[n].is_empty() {
+                    out.push(ops[n]);
+                } else {
+                    visit.push((n, true));
+                    visit.extend(operands[n].iter().rev().map(|&a| (a, false)));
+                }
+            }
+            out
+        };
+        for (at, _) in cut.iter().enumerate().filter(|(_, is_cut)| **is_cut) {
+            let part = written(at, &place_of);
+            let place = self.node(part)?;
+            place_of.insert(at, place);
+        }
+        Ok(written(ops.len() - 1, &place_of))
+    }
+
     fn name(&self, id: NodeId) -> String {
         self.g.name(id).to_string()
+    }
+
+    /// Where the instructions of a node worked out inside the totals that
+    /// read it are in `inline`, if it is one.
+    fn inlined(&self, id: NodeId) -> Option<Range<usize>> {
+        match self.place(id) {
+            Some(Place::Slot(slot)) if slot >= INLINE => {
+                let (start, len) = self.inlined[(slot - INLINE) as usize];
+                Some(start as usize..(start + len) as usize)
+            }
+            _ => None,
+        }
     }
 
     fn place(&self, id: NodeId) -> Option<Place> {
@@ -363,6 +606,10 @@ impl Builder<'_> {
         match self.g.value(id) {
             Value::F64(x) => Ok(*x),
             Value::Bool(x) => Ok(f64::from(u8::from(*x))),
+            Value::I64(x) => exact(*x).ok_or_else(|| PlanError::Unsupported {
+                node: self.name(id),
+                what: format!("the whole number {x}, too large to hold exactly"),
+            }),
             Value::Error(error) => Err(PlanError::HoldsError {
                 node: self.name(id),
                 error: error.to_string(),
@@ -380,6 +627,7 @@ fn kind_of(g: &Graph, id: NodeId) -> Result<Kind, PlanError> {
     match g.node_type(id) {
         Type::F64 => Ok(Kind::Float),
         Type::Bool => Ok(Kind::Bool),
+        Type::I64 => Ok(Kind::Int),
         ty => Err(PlanError::NotAFloat {
             node: g.name(id).to_string(),
             ty,
@@ -396,14 +644,18 @@ struct Rough {
     ops: Vec<u32>,
     reads: Vec<NodeId>,
     consts: Vec<f64>,
+    /// Each choice's option number, to be checked once it is known where
+    /// what it reads is: where its instructions start in `ops`, how many
+    /// there are, and how many options there are.
+    choices: Vec<(usize, usize, usize)>,
     nodes: Vec<RoughNode>,
 }
 
 enum RoughNode {
     /// A total, which has members in place of an expression.
     Total,
-    /// These of the rough instructions, needing a stack this deep.
-    Ops(Range<usize>, usize),
+    /// These of the rough instructions, and these of the choices.
+    Ops(Range<usize>, Range<usize>),
     /// It cannot be done. This matters only if the node turns out to depend
     /// on a varied or shared input.
     Refused(PlanError),
@@ -414,23 +666,11 @@ struct Program<'r> {
     g: &'r Graph,
     node: NodeId,
     rough: &'r mut Rough,
-    /// The stack in use, and the most it has been.
-    depth: usize,
-    deepest: usize,
 }
 
 impl Program<'_> {
-    /// An instruction that leaves one more on the stack.
-    fn push(&mut self, op: u32) {
+    fn op(&mut self, op: u32) {
         self.rough.ops.push(op);
-        self.depth += 1;
-        self.deepest = self.deepest.max(self.depth);
-    }
-
-    /// An instruction that takes `takes` off the stack and leaves one.
-    fn apply(&mut self, op: u32, takes: usize) {
-        self.rough.ops.push(op);
-        self.depth -= takes - 1;
     }
 
     fn unsupported(&self, what: impl Into<String>) -> PlanError {
@@ -443,7 +683,7 @@ impl Program<'_> {
     fn constant(&mut self, x: f64) {
         let at = self.rough.consts.len() as u32;
         self.rough.consts.push(x);
-        self.push(CONST | at << CODE_BITS);
+        self.op(CONST | at << CODE_BITS);
     }
 
     /// Adds the instructions for `ir`, and says what they leave on the
@@ -463,6 +703,16 @@ impl Program<'_> {
                 self.constant(f64::from(u8::from(*x)));
                 Ok(Kind::Bool)
             }
+            Ir::Const(Value::I64(x)) => {
+                match exact(*x) {
+                    Some(x) => {
+                        self.constant(x);
+                        Ok(Kind::Int)
+                    }
+                    None => Err(self
+                        .unsupported(format!("the whole number {x}, too large to hold exactly"))),
+                }
+            }
             Ir::Const(other) => Err(self.unsupported(match other.type_of() {
                 Some(ty) => format!("work on {ty}"),
                 None => "an error".into(),
@@ -471,18 +721,19 @@ impl Program<'_> {
                 let kind = kind_of(self.g, r.node)?;
                 let at = self.rough.reads.len() as u32;
                 self.rough.reads.push(r.node);
-                self.push(LOAD | at << CODE_BITS);
+                self.op(LOAD | at << CODE_BITS);
                 Ok(kind)
             }
             Ir::Unary(op, a) => {
                 let kind = self.translate(a)?;
                 match (op, kind) {
-                    (UnOp::Neg, Kind::Float) => self.apply(NEG, 1),
-                    (UnOp::Abs, Kind::Float) => self.apply(ABS, 1),
-                    (UnOp::Exp, Kind::Float) => self.apply(EXP, 1),
-                    (UnOp::Ln, Kind::Float) => self.apply(LN, 1),
-                    (UnOp::Sqrt, Kind::Float) => self.apply(SQRT, 1),
-                    (UnOp::Not, Kind::Bool) => self.apply(NOT, 1),
+                    (UnOp::Neg, Kind::Float) => self.op(NEG),
+                    (UnOp::Abs, Kind::Float) => self.op(ABS),
+                    (UnOp::Exp, Kind::Float) => self.op(EXP),
+                    (UnOp::Ln, Kind::Float) => self.op(LN),
+                    (UnOp::Sqrt, Kind::Float) => self.op(SQRT),
+                    (UnOp::Not, Kind::Bool) => self.op(NOT),
+                    (_, Kind::Int) => return Err(self.unsupported("arithmetic of whole numbers")),
                     (other, _) => return Err(self.unsupported(format!("a {other:?}"))),
                 }
                 Ok(kind)
@@ -495,8 +746,8 @@ impl Program<'_> {
                     BinOp::Sub => (SUB, Kind::Float),
                     BinOp::Mul => (MUL, Kind::Float),
                     BinOp::Div => (DIV, Kind::Float),
-                    BinOp::Min => (MIN, Kind::Float),
-                    BinOp::Max => (MAX, Kind::Float),
+                    BinOp::Min => (MIN, left),
+                    BinOp::Max => (MAX, left),
                     BinOp::Pow => (POW, Kind::Float),
                     BinOp::Lt => (LT, Kind::Bool),
                     BinOp::Le => (LE, Kind::Bool),
@@ -511,20 +762,55 @@ impl Program<'_> {
                 // Arithmetic is on numbers; comparing is of either, since
                 // false is below true as 0.0 is below 1.0. `And` and `Or`
                 // are of bools, which the graph's own type check has seen to.
-                if gives == Kind::Float && (left == Kind::Bool || right == Kind::Bool) {
+                // Whole numbers are compared, and the smaller or larger
+                // taken, exactly; adding them and the rest is not done here,
+                // since the graph's whole numbers do not round and can
+                // overflow.
+                let arithmetic = matches!(code, ADD | SUB | MUL | DIV | POW);
+                if (arithmetic || matches!(code, MIN | MAX))
+                    && (left == Kind::Bool || right == Kind::Bool)
+                {
                     return Err(self.unsupported("arithmetic of a bool"));
                 }
-                self.apply(code, 2);
+                if arithmetic && (left == Kind::Int || right == Kind::Int) {
+                    return Err(self.unsupported("arithmetic of whole numbers"));
+                }
+                self.op(code);
                 Ok(gives)
             }
             Ir::If(condition, then, otherwise) => {
                 self.translate(condition)?;
                 let kind = self.translate(then)?;
                 self.translate(otherwise)?;
-                self.apply(SELECT, 3);
+                self.op(SELECT);
                 Ok(kind)
             }
-            Ir::Choose(..) => Err(self.unsupported("a choice")),
+            // `(index == 0) ? first : ((index == 1) ? second : (… : NaN))`.
+            // The option number must turn out the same in every scenario,
+            // and in range (checked once it is known what it reads); then
+            // the choice folds to the option it picks, and the NaN is never
+            // reached.
+            Ir::Choose(index, options) => {
+                let mut kind = Kind::Float;
+                for (k, option) in options.iter().enumerate() {
+                    let start = self.rough.ops.len();
+                    if self.translate(index)? != Kind::Int {
+                        return Err(self.unsupported("a choice by something not a whole number"));
+                    }
+                    if k == 0 {
+                        let len = self.rough.ops.len() - start;
+                        self.rough.choices.push((start, len, options.len()));
+                    }
+                    self.constant(k as f64);
+                    self.op(EQ);
+                    kind = self.translate(option)?;
+                }
+                self.constant(f64::NAN);
+                for _ in options {
+                    self.op(SELECT);
+                }
+                Ok(kind)
+            }
             Ir::List(_) => Err(self.unsupported("work on a list")),
         }
     }
@@ -539,19 +825,18 @@ fn rough(g: &Graph, nodes: &[NodeId]) -> Rough {
             continue;
         };
         let start = rough.ops.len();
+        let choices = rough.choices.len();
         let mut program = Program {
             g,
             node,
             rough: &mut rough,
-            depth: 0,
-            deepest: 0,
         };
         let translated = program.translate(&ir);
-        let deepest = program.deepest;
         rough.nodes.push(match translated {
-            Ok(_) => RoughNode::Ops(start..rough.ops.len(), deepest),
+            Ok(_) => RoughNode::Ops(start..rough.ops.len(), choices..rough.choices.len()),
             Err(refused) => {
                 rough.ops.truncate(start);
+                rough.choices.truncate(choices);
                 RoughNode::Refused(refused)
             }
         });
@@ -561,15 +846,30 @@ fn rough(g: &Graph, nodes: &[NodeId]) -> Rough {
 
 /// Part of a total's tree, as it is lowered: nothing (room no member holds,
 /// or members that are absent: the operation's identity, which never changes
-/// a result), a number the same in every scenario, or instructions.
+/// a result), a number the same in every scenario, or instructions, which
+/// have been written.
+#[derive(Clone, Copy)]
 enum Part {
     Nothing,
     Fixed(f64),
-    Ops(Vec<u32>, usize),
+    Ops,
 }
 
-/// The instructions for a total (a `sum`, `min` or `max` over a collection
-/// or a group) whose members vary, and the stack they need.
+/// The most instructions a piece of a total is given, roughly: a total is cut
+/// into whole subtrees of a number of members that keeps each under this, so
+/// that every piece is short enough for a kernel of its own and a GPU works
+/// the pieces out side by side.
+const PIECE: usize = 512;
+
+/// The most members in one piece of a total.
+const MOST_MEMBERS: usize = 256;
+
+/// The longest node, in instructions, that is worked out inside the totals
+/// that read it rather than given a slot of its own.
+const INLINE_MOST: usize = 24;
+
+/// The instructions for a total (a `sum`, `min`, `max` or `count` over a
+/// collection or a group) that does not stay the same always.
 ///
 /// They combine the members in the tree the graph keeps (see
 /// `watershed_core`'s aggregate): room for the next power of two, each slot
@@ -577,7 +877,13 @@ enum Part {
 /// Room no member holds, and members that are absent in every scenario, hold
 /// the identity, so they are left out; members that are the same in every
 /// scenario are combined now, in the same order, into one number.
-fn lowered_total(b: &mut Builder, id: NodeId) -> Result<(Vec<u32>, usize), PlanError> {
+///
+/// A large total is cut into whole subtrees of the same number of members,
+/// each made a node of its own, and those again, so that the order of
+/// combining is the graph's; the total combines the last of them. A member
+/// worked out inside its total (see [`INLINE_MOST`]) is worked out in its
+/// piece.
+fn lowered_total(b: &mut Builder, id: NodeId) -> Result<Vec<u32>, PlanError> {
     let g = b.g;
     let refuse = |what: &str| PlanError::Unsupported {
         node: g.name(id).to_string(),
@@ -590,22 +896,42 @@ fn lowered_total(b: &mut Builder, id: NodeId) -> Result<(Vec<u32>, usize), PlanE
         AggregateOp::Sum => (AGG_SUM, -0.0),
         AggregateOp::Min => (AGG_MIN, f64::INFINITY),
         AggregateOp::Max => (AGG_MAX, f64::NEG_INFINITY),
-        AggregateOp::Count => return Err(refuse("a count, which is a whole number")),
+        // A count adds up 1 for each member present: whole numbers, exact
+        // in any order. Its identity is 0.
+        AggregateOp::Count => (AGG_SUM, 0.0),
     };
-    if g.node_type(id) != Type::F64 {
+    if op != AggregateOp::Count && g.node_type(id) != Type::F64 {
         return Err(refuse("a total of whole numbers or decimals"));
     }
+    // How many members a piece takes: a power of two, so that a piece is a
+    // whole subtree, as many as keep it under `PIECE` instructions.
+    let size = |b: &Builder, node: NodeId| b.inlined(node).map_or(1, |at| at.len());
+    let longest = members
+        .iter()
+        .map(|&(value, present)| match op {
+            AggregateOp::Count => size(b, present),
+            _ => size(b, value) + size(b, present),
+        })
+        .max()
+        .unwrap_or(1)
+        + 3;
+    let per_piece = (PIECE / longest).clamp(2, MOST_MEMBERS);
+    let per_piece = 1 << per_piece.ilog2();
     let tree = Tree {
         op,
         code,
         identity,
         members: &members,
+        capacity: members.len().max(1).next_power_of_two(),
+        per_piece,
     };
-    let capacity = members.len().max(1).next_power_of_two();
-    match tree.fold(b, 0, capacity)? {
-        Part::Nothing => Part::Fixed(identity).placed(b),
-        part => part.placed(b),
+    let mut ops = Vec::new();
+    match tree.fold(b, 0, tree.capacity, &mut ops)? {
+        Part::Nothing => ops.push(CONST | b.constant(identity)? << CODE_BITS),
+        Part::Fixed(x) => ops.push(CONST | b.constant(x)? << CODE_BITS),
+        Part::Ops => {}
     }
+    Ok(ops)
 }
 
 /// A total being lowered: how it combines, and its members (each a value
@@ -615,6 +941,10 @@ struct Tree<'m> {
     code: u32,
     identity: f64,
     members: &'m [(NodeId, NodeId)],
+    /// The room in the tree.
+    capacity: usize,
+    /// How many members a piece of the total takes: a power of two.
+    per_piece: usize,
 }
 
 impl Tree<'_> {
@@ -633,67 +963,113 @@ impl Tree<'_> {
         }
     }
 
+    /// Whether a subtree of this many members is made a piece of its own:
+    /// one of `per_piece` members, or of that many pieces, and so on, below
+    /// the whole.
+    fn is_piece(&self, members: usize) -> bool {
+        let (step, at) = (self.per_piece.ilog2(), members.ilog2());
+        members < self.capacity && at > 0 && at % step == 0
+    }
+
+    /// One member's part: its value, or for a count 1, if it is present.
+    fn leaf(
+        &self,
+        b: &mut Builder,
+        (value, present): (NodeId, NodeId),
+        out: &mut Vec<u32>,
+    ) -> Result<Part, PlanError> {
+        let value = |b: &mut Builder, out: &mut Vec<u32>| match self.op {
+            AggregateOp::Count => Ok(Part::Fixed(1.0)),
+            _ => Part::load(b, value, out),
+        };
+        match b.place(present) {
+            None => match b.fixed(present)? != 0.0 {
+                true => value(b, out),
+                false => Ok(Part::Nothing),
+            },
+            // A count's member is its presence, which is 1.0 or 0.0.
+            Some(_) if self.op == AggregateOp::Count => Part::load(b, present, out),
+            Some(_) => {
+                // Present in some scenarios: the value, or the identity.
+                Part::load(b, present, out)?;
+                if let Part::Fixed(x) = value(b, out)? {
+                    out.push(CONST | b.constant(x)? << CODE_BITS);
+                }
+                out.push(CONST | b.constant(self.identity)? << CODE_BITS);
+                out.push(SELECT);
+                Ok(Part::Ops)
+            }
+        }
+    }
+
     /// The members in `lo..hi` of the tree, combined as the graph combines
-    /// them: the two halves, each folded the same way.
-    fn fold(&self, b: &mut Builder, lo: usize, hi: usize) -> Result<Part, PlanError> {
+    /// them: the two halves, each folded the same way. Instructions are
+    /// written to `out`.
+    fn fold(
+        &self,
+        b: &mut Builder,
+        lo: usize,
+        hi: usize,
+        out: &mut Vec<u32>,
+    ) -> Result<Part, PlanError> {
         if lo >= self.members.len() {
             return Ok(Part::Nothing);
         }
         if hi - lo == 1 {
-            let (value, present) = self.members[lo];
-            let value = Part::load(b, value)?;
-            return match b.place(present) {
-                None => Ok(match b.fixed(present)? != 0.0 {
-                    true => value,
-                    false => Part::Nothing,
-                }),
-                Some(_) => {
-                    // Present in some scenarios: the value, or the identity.
-                    let (mut ops, _) = Part::load(b, present)?.placed(b)?;
-                    let (value, depth) = value.placed(b)?;
-                    ops.extend(value);
-                    ops.push(CONST | b.constant(self.identity)? << CODE_BITS);
-                    ops.push(SELECT);
-                    Ok(Part::Ops(ops, depth + 2))
-                }
-            };
+            return self.leaf(b, self.members[lo], out);
         }
+        let start = out.len();
         let mid = (lo + hi) / 2;
-        let left = self.fold(b, lo, mid)?;
-        let right = self.fold(b, mid, hi)?;
-        Ok(match (left, right) {
+        let left = self.fold(b, lo, mid, out)?;
+        let right_at = out.len();
+        let right = self.fold(b, mid, hi, out)?;
+        let part = match (left, right) {
             // The identity changes nothing, so a half that is only room or
             // absent members is left out.
             (Part::Nothing, part) | (part, Part::Nothing) => part,
             (Part::Fixed(x), Part::Fixed(y)) => Part::Fixed(self.combine(x, y)),
-            (left, right) => {
-                let (mut ops, left_depth) = left.placed(b)?;
-                let (right, right_depth) = right.placed(b)?;
-                ops.extend(right);
-                ops.push(self.code);
-                Part::Ops(ops, left_depth.max(right_depth + 1))
+            (Part::Ops, Part::Ops) => {
+                out.push(self.code);
+                Part::Ops
             }
-        })
+            (Part::Ops, Part::Fixed(y)) => {
+                out.push(CONST | b.constant(y)? << CODE_BITS);
+                out.push(self.code);
+                Part::Ops
+            }
+            (Part::Fixed(x), Part::Ops) => {
+                out.insert(right_at, CONST | b.constant(x)? << CODE_BITS);
+                out.push(self.code);
+                Part::Ops
+            }
+        };
+        // A piece is a node of its own, unless it only reads one value.
+        if let Part::Ops = part {
+            if self.is_piece(hi - lo) && out.len() - start > 1 {
+                let piece = out.split_off(start);
+                let place = b.node(piece)?;
+                out.push(place.load());
+            }
+        }
+        Ok(part)
     }
 }
 
 impl Part {
-    /// A node's value: a load from where it is, or the number it always is.
-    fn load(b: &mut Builder, node: NodeId) -> Result<Part, PlanError> {
+    /// A node's value: written as a load from where it is, or as its
+    /// instructions if it is worked out inside what reads it; or the number
+    /// it always is.
+    fn load(b: &mut Builder, node: NodeId, out: &mut Vec<u32>) -> Result<Part, PlanError> {
+        if let Some(at) = b.inlined(node) {
+            out.extend_from_slice(&b.inline[at]);
+            return Ok(Part::Ops);
+        }
         Ok(match b.place(node) {
-            Some(Place::Slot(slot)) => Part::Ops(vec![LOAD | slot << CODE_BITS], 1),
-            Some(Place::Shared(at)) => Part::Ops(vec![LOAD_SHARED | at << CODE_BITS], 1),
+            Some(place) => {
+                out.push(place.load());
+                Part::Ops
+            }
             None => Part::Fixed(b.fixed(node)?),
-        })
-    }
-
-    /// The instructions that leave this part on the stack, and the stack
-    /// they need.
-    fn placed(self, b: &mut Builder) -> Result<(Vec<u32>, usize), PlanError> {
-        Ok(match self {
-            Part::Ops(ops, depth) => (ops, depth),
-            Part::Fixed(x) => (vec![CONST | b.constant(x)? << CODE_BITS], 1),
-            Part::Nothing => unreachable!("an empty part is left out, not placed"),
         })
     }
 }
@@ -701,6 +1077,16 @@ impl Part {
 enum Visit {
     Enter(NodeId),
     Leave(NodeId),
+}
+
+/// The stack these instructions need.
+fn need(ops: &[u32]) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    for &op in ops {
+        depth = depth + 1 - arity(op & CODE);
+        deepest = deepest.max(depth);
+    }
+    deepest
 }
 
 /// Runs one node's instructions. `vals` holds this scenario's slots (none,
@@ -861,12 +1247,13 @@ impl Scenarios {
         if vary.len() > MAX_ARG || shared.len() > MAX_ARG {
             return Err(PlanError::TooLarge);
         }
-        let float = |id: NodeId| {
+        let typed = |id: NodeId, whole: bool| {
             if id.index() >= g.len() {
                 return Err(PlanError::UnknownNode(id));
             }
             match g.node_type(id) {
                 Type::F64 => Ok(()),
+                Type::I64 if whole => Ok(()),
                 ty => Err(PlanError::NotAFloat {
                     node: g.name(id).to_string(),
                     ty,
@@ -879,6 +1266,15 @@ impl Scenarios {
             level_of: vec![0; vary.len()],
             consts: Vec::new(),
             const_of: HashMap::new(),
+            vary: vary.len(),
+            shared_inputs: shared.len(),
+            drafts: Vec::new(),
+            ops: Vec::new(),
+            shared_programs: Vec::new(),
+            shared_ops: Vec::new(),
+            inline: Vec::new(),
+            inlined: Vec::new(),
+            constant_scratch: Vec::new(),
         };
         let mut shared_values = Vec::with_capacity(shared.len());
         let places = (vary
@@ -892,7 +1288,7 @@ impl Scenarios {
                 .map(|(n, id)| (id, Place::Shared(n as u32))),
         );
         for (&id, place) in places {
-            float(id)?;
+            typed(id, false)?;
             let given = matches!(place, Place::Slot(n) if n as usize >= inputs);
             if !given && !g.is_input(id) {
                 return Err(PlanError::NotAnInput(b.name(id)));
@@ -904,9 +1300,23 @@ impl Scenarios {
                 shared_values.push(b.fixed(id)?);
             }
         }
+        // An output may be a whole number (a count): it comes out as the
+        // `f64` of the same value.
         for &id in outputs {
-            float(id)?;
+            typed(id, true)?;
         }
+
+        // What a node reads, for finding the order: a count reads only
+        // whether its members are present, not their values.
+        let reads = |id: NodeId| match g.aggregate_members(id) {
+            Some((AggregateOp::Count, members)) => {
+                let mut present: Vec<NodeId> = members.iter().map(|&(_, p)| p).collect();
+                present.sort();
+                present.dedup();
+                present
+            }
+            _ => g.dependencies(id),
+        };
 
         // Every calculated node the outputs depend on, each after the nodes
         // it uses. This follows every branch of a condition, taken or not.
@@ -924,7 +1334,7 @@ impl Scenarios {
                     }
                     stack.push(Visit::Leave(id));
                     stack.extend(
-                        g.dependencies(id)
+                        reads(id)
                             .into_iter()
                             .filter(|u| !seen[u.index()])
                             .map(Visit::Enter),
@@ -943,28 +1353,51 @@ impl Scenarios {
             .map(|nodes| rough(g, nodes))
             .collect();
 
-        // Now, one node after another, where each reads from. A node that
-        // reads nothing varied or shared is the same always and is left out.
-        let mut ops: Vec<u32> = Vec::new();
-        let mut drafts: Vec<Draft> = Vec::new();
-        let mut shared_ops: Vec<u32> = Vec::new();
-        let mut shared_programs: Vec<u32> = Vec::new();
+        // The nodes read only by totals: short ones are worked out inside
+        // each total that reads them, so that a total's members need no
+        // slots. An output is read at the end, so it is not one of them.
+        const BY_A_TOTAL: u8 = 1;
+        const BY_ANOTHER: u8 = 2;
+        let mut read_by = vec![0u8; g.len()];
+        for &id in outputs {
+            read_by[id.index()] |= BY_ANOTHER;
+        }
         for (nodes, rough) in order.chunks(AT_A_TIME).zip(&roughs) {
             for (&id, node) in nodes.iter().zip(&rough.nodes) {
-                let varied = |b: &Builder| g.dependencies(id).iter().any(|&d| b.place(d).is_some());
-                // The node's instructions, with where each reads from; the
-                // level after the highest slot read; and whether it reads a
-                // slot, so is worked out for every scenario.
-                let mut placed: Vec<u32> = Vec::new();
-                let mut level = 0;
-                let deepest = match node {
+                match node {
+                    RoughNode::Total => {
+                        for read in reads(id) {
+                            read_by[read.index()] |= BY_A_TOTAL;
+                        }
+                    }
+                    RoughNode::Ops(range, _) => {
+                        for &op in &rough.ops[range.clone()] {
+                            if op & CODE == LOAD {
+                                let read = rough.reads[(op >> CODE_BITS) as usize];
+                                read_by[read.index()] |= BY_ANOTHER;
+                            }
+                        }
+                    }
+                    RoughNode::Refused(_) => {
+                        for read in g.dependencies(id) {
+                            read_by[read.index()] |= BY_ANOTHER;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now, one node after another, where each reads from. A node that
+        // reads nothing varied or shared is the same always and is left out.
+        for (nodes, rough) in order.chunks(AT_A_TIME).zip(&roughs) {
+            for (&id, node) in nodes.iter().zip(&rough.nodes) {
+                let varied = |b: &Builder| reads(id).iter().any(|&d| b.place(d).is_some());
+                let placed = match node {
                     RoughNode::Total => {
                         if !varied(&b) {
                             continue;
                         }
-                        let (ops, deepest) = lowered_total(&mut b, id)?;
-                        placed = ops;
-                        deepest
+                        lowered_total(&mut b, id)?
                     }
                     RoughNode::Refused(refused) => {
                         // Whether it matters: does it read anything that is
@@ -975,7 +1408,7 @@ impl Scenarios {
                         }
                         continue;
                     }
-                    RoughNode::Ops(range, deepest) => {
+                    RoughNode::Ops(range, choices) => {
                         let reads = |op: &u32| match op & CODE {
                             LOAD => b.place(rough.reads[(op >> CODE_BITS) as usize]),
                             _ => None,
@@ -987,12 +1420,12 @@ impl Scenarios {
                             continue;
                         }
                         kind_of(g, id)?;
+                        let mut placed = Vec::with_capacity(range.len());
                         for &op in &rough.ops[range.clone()] {
                             let at = (op >> CODE_BITS) as usize;
                             placed.push(match op & CODE {
                                 LOAD => match b.place(rough.reads[at]) {
-                                    Some(Place::Slot(slot)) => LOAD | slot << CODE_BITS,
-                                    Some(Place::Shared(at)) => LOAD_SHARED | at << CODE_BITS,
+                                    Some(place) => place.load(),
                                     None => {
                                         let x = b.fixed(rough.reads[at])?;
                                         CONST | b.constant(x)? << CODE_BITS
@@ -1002,51 +1435,57 @@ impl Scenarios {
                                 _ => op,
                             });
                         }
-                        *deepest
+                        // A choice's option number must be the same in every
+                        // scenario, and one of its options.
+                        for &(start, len, options) in &rough.choices[choices.clone()] {
+                            let index = &placed[start - range.start..][..len];
+                            if index
+                                .iter()
+                                .any(|op| op & CODE != CONST && arity(op & CODE) == 0)
+                            {
+                                return Err(PlanError::Unsupported {
+                                    node: b.name(id),
+                                    what: "a choice whose option number varies".into(),
+                                });
+                            }
+                            let k = eval(index, &b.consts, &[], &[]);
+                            if !(0.0..options as f64).contains(&k) {
+                                return Err(PlanError::HoldsError {
+                                    node: b.name(id),
+                                    error: format!(
+                                        "choice {k} is out of range: there are {options} options, numbered from 0"
+                                    ),
+                                });
+                            }
+                        }
+                        // Read only by totals, and short: worked out inside
+                        // them.
+                        if read_by[id.index()] == BY_A_TOTAL {
+                            placed = b.folded(placed)?;
+                            let k = b.inlined.len() as u32;
+                            if placed.len() <= INLINE_MOST
+                                && need(&placed) <= MAX_STACK
+                                && k < INLINE
+                            {
+                                let start = b.inline.len() as u32;
+                                b.inline.extend_from_slice(&placed);
+                                b.inlined.push((start, placed.len() as u32));
+                                b.mark(id, Place::Slot(INLINE + k));
+                                continue;
+                            }
+                        }
+                        placed
                     }
                 };
-                if deepest > MAX_STACK {
-                    return Err(PlanError::TooDeep(b.name(id)));
-                }
-                let mut every_scenario = false;
-                for &op in &placed {
-                    if op & CODE == LOAD {
-                        every_scenario = true;
-                        level = level.max(b.level_of[(op >> CODE_BITS) as usize] + 1);
-                    }
-                }
-                let into = match every_scenario {
-                    true => &mut ops,
-                    false => &mut shared_ops,
-                };
-                let start = into.len();
-                into.extend_from_slice(&placed);
-                if into.len() > u32::MAX as usize {
-                    return Err(PlanError::TooLarge);
-                }
-                if every_scenario {
-                    let slot = vary.len() + drafts.len();
-                    if slot > MAX_ARG {
-                        return Err(PlanError::TooLarge);
-                    }
-                    b.mark(id, Place::Slot(slot as u32));
-                    b.level_of.push(level);
-                    drafts.push(Draft {
-                        level,
-                        ops: start..ops.len(),
-                    });
-                } else {
-                    let at = shared.len() + shared_programs.len() / 2;
-                    if at > MAX_ARG {
-                        return Err(PlanError::TooLarge);
-                    }
-                    b.mark(id, Place::Shared(at as u32));
-                    shared_programs.push(start as u32);
-                    shared_programs.push((shared_ops.len() - start) as u32);
-                }
+                let place = b.node(placed)?;
+                b.mark(id, place);
             }
         }
         drop(roughs);
+        let drafts = std::mem::take(&mut b.drafts);
+        let ops = std::mem::take(&mut b.ops);
+        let shared_programs = std::mem::take(&mut b.shared_programs);
+        let shared_ops = std::mem::take(&mut b.shared_ops);
 
         // A node's shape is its instructions without what they read. Nodes
         // of one shape in one level are worked out together.
@@ -1410,5 +1849,79 @@ impl Scenarios {
                 Output::Fixed(x) => x,
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sum of `members` members, each a varied input plus a number.
+    fn a_sum(members: usize) -> (Graph, NodeId, NodeId) {
+        let mut g = Graph::new();
+        let x = g.input("x", 1.0).unwrap();
+        let yes = g.input("yes", true).unwrap().id();
+        let members: Vec<(NodeId, NodeId)> = (0..members)
+            .map(|m| (g.define(&format!("m{m}"), x + m as f64).unwrap().id(), yes))
+            .collect();
+        let sum = g
+            .aggregate("sum", AggregateOp::Sum, Type::F64, 0, &members)
+            .unwrap();
+        g.stabilize();
+        (g, x.id(), sum)
+    }
+
+    #[test]
+    fn every_piece_of_a_large_total_is_short_and_most_are_one_shape() {
+        let (g, x, sum) = a_sum(100_000);
+        let plan = Scenarios::new(&g, &[x], &[sum]).unwrap();
+        // Short enough for a kernel of its own (`cuda.rs` writes one for a
+        // shape of up to 1,024 instructions), and few shapes.
+        assert!(plan.shapes.iter().all(|shape| shape.len() <= PIECE + 8));
+        assert!(plan.shapes.len() <= 8, "{} shapes", plan.shapes.len());
+        // No member has a slot: each is worked out in its piece.
+        assert!(plan.slots() < 100_000 / 16, "{} slots", plan.slots());
+    }
+
+    #[test]
+    fn constant_parts_are_worked_out_when_the_plan_is_made() {
+        let mut b = Builder {
+            g: &Graph::new(),
+            places: Vec::new(),
+            level_of: vec![0],
+            consts: Vec::new(),
+            const_of: HashMap::new(),
+            vary: 1,
+            shared_inputs: 0,
+            drafts: Vec::new(),
+            ops: Vec::new(),
+            shared_programs: Vec::new(),
+            shared_ops: Vec::new(),
+            inline: Vec::new(),
+            inlined: Vec::new(),
+            constant_scratch: Vec::new(),
+        };
+        let c = |b: &mut Builder, x: f64| CONST | b.constant(x).unwrap() << CODE_BITS;
+        let x = LOAD;
+        // (2 * 3) + x, and (1 > 0 ? x : 5) * 4.
+        let ops = vec![c(&mut b, 2.0), c(&mut b, 3.0), MUL, x, ADD];
+        let folded = b.folded(ops).unwrap();
+        assert_eq!(folded, vec![c(&mut b, 6.0), x, ADD]);
+        let ops = vec![
+            c(&mut b, 1.0),
+            c(&mut b, 0.0),
+            GT,
+            x,
+            c(&mut b, 5.0),
+            SELECT,
+            c(&mut b, 4.0),
+            MUL,
+        ];
+        let folded = b.folded(ops).unwrap();
+        assert_eq!(folded, vec![x, c(&mut b, 4.0), MUL]);
+        // Not taken, the other branch is kept whole.
+        let ops = vec![c(&mut b, 0.0), x, x, c(&mut b, 1.0), ADD, SELECT];
+        let folded = b.folded(ops).unwrap();
+        assert_eq!(folded, vec![x, c(&mut b, 1.0), ADD]);
     }
 }

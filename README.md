@@ -279,9 +279,10 @@ The ones that decide whether Watershed fits; the rest are in
 
 - **Plans cover numeric formulas.** `f64` and `bool` with arithmetic,
   `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, comparisons, logic and
-  conditionals. Collection totals, `choose`, integers, decimals and text are
-  incremental only. A plan names the node it cannot take, so a model is
-  never silently run differently.
+  conditionals; collection and group totals (`sum`, `min`, `max`, `count`);
+  and `choose` by an option number that is the same in every scenario.
+  Integer arithmetic, decimals and text are incremental only. A plan names
+  the node it cannot take, so a model is never silently run differently.
 - **Setup is paid once.** Building a graph and compiling a plan each take
   about a microsecond a node. Watershed earns that back on the second run
   and on every change after.

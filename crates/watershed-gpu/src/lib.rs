@@ -52,14 +52,16 @@
 //! Both branches of a condition are worked out and one is kept, which gives
 //! the same answer as the graph because none of these can fail.
 //!
-//! Totals too: the `sum`, `min` or `max` of numbers over a collection or a
+//! Totals too: the `sum`, `min`, `max` or `count` over a collection or a
 //! grouping. A plan combines the members in the tree the graph keeps, so it
-//! gives the graph's total bit for bit.
+//! gives the graph's total bit for bit; a large total is cut into pieces of
+//! whole subtrees. A count is a whole number, which comes out as its `f64`.
+//! `choose` runs when its option number is the same in every scenario.
 //!
-//! A node that depends on a varied or shared input and holds a choice, a
-//! count, or work on text, whole numbers or decimals is refused when the
-//! plan is made, with its name. So is one that reads a node holding an
-//! error, even in a branch that is not taken.
+//! A node that depends on a varied or shared input and holds a list, a
+//! choice whose option number varies, or arithmetic on whole numbers, text
+//! or decimals is refused when the plan is made, with its name. So is one
+//! that reads a node holding an error, even in a branch that is not taken.
 
 mod fuse;
 mod keep;

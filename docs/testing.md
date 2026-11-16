@@ -56,6 +56,14 @@ proof:
   the plan's results to equal the graph's bit for bit. It runs against the
   CPU executor and, with `--features cuda`, against both GPU executors (the
   generated kernels and the general kernel).
+- `totals_give_what_the_graph_gives` builds 40 random totals (sum, minimum,
+  maximum and count) over members that vary, are shared, are fixed, or come
+  and go, and requires them bit for bit, on the CPU, in clusters and on the
+  GPU. It also passed with every total cut into pieces of two members, the
+  most pieces there can be (checked by hand, not in CI). Other tests run a
+  100,000-row total in pieces with no slot a row, counts of groups whose rows
+  change with the varied input, choices, and a 300-row lookup split into
+  nodes.
 - `exp`, `ln` and `pow` on the GPU are tested to a relative 10⁻¹⁴ of the CPU
   result, not to bit equality.
 - The larger examples assert bit equality between the graph and the plan on

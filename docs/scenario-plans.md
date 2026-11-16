@@ -23,7 +23,20 @@ in six steps.
    postfix program over slots, constants and shared values. A conditional
    evaluates both branches and selects; that matches the graph's lazy
    evaluation because nothing in the supported subset can fail. This step
-   runs on all cores.
+   runs on all cores. Then, one node at a time:
+   - **Constant folding.** Any part of a program that reads nothing varied
+     or shared is evaluated now, by running it, so the result is what the
+     program would give; a conditional whose condition is constant keeps
+     only the branch taken.
+   - **Choices.** `choose(index, options)` is translated as a chain of
+     conditionals on `index == k`. The index must be the same in every
+     scenario and in range (otherwise the plan refuses the node by name:
+     the graph would hold an error), so folding leaves only the option it
+     picks.
+   - **Splitting deep expressions.** A program that needs a deeper stack
+     than 32 is split: the operand that needs most becomes a node of its
+     own, read by the rest, until every piece fits. A spreadsheet lookup
+     written as hundreds of nested conditionals runs this way.
 4. **Levels.** A node's level is one more than the highest level it reads.
    Nodes in a level do not read each other, so a level can be evaluated in
    any order, or all at once.
@@ -39,7 +52,7 @@ exception: `set_shared` replaces their values without recompiling.
 
 ## Totals
 
-A total (`sum`, `min` or `max` of `f64` over a collection or a grouping) has
+A total (`sum`, `min`, `max` or `count` over a collection or a grouping) has
 no expression: the graph keeps a balanced binary tree of its members' partial
 results, with room for the next power of two, and updates only the paths
 above the members that changed. The tree's shape depends only on the number
@@ -51,8 +64,8 @@ each half is lowered the same way, down to the members:
 
 - Room no member holds, and a member absent in every scenario, hold the
   operation's identity (`-0.0` for a sum, `+∞` for a minimum, `-∞` for a
-  maximum). Combined with anything, the identity gives it back unchanged, so
-  such a half is left out.
+  maximum, 0 for a count). Combined with anything, the identity gives it back
+  unchanged, so such a half is left out.
 - A half whose members are the same in every scenario is combined when the
   plan is made, in the same order, into one constant.
 - A member present in only some scenarios is `when(present, value, identity)`.
@@ -60,25 +73,42 @@ each half is lowered the same way, down to the members:
   `AGG_MIN` and `AGG_MAX`, which do what the graph's totals do: a NaN wins, the
   left one first. (`MIN` and `MAX` let a number win over a NaN, as `f64::min`
   does; a total does not, so that its result does not depend on the tree.)
+- A count adds 1 for each member present: its member is its presence, 1.0 or
+  0.0, and the sum of whole numbers is exact in an `f64` up to 2^53. A count
+  comes out as the `f64` of the same number, can be compared, and can pick
+  the smaller or larger; adding to it is integer arithmetic, which plans do
+  not do.
 
-The result is the graph's total, bit for bit, on the CPU; a test checks forty
-random totals over members that vary, are shared, are fixed, or come and go.
+### Pieces
+
+A large total is cut into pieces: whole subtrees of the same number of
+members (a power of two, as many as keep a piece under about 512
+instructions, at most 256), each a node of its own. Pieces of pieces are
+cut the same way, and the total combines the top ones. Because each piece
+is a whole subtree of the graph's tree, the order of combining is the
+graph's, and the result is still the graph's bit for bit. The pieces of a
+level are one shape and short enough for a kernel each, so a GPU works them
+out side by side, one thread a piece a scenario, rather than one thread a
+total.
+
+### Members worked out in their piece
+
+A node read only by totals (typically a collection's column, read by its
+sum, minimum and maximum), and short (at most 24 instructions), gets no
+slot: each total that reads it works it out inside its piece. So a total
+over a million rows needs a slot a piece, not a slot a row. A column read by
+three totals is worked out three times; that is cheaper than writing a
+million values and reading them back.
+
 On a 1,000,000-row collection whose column reads the varied input, a plan of
-the sum and the maximum compiled in 0.9 s and ran a scenario in 7.3 ms on
-the CPU, where the graph took 130 ms to bring every row and both totals up
-to date.
+the sum and the maximum compiles in 0.8 s, needs 254 KB a scenario (31,750
+pieces, against 8 MB when every row had a slot) and runs a scenario in
+4.6 ms on the CPU on four cores (6 ms before pieces), where the graph takes
+130 ms to bring every row and both totals up to date.
 
-What it does not do yet:
-
-- **One node a total.** On a GPU, each scenario adds a total's members up in
-  one thread, one after another. A total longer than a kernel is worth
-  writing is run by the general kernel. Splitting the tree into nodes of a
-  fixed number of members (whole subtrees, so the order of adding is the
-  same) would spread the work over the GPU, and give those nodes one shape.
-- **Members are kept.** A member's value has a slot until the total reads
-  it, so a million-row total needs a million slots a scenario (8 MB).
-  Working each member's value out inside the total would need none.
-- **Counts** are whole numbers, which a plan does not give.
+The result is the graph's total, bit for bit: a test checks forty random
+totals over members that vary, are shared, are fixed, or come and go, with
+the pieces at their usual size and, separately, at two members.
 
 ## Memory reuse
 
