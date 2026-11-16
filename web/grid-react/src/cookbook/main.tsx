@@ -12,6 +12,7 @@ import { FirstGrid } from "./recipes/FirstGrid";
 import { FromAnApi } from "./recipes/FromAnApi";
 import { PagedApi } from "./recipes/PagedApi";
 import { EditAndSave } from "./recipes/EditAndSave";
+import { Money } from "./recipes/Money";
 import { WebSocketPrices } from "./recipes/WebSocketPrices";
 import { ServerSentEvents } from "./recipes/ServerSentEvents";
 import { EffectPrices } from "./recipes/EffectPrices";
@@ -25,6 +26,7 @@ const live: Record<string, { file: string; Run: ComponentType }> = {
   fetch: { file: "FromAnApi.tsx", Run: FromAnApi },
   paged: { file: "PagedApi.tsx", Run: PagedApi },
   save: { file: "EditAndSave.tsx", Run: EditAndSave },
+  money: { file: "Money.tsx", Run: Money },
   websocket: { file: "WebSocketPrices.tsx", Run: WebSocketPrices },
   sse: { file: "ServerSentEvents.tsx", Run: ServerSentEvents },
   effect: { file: "EffectPrices.tsx", Run: EffectPrices },

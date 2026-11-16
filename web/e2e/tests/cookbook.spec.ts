@@ -11,7 +11,7 @@ const COOKBOOKS = [
   { name: "Solid", path: "/grid/cookbook/", unmount: "/e2e/unmount-solid.html" },
   { name: "React", path: "/grid/react/cookbook/", unmount: "/e2e/unmount-react.html" },
 ];
-const RECIPES = ["first-grid", "fetch", "paged", "save", "websocket", "sse", "effect", "charts", "worker"];
+const RECIPES = ["first-grid", "fetch", "paged", "save", "money", "websocket", "sse", "effect", "charts", "worker"];
 
 /** A recipe's running example. */
 const live = (page: Page, id: string) => page.locator(`section#${id} .live`);
@@ -196,6 +196,25 @@ for (const { name, path, unmount } of COOKBOOKS) {
         await expect(recipe.getByRole("button", { name: "Discard" })).toBeDisabled();
         expect(net.api.patches).toEqual([]);
       });
+    });
+
+    test("money: decimals add up to the cent, and ordinary numbers do not", async ({ page }) => {
+      const recipe = live(page, "money");
+      // Each line's gross is net plus VAT at 20%, to the cent: 5.28, 0.36, 2.28, 8.16, 4.20, 2.88.
+      await expect(recipe).toContainText("To pay: €23.16");
+      await expect(recipe).toContainText("As numbers: 23.159999999999997");
+      await expect(await cell(recipe, "L1", "vat")).toHaveText("0.88");
+      await expect(await cell(recipe, "L1", "gross")).toHaveText("5.28");
+      // A quantity typed in is read as a decimal: 2 × 0.10, with VAT 0.04.
+      await typeInto(recipe, "L2", "qty", "2");
+      await expect(await cell(recipe, "L2", "gross")).toHaveText("0.24");
+      await expect(recipe).toContainText("To pay: €23.04");
+      // A cookie at 0.70: 0.84 with VAT.
+      await recipe.getByRole("button", { name: "Add a cookie" }).click();
+      await expect(await cell(recipe, "L7", "gross")).toHaveText("0.84");
+      await expect(recipe).toContainText("To pay: €23.88");
+      const asNumbers = (await recipe.locator(".bar").textContent())?.match(/As numbers: (\S+)/)?.[1];
+      expect(Number(asNumbers)).toBeCloseTo(23.88, 10);
     });
 
     test("WebSocket: rows and the gain follow the ticks", async ({ page, net }) => {

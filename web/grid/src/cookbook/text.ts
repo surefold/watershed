@@ -76,6 +76,22 @@ export const recipes: Recipe[] = [
     ],
   },
   {
+    id: "money",
+    title: "Money with decimal columns",
+    intro: [
+      "A <code>\"decimal\"</code> field holds an exact decimal, for money. <code>0.10 + 0.20</code> is <code>0.30</code>, a total is the sum to the cent, " +
+        "and rounding is done when you say, the way you say: here VAT is <code>round(net * 0.2d, 2)</code>, 20% to the cent. Decimals are given and read back as text " +
+        "(<code>\"1.10\"</code>), so JavaScript never rounds them on the way, and the grid formats them from the text.",
+      "The last column is the same amount as an ordinary number, <code>float(gross)</code>. Its total comes out a hair short: edit a quantity or a price, or add a cookie, and compare.",
+    ],
+    notes: [
+      "Formulas do not mix decimals and numbers, so nothing is rounded without you saying: <code>qty * price</code> needs both to be decimals, <code>0.2d</code> is a decimal literal, and <code>float(x)</code> turns a decimal into a number.",
+      "<code>total(column)</code> gives a decimal column's total as the nearest number, for charts and the like; <code>totalExact(column)</code> gives it as text, exactly, for showing and saving. <code>Intl.NumberFormat</code> formats that text exactly.",
+      "A decimal has 28 significant digits. <code>round(x, 2)</code> rounds a tie to the even cent; <code>round_half_up</code>, <code>round_down</code> and <code>round_up</code> round the other ways.",
+      "<code>putMany</code> takes a decimal column as strings; <code>put</code>, <code>set</code> and <code>patch</code> take a string for each.",
+    ],
+  },
+  {
     id: "websocket",
     title: "Prices over a WebSocket",
     intro: [
