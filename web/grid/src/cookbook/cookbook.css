@@ -4,6 +4,8 @@
 :root {
   --paper: #f2f5f4; --surface: #ffffff; --ink: #13242c; --muted: #56676e; --rule: #d3dcdc;
   --water: #1d6c88; --bad: #b9541f; --code: #f7f9f9;
+  /* Code tokens. */
+  --tk-comment: #6a7a80; --tk-keyword: #8a3ab9; --tk-string: #2b7a3d; --tk-number: #b0521a; --tk-func: #1d6c88; --tk-type: #9a6700; --tk-tag: #b42d4f; --tk-attr: #6f4ac0; --tk-punct: #56676e;
   --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
   --body: "Figtree", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -13,6 +15,7 @@
   :root {
     --paper: #0e161a; --surface: #142026; --ink: #e2eaeb; --muted: #94a4a9; --rule: #2a3c43;
     --water: #63b4d0; --bad: #f0894a; --code: #101b20;
+    --tk-comment: #7d8f95; --tk-keyword: #d19af5; --tk-string: #8fd49e; --tk-number: #f5a46b; --tk-func: #6fc3e0; --tk-type: #e7c06a; --tk-tag: #f58aa6; --tk-attr: #b9a3f5; --tk-punct: #94a4a9;
     color-scheme: dark;
   }
 }
@@ -66,3 +69,15 @@ button:hover:not(:disabled) { border-color: var(--water); }
 button:disabled { opacity: 0.5; cursor: default; }
 /* What a recipe sent to its API, newest first. */
 .live pre.log { margin: 0; max-height: 140px; font-size: 12px; color: var(--muted); }
+
+/* Syntax highlighting: Prism's token classes. */
+pre .token.comment, pre .token.prolog { color: var(--tk-comment); font-style: italic; }
+pre .token.keyword, pre .token.boolean, pre .token.builtin { color: var(--tk-keyword); }
+pre .token.string, pre .token.template-string, pre .token.attr-value, pre .token.char { color: var(--tk-string); }
+pre .token.number, pre .token.constant { color: var(--tk-number); }
+pre .token.function, pre .token.method { color: var(--tk-func); }
+pre .token.class-name, pre .token.maybe-class-name, pre .token.table, pre .token.section { color: var(--tk-type); }
+pre .token.tag { color: var(--tk-tag); }
+pre .token.attr-name, pre .token.property, pre .token.key { color: var(--tk-attr); }
+pre .token.punctuation, pre .token.operator { color: var(--tk-punct); }
+pre .token.template-punctuation, pre .token.interpolation-punctuation { color: var(--tk-keyword); }

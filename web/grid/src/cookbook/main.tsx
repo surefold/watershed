@@ -6,6 +6,7 @@ import { render } from "solid-js/web";
 import "@surefold/grid/grid.css";
 import "./cookbook.css";
 import { install, recipes } from "./text";
+import { highlight, type Language } from "./highlight";
 import { FirstGrid } from "./recipes/FirstGrid";
 import { FromAnApi } from "./recipes/FromAnApi";
 import { PagedApi } from "./recipes/PagedApi";
@@ -30,6 +31,15 @@ const live: Record<string, { file: string; run: () => JSX.Element }> = {
 
 const REPO = "https://github.com/surefold/watershed/blob/main/web/grid/src/cookbook/recipes/";
 
+/** A block of code, highlighted. */
+function Code(props: { text: string; language: Language }) {
+  return (
+    <pre>
+      <code innerHTML={highlight(props.text, props.language)} />
+    </pre>
+  );
+}
+
 function Source(props: { file: string }) {
   const text = sources[`./recipes/${props.file}`] ?? "";
   return (
@@ -39,7 +49,7 @@ function Source(props: { file: string }) {
         <button onClick={() => void navigator.clipboard?.writeText(text)}>Copy</button>
       </div>
       <pre>
-        <code>{text}</code>
+        <code innerHTML={highlight(text, "tsx")} />
       </pre>
     </>
   );
@@ -75,17 +85,17 @@ function Cookbook() {
           The packages are on GitHub Packages. Put this <code>.npmrc</code> beside your <code>package.json</code> (npm and Bun both read it), with a GitHub token that can read packages (a
           classic token with <code>read:packages</code>):
         </p>
-        <pre>{install.npmrc}</pre>
-        <pre>{install.solid}</pre>
+        <Code text={install.npmrc} language="ini" />
+        <Code text={install.solid} language="bash" />
         <p>
           Bun reads the same <code>.npmrc</code>. If your project keeps its settings in <code>bunfig.toml</code> instead:
         </p>
-        <pre>{install.bunfig}</pre>
+        <Code text={install.bunfig} language="toml" />
         <p>
           The engine is WebAssembly, loaded with a top-level <code>await</code>, so build for ES2022. With Vite:
         </p>
-        <pre>{install.vite}</pre>
-        <pre>{install.css}</pre>
+        <Code text={install.vite} language="typescript" />
+        <Code text={install.css} language="typescript" />
       </section>
 
       <For each={recipes}>

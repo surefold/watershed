@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import "@surefold/grid/grid.css";
 import "../../../grid/src/cookbook/cookbook.css";
 import { install, recipes } from "../../../grid/src/cookbook/text";
+import { highlight, type Language } from "../../../grid/src/cookbook/highlight";
 import { FirstGrid } from "./recipes/FirstGrid";
 import { FromAnApi } from "./recipes/FromAnApi";
 import { PagedApi } from "./recipes/PagedApi";
@@ -31,6 +32,15 @@ const live: Record<string, { file: string; Run: ComponentType }> = {
 
 const REPO = "https://github.com/surefold/watershed/blob/main/web/grid-react/src/cookbook/recipes/";
 
+/** A block of code, highlighted. */
+function Code({ text, language }: { text: string; language: Language }) {
+  return (
+    <pre>
+      <code dangerouslySetInnerHTML={{ __html: highlight(text, language) }} />
+    </pre>
+  );
+}
+
 function Source({ file }: { file: string }) {
   const text = sources[`./recipes/${file}`] ?? "";
   return (
@@ -40,7 +50,7 @@ function Source({ file }: { file: string }) {
         <button onClick={() => void navigator.clipboard?.writeText(text)}>Copy</button>
       </div>
       <pre>
-        <code>{text}</code>
+        <code dangerouslySetInnerHTML={{ __html: highlight(text, "tsx") }} />
       </pre>
     </>
   );
@@ -80,17 +90,17 @@ function Cookbook() {
           The packages are on GitHub Packages. Put this <code>.npmrc</code> beside your <code>package.json</code> (npm and Bun both read it), with a GitHub token that can read packages (a
           classic token with <code>read:packages</code>):
         </p>
-        <pre>{install.npmrc}</pre>
-        <pre>{install.react}</pre>
+        <Code text={install.npmrc} language="ini" />
+        <Code text={install.react} language="bash" />
         <p>
           Bun reads the same <code>.npmrc</code>. If your project keeps its settings in <code>bunfig.toml</code> instead:
         </p>
-        <pre>{install.bunfig}</pre>
+        <Code text={install.bunfig} language="toml" />
         <p>
           The engine is WebAssembly, loaded with a top-level <code>await</code>, so build for ES2022. With Vite:
         </p>
-        <pre>{install.vite}</pre>
-        <pre>{install.css}</pre>
+        <Code text={install.vite} language="typescript" />
+        <Code text={install.css} language="typescript" />
       </section>
 
       {recipes.map((r) => {
