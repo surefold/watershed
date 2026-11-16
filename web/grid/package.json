@@ -8,8 +8,8 @@
     "check": "tsc --noEmit -p ."
   },
   "dependencies": {
-    "@surefold/grid": "0.4.0",
-    "@surefold/grid-solid": "0.4.0",
+    "@surefold/grid": "0.5.0",
+    "@surefold/grid-solid": "0.5.0",
     "effect": "4.1.2",
     "prismjs": "^1.30.0",
     "solid-js": "^1.9.0"
