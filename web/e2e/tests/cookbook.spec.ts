@@ -85,6 +85,33 @@ for (const { name, path } of COOKBOOKS) {
       expect(net.api.lists).toHaveLength(asked);
     });
 
+    test("paged API: a page that fails to load is asked for again", async ({ page, net }) => {
+      // The browser logs the failed request.
+      net.allow(/500/);
+      // The second page fails once, then loads.
+      let failed = 0;
+      await page.route(/dummyjson\.com\/products\?.*skip=20/, async (route) => {
+        if (route.request().method() === "GET" && failed++ === 0) {
+          return route.fulfill({ status: 500, headers: { "access-control-allow-origin": "*" }, json: { message: "down" } });
+        }
+        return route.fallback();
+      });
+      await page.reload();
+      const recipe = live(page, "paged");
+      const body = recipe.locator(".wg-body");
+      await expect(async () => {
+        await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
+        await expect(recipe).toContainText("That page did not load", { timeout: 1000 });
+      }).toPass();
+      expect(failed).toBe(1);
+      // Scrolling again asks for it again, and the rest follow.
+      await expect(async () => {
+        await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
+        await expect(recipe).toContainText("50 of 50 products loaded", { timeout: 1000 });
+      }).toPass();
+      expect(failed).toBe(2);
+    });
+
     test.describe("edit and save", () => {
       test("one PATCH a changed row, with only its changed fields; undo makes a row clean", async ({ page, net }) => {
         const recipe = live(page, "save");
@@ -98,9 +125,14 @@ for (const { name, path } of COOKBOOKS) {
         await page.keyboard.press("ControlOrMeta+z");
         await expect(await cell(recipe, "3", "price")).toHaveText("12.00");
         await expect(save(recipe, 2)).toBeEnabled();
+        // The rows with something to save are marked (rowClass), and only they.
+        await expect(row(recipe, "1")).toHaveClass(/\bunsaved\b/);
+        await expect(row(recipe, "2")).toHaveClass(/\bunsaved\b/);
+        await expect(row(recipe, "3")).not.toHaveClass(/\bunsaved\b/);
 
         await save(recipe, 2).click();
         await expect(save(recipe, 0)).toBeDisabled();
+        await expect(recipe.locator(".wg-row.unsaved")).toHaveCount(0);
         expect(byId(net.api.patches)).toEqual([
           { id: "1", body: { price: 99, stock: 5 }, status: 200 },
           { id: "2", body: { title: "Renamed" }, status: 200 },

@@ -22,6 +22,26 @@ for (const kind of ["table", "worker"] as const) {
       expect(errors, "page and console errors").toEqual([]);
     });
 
+    test("a write, awaited, is in the totals and rows read after it", async ({ page }) => {
+      // With a WorkerTable the totals come from the worker: an awaited write
+      // resolves once they include it, so reading straight after sees it.
+      const read = await page.evaluate(async () => {
+        const t = window.fixture.table;
+        const seen: unknown[] = [];
+        await t.set("a", "qty", 100);
+        seen.push(t.total("qty"), t.size);
+        await t.put("e", { name: "Elderberry", qty: 5, price: 50 });
+        seen.push(t.total("qty"), t.size);
+        await t.drop("b");
+        seen.push(t.total("qty"), t.size);
+        return seen;
+      });
+      // 100 + 2 + 3 + 4; then with e's 5; then without b's 2.
+      expect(read).toEqual([109, 4, 114, 5, 112, 4]);
+      // Writes from code are not edits.
+      await expectEdits(page, []);
+    });
+
     test("typing into a cell, then undo and redo", async ({ page }) => {
       const grid = page.locator("#grid");
       await typeInto(grid, "a", "qty", "5");
