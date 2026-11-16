@@ -78,6 +78,8 @@ pre .token.number, pre .token.constant { color: var(--tk-number); }
 pre .token.function, pre .token.method { color: var(--tk-func); }
 pre .token.class-name, pre .token.maybe-class-name, pre .token.table, pre .token.section { color: var(--tk-type); }
 pre .token.tag { color: var(--tk-tag); }
+/* JavaScript inside a JSX tag ({…} in an attribute) is nested in the tag's token: give it the code's own colour, not the tag's. */
+pre .token.tag .token.script { color: var(--ink); }
 pre .token.attr-name, pre .token.property, pre .token.key { color: var(--tk-attr); }
 pre .token.punctuation, pre .token.operator { color: var(--tk-punct); }
 pre .token.template-punctuation, pre .token.interpolation-punctuation { color: var(--tk-keyword); }
