@@ -18,6 +18,7 @@ cargo run --release --example benchmark
 cd crates/watershed-py && uv sync && uv run pytest    # Python bindings
 web/build.sh                                          # WebAssembly pages; needs Node 20+, see the grid README
 npm run check                                         # TypeScript packages and pages, after web/build.sh
+npx playwright install chromium && npm run e2e        # browser tests of the grid's pages, after web/build.sh
 ```
 
 ## Before a pull request
@@ -31,6 +32,7 @@ cargo test --locked --workspace
 cargo doc --locked --workspace --no-deps
 cargo build --locked --release --target wasm32-unknown-unknown -p watershed-web
 web/build.sh && npm run check                    # the grid's TypeScript packages and pages
+npm run e2e                                      # browser tests (web/e2e), after web/build.sh
 ```
 
 CI has no GPU. If a change touches the GPU executor, run the `cuda` tests
