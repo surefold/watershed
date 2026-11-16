@@ -7,16 +7,15 @@ const API = "https://dummyjson.com/products";
 type Product = { title: string; price: number; stock: number };
 type Field = keyof Product;
 
-// Made outside the component so TypeScript keeps the field names and kinds.
-const makeProducts = () =>
-  new Table({
-    fields: { title: "text", price: "number", stock: "number" },
-    formulas: { value: "price * stock" },
-    totals: { stock: "sum", value: "sum" },
-  });
-
 export function EditAndSave() {
-  const products = useTable(makeProducts);
+  const products = useTable(
+    () =>
+      new Table({
+        fields: { title: "text", price: "number", stock: "number" },
+        formulas: { value: "price * stock" },
+        totals: { stock: "sum", value: "sum" },
+      }),
+  );
   // The rows as the server last had them, and the fields people changed since, by key (the product's id).
   const saved = useRef(new Map<string, Product>());
   const changed = useRef(new Map<string, Partial<Product>>());

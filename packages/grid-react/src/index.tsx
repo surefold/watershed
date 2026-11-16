@@ -9,7 +9,7 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
-import { drawGrid, type AnyGridTable, type AnyTable, type Change, type GridOptions, type GridView, type Group } from "@surefold/grid";
+import { drawGrid, type AnyGridTable, type Change, type GridOptions, type GridView, type Group } from "@surefold/grid";
 
 export interface GridProps extends Omit<GridOptions, "theme"> {
   table: AnyGridTable;
@@ -69,7 +69,10 @@ export const Grid = forwardRef<GridView | null, GridProps>(function Grid(props, 
  * A table made once for this component, freed when it goes. (Made outside a
  * component, a table lives as long as the page, and needs neither.)
  */
-export function useTable<T extends AnyTable>(make: () => T): T {
+// Typed by what it needs (dispose) rather than as AnyTable: a return type of
+// Table<any, any> would be the context for `new Table(…)` written inline, and
+// the table would lose its field and formula names.
+export function useTable<T extends { dispose(): void }>(make: () => T): T {
   const [table] = useState(make);
   const pending = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => {
