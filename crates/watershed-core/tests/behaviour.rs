@@ -928,6 +928,48 @@ fn a_collection_whose_rows_come_and_go_stays_the_size_of_the_rows_it_holds() -> 
 }
 
 #[test]
+fn groupings_by_the_same_key_share_their_membership_nodes() -> Result {
+    // A sum, a largest and a count of each region: one membership node a
+    // row between them, and each still adds up what it should.
+    let mut g = Graph::new();
+    let mut sales = Collection::new(&g, "sales");
+    let region = sales.field::<String>("region")?;
+    let amount = sales.field::<f64>("amount")?;
+    for i in 0..300 {
+        let row = [region.is(format!("r{}", i % 7)), amount.is(i as f64)];
+        sales.upsert(&mut g, &format!("s{i}"), &row)?;
+    }
+    g.stabilize();
+    let before = g.len();
+    let sums = sales.group_sum(&mut g, "sum", region, amount)?;
+    let after_one = g.len();
+    let largest = sales.group_max(&mut g, "largest", region, amount)?;
+    let counts = sales.group_count(&mut g, "count", region)?;
+    g.stabilize();
+    // The first grouping makes a membership node a row and a total a
+    // group; the others only their totals.
+    assert_eq!(after_one - before, 300 + 7);
+    assert_eq!(g.len() - after_one, 7 + 7);
+    // A row that moves leaves all three of its old group's totals.
+    sales.upsert(&mut g, "s0", &[region.is("r1".into())])?;
+    g.stabilize();
+    let r0: Vec<f64> = (7..300).step_by(7).map(f64::from).collect();
+    let total = |groups, key: &str| sales.group(&g, groups, key.to_string()).unwrap();
+    assert_eq!(g.get(total(sums, "r0"))?, r0.iter().sum::<f64>());
+    assert_eq!(g.get(total(largest, "r0"))?, 294.0);
+    assert_eq!(
+        g.get(sales.group(&g, counts, "r0".to_string()).unwrap())?,
+        42
+    );
+    assert_eq!(
+        g.get(sales.group(&g, counts, "r1".to_string()).unwrap())?,
+        44
+    );
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
 fn with_history_a_collection_keeps_its_rows_membership_nodes() -> Result {
     // An earlier update's group totals are explained by the members they
     // had then, so nothing is taken and the graph grows with the groups its

@@ -343,12 +343,13 @@ struct Group {
 }
 
 /// The most row-and-column pairs the graph is asked to keep group totals for
-/// when rows are first grouped by a column. A group total in the graph costs
-/// a node for each row in each totalled column, for each column ever grouped
-/// by, and the graph cannot give them back: 50,000 rows with six totals took
-/// about 175 MB per grouping column. Past this, the grid adds a group's
-/// totals up itself, over its rows, whenever they may have changed.
-const GROUP_BUDGET: usize = 100_000;
+/// when rows are first grouped by a column. Group totals in the graph cost a
+/// membership node for each row, shared by the totalled columns, and a
+/// member of a total for each row in each totalled column, for each column
+/// ever grouped by: 50,000 rows with six totals (300,000 pairs) took 74 MB
+/// per grouping column. Past this, the grid adds a group's totals up itself,
+/// over its rows, whenever they may have changed.
+const GROUP_BUDGET: usize = 300_000;
 
 /// The most rows noted as set between updates; past that the view is worked
 /// out from scratch, which is quicker by then anyway.

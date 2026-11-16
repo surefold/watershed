@@ -101,6 +101,9 @@ corresponding features were written. CI does not repeat them.
   group's member in place (the old group keeps counting the new row), or
   leave the node comparing with the old group's key (the new group never
   counts it). Both fail `collections_match_a_plain_map_added_up_from_scratch`.
+- When groupings share a membership node and one of them takes it for
+  another group, leave the member in the other groupings' old group's
+  total. It fails the same test.
 - Leave the links to a removed node in place.
 - Remove a node that something still uses.
 - Treat a decimal written differently (`1.50` for `1.5`) as no change.

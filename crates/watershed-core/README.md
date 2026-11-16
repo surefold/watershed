@@ -143,10 +143,14 @@ ever been: 100,000 edits through a 1,000-row window over 300 groups end with
 on, membership nodes are kept, so that an earlier update's group totals are
 still explained by the members they had.
 
-Each grouping (each totalled column) has its own membership nodes, so a
-grouping over many rows and many totalled columns is still expensive in
-memory; the [grid](../watershed-grid/README.md#grouping) falls back to
-summing groups outside the graph above a size budget for this reason. Nodes a grouping is built on cannot be removed, and in pull mode
+A collection's groupings by the same key share their membership nodes: a
+sum, a minimum and a count of each group (or the grid's six totalled
+columns) need one membership node a row between them, not one each. Each
+grouping still has its own totals, with a member for each row. Six totals
+over 50,000 rows grouped by one column take 74 MB and 0.4 s to set up, where
+they took 226 MB and 1.4 s with a membership node a row for each total. The
+[grid](../watershed-grid/README.md#grouping) still falls back to summing
+groups outside the graph above a size budget. Nodes a grouping is built on cannot be removed, and in pull mode
 they are always calculated.
 
 ## Exact decimals

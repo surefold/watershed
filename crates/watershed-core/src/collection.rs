@@ -684,7 +684,10 @@ impl Collection {
         // A row's membership node (present and key == group) sits one above
         // its key: at height 1 for a field.
         .max(self.height_of(g, by) + 1);
-        let keyed = g.keyed_groups(&self.name, name, op, value_type, height);
+        // A grouping by a key another grouping uses already shares its
+        // membership nodes.
+        let share = self.groupings.iter().find(|x| x.by == by).map(|x| x.keyed);
+        let keyed = g.keyed_groups(&self.name, name, op, value_type, height, share);
         self.groupings.push(Grouping {
             name: name.to_string(),
             by,

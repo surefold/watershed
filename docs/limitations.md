@@ -53,9 +53,10 @@ of the graph as it was when compiled.
 - `remove` frees a node's name, its work and what it held, but not its
   slot (some tens of bytes), since ids are never reissued. A removed
   collection row's nodes, its group membership nodes among them, are reused
-  by the next new row (with history on, membership nodes are kept). Each
-  totalled column of a grouping has its own membership node a row, so
-  groupings with many totals over large tables are memory-intensive.
+  by the next new row (with history on, membership nodes are kept). A
+  grouping in the graph costs a membership node a row (shared by the
+  groupings by one key) and a member of a total a row and totalled column:
+  74 MB for 50,000 rows with six totals.
 - `redefine` and `remove` cause the next update to rebuild the graph's
   reverse links, in time proportional to graph size.
 - In pull mode, nodes that a collection grouping is built on are always
