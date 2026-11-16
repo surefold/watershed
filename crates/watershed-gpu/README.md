@@ -56,13 +56,18 @@ Numbers (`f64`) and yes-or-no values: arithmetic, `min`, `max`, `abs`, `exp`,
 branches of a condition are worked out and one is kept, which gives the
 same answer as the graph because none of these can fail.
 
-A node that depends on a varied or shared input and holds a choice
-(`choose`), a list, a total (a collection's `sum` and the like), or work on
-text, whole numbers or decimals is refused when the plan is made, with its
-name. So is a node that reads one holding an error, and an expression that
-needs a stack deeper than 32. A model that uses collections, decimals or
-`choose` therefore has to be written without them to run as scenarios; the
-examples here add up with their own trees of sums.
+Totals too: a collection's or a grouping's `sum`, `min`, `max` and
+`count`, combined in the tree the graph keeps, so bit for bit the graph's,
+and cut into pieces a GPU works out side by side
+([docs/scenario-plans.md](../../docs/scenario-plans.md#totals)). A count is a
+whole number: it comes out as its `f64`, and can be compared. `choose` runs
+when its option number is the same in every scenario. An expression nested
+too deeply for one node's stack is split into several.
+
+A node that depends on a varied or shared input and holds a list, a choice
+whose option number varies, or arithmetic on whole numbers, text or decimals
+is refused when the plan is made, with its name. So is a node that reads one
+holding an error.
 
 That results match the graph is established by tests
 ([docs/testing.md](../../docs/testing.md#scenario-plans-against-the-graph)),

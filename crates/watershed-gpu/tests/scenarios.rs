@@ -2,7 +2,7 @@
 //! inputs on the graph, update it, and read the outputs.
 
 use watershed_core::prelude::*;
-use watershed_core::{AggregateOp, Collection, NodeId, Type, Value, text, when};
+use watershed_core::{AggregateOp, Collection, NodeId, Type, Value, choose, text, when};
 use watershed_gpu::{PlanError, Scenarios};
 
 /// A small deterministic random number generator, so every run is the same.
@@ -123,6 +123,8 @@ fn by_the_graph(
         for &id in outputs {
             match g.value(id) {
                 Value::F64(x) => results.push(*x),
+                // A whole number (a count) comes out of a plan as its f64.
+                Value::I64(x) => results.push(*x as f64),
                 other => panic!("{} is {other}", g.name(id)),
             }
         }
@@ -353,7 +355,7 @@ fn what_cannot_be_done_is_refused_by_name() {
     ));
 }
 
-/// Forty random totals (a sum, a minimum and a maximum of the same members),
+/// Forty random totals (a sum, a minimum, a maximum and a count of the same members),
 /// each over up to seventy members whose values are varied, shared or the
 /// same always, and which are present always, never, or in only some
 /// scenarios. The plan must give the graph's totals bit for bit: it combines
@@ -399,7 +401,12 @@ fn totals_give_what_the_graph_gives_in(
             };
             members.push((value, present));
         }
-        let ops = [AggregateOp::Sum, AggregateOp::Min, AggregateOp::Max];
+        let ops = [
+            AggregateOp::Sum,
+            AggregateOp::Min,
+            AggregateOp::Max,
+            AggregateOp::Count,
+        ];
         let mut outputs: Vec<NodeId> = ops
             .iter()
             .map(|&op| {
@@ -514,11 +521,169 @@ fn a_collections_totals_run_as_a_plan_and_can_be_read_by_what_follows() {
     let back = Scenarios::load(&file[..]).unwrap();
     assert_same("read back", &back.run_cpu(&inputs), &want);
 
-    // A count is a whole number, which a plan does not give.
-    assert!(matches!(
-        Scenarios::new(&g, &[fx.id()], &[count.id()]),
-        Err(PlanError::NotAFloat { .. })
-    ));
+    // A count is a whole number, which comes out as its f64. Here no row
+    // comes or goes with `fx`, so it is the same in every scenario.
+    let plan = Scenarios::new(&g, &[fx.id()], &[count.id()]).unwrap();
+    assert_eq!(plan.run_cpu(&[0.5, 2.0]), [999.0, 999.0]);
+}
+
+#[test]
+fn a_large_total_is_worked_out_in_pieces_and_keeps_no_member() {
+    // 100,000 rows. Each line is read only by the three totals, so it is
+    // worked out inside them rather than kept, and each total is cut into
+    // pieces of whole subtrees, short enough for a kernel each.
+    let rows = 100_000;
+    let (mut g, fx, outputs) = orders(rows);
+    let plan = Scenarios::new(&g, &[fx.id()], &outputs).unwrap();
+    let inputs = [0.5, 1.0, -3.0, f64::NAN, 0.0, -0.0, 1e300, 7.25];
+    let want = by_the_graph(&mut g, &[fx], &outputs, &inputs);
+    assert_same("a large total", &plan.run_cpu(&inputs), &want);
+    // Pieces of a total, not one node each; and far fewer slots than rows.
+    assert!(plan.nodes() > 3 * 100, "{} nodes", plan.nodes());
+    assert!(
+        plan.bytes_per_scenario() < rows * 8 / 10,
+        "{} bytes a scenario",
+        plan.bytes_per_scenario()
+    );
+    // Read back from a file, it gives the same.
+    let mut file = Vec::new();
+    plan.save(&mut file).unwrap();
+    let back = Scenarios::load(&file[..]).unwrap();
+    assert_same("read back", &back.run_cpu(&inputs), &want);
+}
+
+/// Orders grouped by whether their line is over 40, which changes with
+/// `fx`: per group, how many there are and their sum, and what is made from
+/// them, a count among it.
+fn grouped_by_a_varied_column() -> (Graph, Input<f64>, Node<i64>, Vec<NodeId>) {
+    let mut g = Graph::new();
+    let fx = g.input("fx", 1.0).unwrap();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty").unwrap();
+    let price = orders.field::<f64>("price").unwrap();
+    let line = orders.column(&mut g, "line", qty * price * fx).unwrap();
+    let big = orders.column(&mut g, "big", line.gt(40.0)).unwrap();
+    let counts = orders.group_count(&mut g, "how many", big).unwrap();
+    let sums = orders.group_sum(&mut g, "worth", big, line).unwrap();
+    for i in 0..300 {
+        let row = [
+            qty.is((i % 13) as f64 + 0.5),
+            price.is(1.0 + (i % 7) as f64),
+        ];
+        orders.upsert(&mut g, &format!("o{i}"), &row).unwrap();
+    }
+    // Some scenarios put every row in one group, so both groups are made.
+    g.set(fx, 1000.0).unwrap();
+    g.stabilize();
+    g.set(fx, 0.001).unwrap();
+    g.stabilize();
+    g.set(fx, 1.0).unwrap();
+    g.stabilize();
+    let many = orders.group(&g, counts, true).unwrap();
+    let few = orders.group(&g, counts, false).unwrap();
+    let worth = orders.group(&g, sums, true).unwrap();
+    // Compared, and the smaller taken, as whole numbers.
+    let mostly_big = g.define("mostly big", many.gt(few)).unwrap();
+    let smaller = g.define("smaller group", many.min(few)).unwrap();
+    let average = g
+        .define(
+            "average big",
+            when(mostly_big).then(worth / 2.0).otherwise(fx),
+        )
+        .unwrap();
+    g.stabilize();
+    let outputs = vec![many.id(), few.id(), smaller.id(), worth.id(), average.id()];
+    (g, fx, many, outputs)
+}
+
+#[test]
+fn a_count_gives_what_the_graph_gives() {
+    let (mut g, fx, _, outputs) = grouped_by_a_varied_column();
+    let plan = Scenarios::new(&g, &[fx.id()], &outputs).unwrap();
+    let inputs = [0.5, 1.0, -3.0, f64::NAN, 0.0, 2.5, 1e300, 7.25, 0.01];
+    let want = by_the_graph(&mut g, &[fx], &outputs, &inputs);
+    // The groups' counts do change from one scenario to another.
+    let many: Vec<f64> = want.iter().step_by(outputs.len()).copied().collect();
+    assert!(many.iter().any(|&n| n != many[0]), "{many:?}");
+    assert_same("counts", &plan.run_cpu(&inputs), &want);
+    assert_same(
+        "counts in clusters",
+        &Scenarios::with_clusters(&g, &[fx.id()], &[], &outputs)
+            .unwrap()
+            .run_cpu(&inputs),
+        &want,
+    );
+}
+
+#[test]
+fn a_choice_by_a_number_the_same_in_every_scenario_takes_that_option() {
+    let mut g = Graph::new();
+    let a = g.input("a", 1.0).unwrap();
+    let b = g.input("b", 2.0).unwrap();
+    let source = g.input("source", 1_i64).unwrap();
+    let picked = g
+        .define("picked", choose(source, [a * 2.0, a + b, b * b]))
+        .unwrap();
+    let after = g.define("after", picked * 10.0 + a).unwrap();
+    g.stabilize();
+    let outputs = [picked.id(), after.id()];
+    for k in 0..3_i64 {
+        g.set(source, k).unwrap();
+        g.stabilize();
+        let plan = Scenarios::with_shared(&g, &[a.id()], &[b.id()], &outputs).unwrap();
+        let inputs = [0.5, -1.0, f64::NAN, 3.0];
+        let want = by_the_graph(&mut g, &[a], &outputs, &inputs);
+        assert_same(&format!("option {k}"), &plan.run_cpu(&inputs), &want);
+    }
+
+    // Out of range, the node holds an error in every scenario.
+    g.set(source, 3).unwrap();
+    g.stabilize();
+    let refused = Scenarios::new(&g, &[a.id()], &outputs).unwrap_err();
+    assert!(
+        matches!(&refused, PlanError::HoldsError { node, .. } if node == "picked"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_choice_by_a_number_that_varies_is_refused_by_name() {
+    // Which option a count picks changes with `fx`; the graph would hold an
+    // error in some scenarios, which a plan cannot.
+    let (mut g, fx, many, _) = grouped_by_a_varied_column();
+    let picked = g
+        .define("picked", choose(many, [fx * 1.0, fx * 2.0]))
+        .unwrap();
+    g.stabilize();
+    let refused = Scenarios::new(&g, &[fx.id()], &[picked.id()]).unwrap_err();
+    assert!(
+        matches!(&refused, PlanError::Unsupported { node, what } if node == "picked" && what.contains("varies")),
+        "{refused}"
+    );
+}
+
+#[test]
+fn an_expression_deeper_than_the_stack_is_split_into_nodes() {
+    // A lookup into a table of 300 rows, as a spreadsheet's VLOOKUP is
+    // written: each row a condition around the rows after it, which needs a
+    // stack two deeper a row.
+    let mut g = Graph::new();
+    let x = g.input("x", 1.0).unwrap();
+    let mut found: Expr<f64> = f64::NAN.into_expr();
+    for row in (0..300).rev() {
+        let key = row as f64 * 0.5;
+        found = when(x.ge(key)).then(key * key + 1.0).otherwise(found);
+    }
+    let lookup = g.define("lookup", found).unwrap();
+    let after = g.define("after", lookup * x).unwrap();
+    g.stabilize();
+    let outputs = [lookup.id(), after.id()];
+    let plan = Scenarios::new(&g, &[x.id()], &outputs).unwrap();
+    // About fifteen rows a node: each row needs two more of the stack.
+    assert!((15..=30).contains(&plan.nodes()), "{} nodes", plan.nodes());
+    let inputs = [-1.0, 0.0, 0.25, 0.5, 7.0, 149.5, 1000.0, f64::NAN];
+    let want = by_the_graph(&mut g, &[x], &outputs, &inputs);
+    assert_same("a deep lookup", &plan.run_cpu(&inputs), &want);
 }
 
 /// Needs an NVIDIA GPU and the CUDA libraries: `cargo test --features cuda`.
@@ -570,20 +735,57 @@ mod on_the_gpu {
     }
 
     #[test]
-    fn a_total_too_long_for_its_own_kernel_is_run_by_the_general_one() {
-        // 2,000 rows: each total is one node of about 4,000 instructions,
-        // longer than a shape gets a kernel written for.
-        let (mut g, fx, outputs) = orders(2000);
+    fn a_large_total_is_worked_out_in_pieces_on_the_gpu() {
+        // 100,000 rows: each total is pieces of whole subtrees, each short
+        // enough for a kernel of its own, worked out side by side.
+        let (mut g, fx, outputs) = orders(100_000);
         let plan = Scenarios::new(&g, &[fx.id()], &outputs).unwrap();
         let inputs = [0.5, 1.0, -3.0, f64::NAN, 0.0, -0.0, 1e300, 7.25];
         let want = by_the_graph(&mut g, &[fx], &outputs, &inputs);
         let gpu = Gpu::new().unwrap();
         assert_same(
-            "a long total on the GPU",
+            "a large total on the GPU",
             &gpu.run(&plan, &inputs).unwrap(),
             &want,
         );
-        assert_same("a long total on the CPU", &plan.run_cpu(&inputs), &want);
+        let clusters = Scenarios::with_clusters(&g, &[fx.id()], &[], &outputs).unwrap();
+        assert_same("in clusters", &gpu.run(&clusters, &inputs).unwrap(), &want);
+    }
+
+    #[test]
+    fn on_the_gpu_a_count_gives_what_the_graph_gives() {
+        let (mut g, fx, _, outputs) = grouped_by_a_varied_column();
+        let plan = Scenarios::new(&g, &[fx.id()], &outputs).unwrap();
+        let inputs = [0.5, 1.0, -3.0, f64::NAN, 0.0, 2.5, 1e300, 7.25, 0.01];
+        let want = by_the_graph(&mut g, &[fx], &outputs, &inputs);
+        let gpu = Gpu::new().unwrap();
+        assert_same(
+            "counts on the GPU",
+            &gpu.run(&plan, &inputs).unwrap(),
+            &want,
+        );
+    }
+
+    #[test]
+    fn on_the_gpu_a_deep_expression_split_into_nodes_gives_what_the_graph_gives() {
+        let mut g = Graph::new();
+        let x = g.input("x", 1.0).unwrap();
+        let mut found: Expr<f64> = f64::NAN.into_expr();
+        for row in (0..300).rev() {
+            let key = row as f64 * 0.5;
+            found = when(x.ge(key)).then(key * key + 1.0).otherwise(found);
+        }
+        let lookup = g.define("lookup", found).unwrap();
+        g.stabilize();
+        let plan = Scenarios::new(&g, &[x.id()], &[lookup.id()]).unwrap();
+        let inputs = [-1.0, 0.0, 0.25, 0.5, 7.0, 149.5, 1000.0, f64::NAN];
+        let want = by_the_graph(&mut g, &[x], &[lookup.id()], &inputs);
+        let gpu = Gpu::new().unwrap();
+        assert_same(
+            "a deep lookup on the GPU",
+            &gpu.run(&plan, &inputs).unwrap(),
+            &want,
+        );
     }
 
     #[test]

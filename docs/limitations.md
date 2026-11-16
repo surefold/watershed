@@ -13,8 +13,8 @@ it contains.
 
 | | Constructs | In a model meant for both |
 |---|---|---|
-| Both patterns | `f64` and `bool` nodes: `+ - * /`, `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, comparisons, and/or/not, conditionals (`when`); `sum`, `min` and `max` totals of `f64` over a collection or a grouping | Use directly |
-| Incremental only; could be lowered to a plan, not implemented | `count` totals (whole numbers); `choose`; a table looked up by a value that varies per scenario; `i64` arithmetic | Counts: a `sum` of a column that is `1.0`. `choose` and lookups: nested conditionals, or the looked-up value fixed per entity when the graph is built. Integers: `f64` |
+| Both patterns | `f64` and `bool` nodes: `+ - * /`, `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, comparisons, and/or/not, conditionals (`when`), however deeply nested; `sum`, `min`, `max` and `count` totals over a collection or a grouping; a count compared, or the smaller or larger of two taken; `choose` whose option number is the same in every scenario | Use directly. A lookup by a value that varies per scenario is nested conditionals, as the spreadsheet example writes `VLOOKUP` |
+| Incremental only; could be lowered to a plan, not implemented | `i64` arithmetic (adding to a count, say); `choose` whose option number varies per scenario | Integers: `f64`. A varying choice: nested conditionals |
 | Incremental only | Exact decimals, text and lists of text, errors as values | No equivalent. `f64` in place of a decimal gives up exactness |
 
 A plan refuses an unsupported node when it is compiled, naming the node, so
@@ -32,11 +32,8 @@ of the graph as it was when compiled.
   except that a NaN may carry a different payload, `min`/`max` of `0.0` and
   `-0.0` follow x86-64, and `exp`, `ln` and `pow` may differ in the last one
   or two digits. This is established by tests, not by proof.
-- An expression that needs an evaluation stack deeper than 32 is refused.
-- A total is worked out in one node of the plan, so on a GPU each scenario
-  adds its members up in one thread, and every member's value is kept until
-  the total has read it. A large total runs, but uses the GPU poorly and
-  takes a slot a member ([Totals](scenario-plans.md#totals)).
+- A lookup written as nested conditionals evaluates every row, in pieces
+  of about fifteen rows a node, rather than searching the table.
 - A conditional evaluates both branches in a plan and selects one, which
   matches the graph only because nothing in the supported subset can fail.
 - Loops are unrolled when the graph is built, so step counts are fixed.
