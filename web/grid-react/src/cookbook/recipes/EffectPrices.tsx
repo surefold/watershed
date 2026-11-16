@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Duration, Effect, Fiber, Queue, Schedule, Stream } from "effect";
+import { Duration, Effect, Fiber, Schedule, Stream } from "effect";
+import { Socket } from "effect/socket";
 import { Table } from "@surefold/grid";
 import { Grid, useTable, useTotal } from "@surefold/grid-react";
 
@@ -21,27 +22,24 @@ const isTicker = (message: { type?: string; product_id?: string }): message is T
  * nothing of React or the table, and nothing happens until it is run.
  */
 function livePrices(say: (status: string) => void, write: (batch: readonly Ticker[]) => void) {
-  // One connection, as a stream of its messages. The socket opens when the stream
-  // starts and is closed when the stream ends, fails or is interrupted. When the
-  // server closes it, the stream fails, so that `retry` below opens another.
-  const connection = Stream.callback<{ type?: string }, Error>((queue) =>
+  // One connection, as a stream of its messages. Effect's Socket dials when the
+  // reader is acquired and closes the socket when the stream ends, fails or is
+  // interrupted. Every close fails the stream (the server's included), so that
+  // `retry` below dials again. What runs between dialling and the first read
+  // runs once a connection: here, the subscription.
+  const connection = Stream.unwrap(
     Effect.gen(function* () {
-      const socket = yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          say("Connecting…");
-          return new WebSocket(FEED);
-        }),
-        (socket) => Effect.sync(() => socket.close()),
+      say("Connecting…");
+      const socket = yield* Socket.makeWebSocket(FEED);
+      const read = yield* Socket.readerString(socket); // dials, and waits for the socket to open
+      const { write: send } = yield* socket.writer;
+      yield* send(JSON.stringify({ type: "subscribe", product_ids: Object.keys(HOLDINGS), channels: ["ticker"] }));
+      say("Live");
+      // Each read is the frames that came in together; one message a frame.
+      return Stream.fromEffectRepeat(read).pipe(
+        Stream.flattenIterable,
+        Stream.map((text) => JSON.parse(text) as { type?: string; product_id?: string }),
       );
-      socket.onopen = () => {
-        say("Live");
-        socket.send(JSON.stringify({ type: "subscribe", product_ids: Object.keys(HOLDINGS), channels: ["ticker"] }));
-      };
-      socket.onmessage = (event) => Queue.offerUnsafe(queue, JSON.parse(event.data as string));
-      // Wait for the socket to close (a failed connection closes too).
-      yield* Effect.callback<never, Error>((resume) => {
-        socket.onclose = (event) => resume(Effect.fail(new Error(`Closed with code ${event.code}`)));
-      });
     }),
   );
 
@@ -59,6 +57,7 @@ function livePrices(say: (status: string) => void, write: (batch: readonly Ticke
     Stream.filter(isTicker),
     Stream.groupedWithin(500, "50 millis"), // what came in 50 ms (or 500 messages), as one array
     Stream.runForEach((batch) => Effect.sync(() => write(batch))),
+    Effect.provide(Socket.layerWebSocketConstructorGlobal), // the browser's WebSocket
   );
 }
 
