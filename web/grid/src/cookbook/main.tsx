@@ -57,20 +57,7 @@ function Source(props: { file: string }) {
 
 function Cookbook() {
   return (
-    <div class="page">
-      <header>
-        <h1>
-          Watershed <span>Grid</span> cookbook
-        </h1>
-        <p>
-          Small, whole examples of the grid in an app: a first table, rows from an API, pages loaded as you scroll, edits saved back to an API, live updates over a WebSocket or SSE, charts that follow the table, and a large table in a worker. Each one runs
-          here, and the code under it is the file that runs. <a href="../">Back to the grid</a>.
-        </p>
-        <div class="switch" aria-label="Framework">
-          <span>Solid</span>
-          <a href="../react/cookbook/">React</a>
-        </div>
-      </header>
+    <>
 
       <nav class="toc" aria-label="Recipes">
         <a href="#setup">Setting up</a>
@@ -122,8 +109,9 @@ function Cookbook() {
           <code>WorkerTable</code>, and <a href="https://github.com/surefold/watershed/tree/main/web/grid/src/App.tsx">its source</a> shows streaming, looking back and adding columns as it runs.
         </p>
       </section>
-    </div>
+    </>
   );
 }
 
-render(() => <Cookbook />, document.body);
+// The page's header is in its HTML, so it shows before this runs; the recipes go under it.
+render(() => <Cookbook />, document.getElementById("cookbook")!);

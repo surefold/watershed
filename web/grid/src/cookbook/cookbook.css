@@ -3,7 +3,7 @@
    takes these colours. */
 :root {
   --paper: #f2f5f4; --surface: #ffffff; --ink: #13242c; --muted: #56676e; --rule: #d3dcdc;
-  --water: #1d6c88; --bad: #b9541f; --code: #f7f9f9;
+  --water: #1d6c88; --bad: #b9541f; --code-bg: #f7f9f9;
   /* Code tokens. */
   --tk-comment: #6a7a80; --tk-keyword: #8a3ab9; --tk-string: #2b7a3d; --tk-number: #b0521a; --tk-func: #1d6c88; --tk-type: #9a6700; --tk-tag: #b42d4f; --tk-attr: #6f4ac0; --tk-punct: #56676e;
   --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
@@ -14,7 +14,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --paper: #0e161a; --surface: #142026; --ink: #e2eaeb; --muted: #94a4a9; --rule: #2a3c43;
-    --water: #63b4d0; --bad: #f0894a; --code: #101b20;
+    --water: #63b4d0; --bad: #f0894a; --code-bg: #101b20;
     --tk-comment: #7d8f95; --tk-keyword: #d19af5; --tk-string: #8fd49e; --tk-number: #f5a46b; --tk-func: #6fc3e0; --tk-type: #e7c06a; --tk-tag: #f58aa6; --tk-attr: #b9a3f5; --tk-punct: #94a4a9;
     color-scheme: dark;
   }
@@ -44,7 +44,7 @@ section > p { margin: 0 0 10px; max-width: 78ch; }
 section ul { margin: 6px 0 12px; padding-left: 20px; max-width: 80ch; color: var(--muted); font-size: 14px; }
 section li { margin: 4px 0; }
 
-pre { margin: 10px 0; padding: 14px 16px; background: var(--code); border: 1px solid var(--rule); border-radius: 10px; overflow: auto; line-height: 1.5; tab-size: 2; }
+pre { margin: 10px 0; padding: 14px 16px; background: var(--code-bg); border: 1px solid var(--rule); border-radius: 10px; overflow: auto; line-height: 1.5; tab-size: 2; }
 .file + pre { max-height: 560px; }
 details { margin: 8px 0; }
 details > summary { cursor: pointer; font-weight: 600; font-size: 14px; color: var(--water); }
@@ -78,6 +78,8 @@ pre .token.number, pre .token.constant { color: var(--tk-number); }
 pre .token.function, pre .token.method { color: var(--tk-func); }
 pre .token.class-name, pre .token.maybe-class-name, pre .token.table, pre .token.section { color: var(--tk-type); }
 pre .token.tag { color: var(--tk-tag); }
+/* JavaScript inside a JSX tag ({…} in an attribute) is nested in the tag's token: give it the code's own colour, not the tag's. */
+pre .token.tag .token.script { color: var(--ink); }
 pre .token.attr-name, pre .token.property, pre .token.key { color: var(--tk-attr); }
 pre .token.punctuation, pre .token.operator { color: var(--tk-punct); }
 pre .token.template-punctuation, pre .token.interpolation-punctuation { color: var(--tk-keyword); }
