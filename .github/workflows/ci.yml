@@ -137,5 +137,10 @@ jobs:
       # Builds the engine into packages/grid/pkg and both pages with Vite.
       - run: web/build.sh
       - run: npm run check
+      # Browser tests (web/e2e): onEdit with a Table and a WorkerTable, every
+      # cookbook recipe in Solid and React, and both grid pages, in Chromium,
+      # with every outside service mocked.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
       # What the publish workflow builds: each package's dist/, with its types.
       - run: npm run build:packages
