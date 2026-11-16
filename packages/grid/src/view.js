@@ -64,6 +64,7 @@ export class GridView {
     this.theme = options.theme ?? "";
     this.formats = options.columns ?? {};
     this.loadMore = options.loadMore ?? null;
+    this.rowClass = options.rowClass ?? null;
     this.onStatus = options.onStatus ?? (() => {});
     this.onFocus = options.onFocus ?? (() => {});
     this.onGroup = options.onGroup ?? (() => {});
@@ -906,6 +907,11 @@ export class GridView {
     return report;
   }
 
+  /** Draws the rows in view again, asking `rowClass` for their classes: for when they have changed. */
+  redrawRows() {
+    if (!this.destroyed) this.draw();
+  }
+
   schedule() {
     cancelAnimationFrame(this.frame);
     this.frame = requestAnimationFrame(() => this.draw());
@@ -983,11 +989,15 @@ export class GridView {
     if (this.editing?.row === row && this.editing.key !== data.k) this.stopEdit(false, 0, true);
     row._line = line;
     row._data = data;
+    // The app's classes for the row, by its key: asked for each time it is drawn,
+    // so they follow the row as it scrolls and moves.
+    const own = !group && this.rowClass ? this.rowClass(data.k) : "";
     row.className =
       "wg-row" +
       (group ? " wg-group" : "") +
       (line % 2 ? " wg-odd" : "") +
-      (!group && this.selected.has(data.k) ? " wg-selected" : "");
+      (!group && this.selected.has(data.k) ? " wg-selected" : "") +
+      (own ? ` ${own}` : "");
     const cells = row._cells;
     const first = cells[0];
     const label = group ? `${data.g || "(blank)"} ${data.n}` : data.k;

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Table, type Edits } from "@surefold/grid";
+import { Table, type Edits, type GridView } from "@surefold/grid";
 import { Grid, useTable } from "@surefold/grid-react";
 
 // DummyJSON answers a PATCH as if it had saved it, but keeps nothing: fetch again and the old values are back.
@@ -22,8 +22,13 @@ export function EditAndSave() {
   const [unsaved, setUnsaved] = useState<[string, Partial<Product>][]>([]);
   const [saving, setSaving] = useState(false);
   const [log, setLog] = useState<string[]>([]);
+  const view = useRef<GridView>(null);
   const say = (line: string) => setLog((l) => [line, ...l].slice(0, 6));
-  const show = () => setUnsaved([...changed.current].map(([key, fields]) => [key, { ...fields }]));
+  // Show what is unsaved, above the grid and on its rows (rowClass, below).
+  const show = () => {
+    setUnsaved([...changed.current].map(([key, fields]) => [key, { ...fields }]));
+    view.current?.redrawRows();
+  };
 
   // The grid says what a person changed: typing, pasting, filling a block,
   // undoing. Changes made from code (loading, discarding) are not reported.
@@ -108,9 +113,11 @@ export function EditAndSave() {
         </span>
       </div>
       <Grid
+        ref={view}
         className="grid"
         table={products}
         onEdit={onEdit}
+        rowClass={(key) => (changed.current.has(key) ? "unsaved" : undefined)}
         keyColumn={{ title: "id", width: 70 }}
         columns={{ title: { width: 260 }, stock: { decimals: 0 } }}
       />

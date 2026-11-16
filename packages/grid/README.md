@@ -117,6 +117,7 @@ and returns the view. Options:
 | `columns` | How each column looks, by name: `decimals`, `signed` (colour by sign), `width`, and `trend` (how the cell moved; needs `history`). |
 | `theme` | One of `themes` (light, dark, paper, dusk, terminal, high contrast), or a `[data-wg-theme="name"]` rule of your own. With none, it takes the page's colours. |
 | `loadMore` | `async () => boolean`, called as the person nears the end: add rows to the table, and resolve to whether there may be more. If it throws, `onError` gets the message, `onStatus` gets `{ failed: true, error }`, and it is called again on the next scroll near the end (or `view.fetchMore()`). |
+| `rowClass` | `(key) => string \| undefined`: classes to give a row, such as `"unsaved"`, for your own CSS. Called each time a row is drawn, so the classes follow the row as people scroll and sort. When what it would give changes, call `view.redrawRows()`. Works the same for a `Table` and a `WorkerTable`. |
 | `onStatus`, `onFocus`, `onGroup`, `onError`, `onNote` | What happened: each recalculation and its cost, the cell the person is on, grouping, and messages to show them. |
 | `onEdit` | What a person changed: `{ cause, cells, removed }`, with each cell's `key`, `column`, `before` and `after`, and the keys of rows they deleted. Not called for changes made from code, so an app can save what people did. |
 
@@ -126,7 +127,8 @@ filter (`setSort`, `setFilter`, `setQuickFilter`, the same as the table's
 they show (`fitColumn`, `fitColumns`; people double-click a column's edge),
 look back
 (`setAsOf(epoch)`), explain the focused cell (`explainFocus`), keep and restore
-the column layout (`getLayout`, `setLayout`), and `destroy()` it.
+the column layout (`getLayout`, `setLayout`), draw the rows again for new
+`rowClass` classes (`redrawRows`), and `destroy()` it.
 
 People can sort, filter, group, pin, hide, move and resize columns, edit,
 undo, copy and paste to and from a spreadsheet, and pick out a block of cells,

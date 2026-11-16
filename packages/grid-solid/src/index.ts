@@ -52,6 +52,7 @@ export function Grid(props: GridProps): JSX.Element {
           onError: (m) => (props.onError ? props.onError(m) : console.warn(m)),
           onNote: (m) => props.onNote?.(m),
           onEdit: (e) => props.onEdit?.(e),
+          rowClass: (key) => props.rowClass?.(key),
         });
         createEffect(on(() => props.theme, (theme) => view.setTheme(theme ?? ""), { defer: true }));
         props.ref?.(view);

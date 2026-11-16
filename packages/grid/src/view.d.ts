@@ -95,6 +95,13 @@ export interface GridOptions {
    * and it is called again on the next scroll near the end.
    */
   loadMore?: () => Promise<boolean>;
+  /**
+   * Classes to give a row, by its key (`"unsaved"`, or several with spaces),
+   * or nothing. Called each time the row is drawn, so it follows the row as
+   * people scroll and sort; keep it quick. When the classes it would give
+   * change, call `view.redrawRows()`.
+   */
+  rowClass?: (key: string) => string | null | undefined;
   onStatus?: (status: Status) => void;
   onFocus?: (focus: Focus | null) => void;
   /** Rows were grouped by a column (its position), or -1 for none. */
@@ -117,6 +124,8 @@ export declare function drawGrid(root: HTMLElement, table: AnyGridTable, options
 export declare class GridView {
   constructor(root: HTMLElement, table: AnyGridTable, options?: GridOptions);
   setTheme(theme: string): void;
+  /** Draws the rows in view again, asking `rowClass` for their classes: for when they have changed. */
+  redrawRows(): void;
   /** Recalculates now and redraws. Not needed after changes made through the table. In a worker, the redraw comes when the worker answers. */
   refresh(): Change | void;
   getLayout(): Layout;

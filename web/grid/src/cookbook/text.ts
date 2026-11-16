@@ -72,6 +72,7 @@ export const recipes: Recipe[] = [
       "A row that fails to save stays unsaved, so pressing Save again retries it. A field changed again while a save is on its way also stays unsaved, because only what was sent is marked as saved.",
       "To save as people type, call the same <code>save</code> from <code>onEdit</code>, after a pause of a second or so with no edits.",
       "Deleted rows come in <code>removed</code>, for a <code>DELETE</code> each; new rows are ones your code puts, so it knows to <code>POST</code> them.",
+      "The grid's <code>rowClass</code> gives a row classes by its key: here <code>unsaved</code>, tinted in the page's CSS. It is asked each time a row is drawn, so the tint follows the row as you scroll or sort; when the unsaved rows change, <code>view.redrawRows()</code> draws the rows in view again.",
     ],
   },
   {
