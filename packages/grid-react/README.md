@@ -79,12 +79,15 @@ when they are called, so a new one is used without drawing again.
   freed when it unmounts (strict mode's unmount and mount again is allowed
   for). A table made outside a component lives as long as the page.
 - `useTotal(table, column)`: a column's total.
-- `useReading(table, (t) => …)`: anything read from the table. Return a value
-  that compares with `===`, such as a number or a string.
+- `useReading(table, (t) => …, isEqual?)`: anything read from the table. A
+  value is compared with `===`; for a list or an object, pass `isEqual`, and
+  the hook gives the same object until the new one compares unequal.
+- `useGroups(table)`: the table's `groups()`, a new array only when a
+  group, its row count or a total changed.
 - `useChange(table)`: what the last recalculation did.
 
 The hooks read with `table.peek`, so a render never sets off a
-recalculation. They render again after each one.
+recalculation. They render again after each one that changed what they read.
 
 [`web/grid-react`](https://github.com/surefold/watershed/tree/main/web/grid-react) is an example built only from this
 and `@surefold/grid`.

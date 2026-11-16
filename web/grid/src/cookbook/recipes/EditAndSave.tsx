@@ -1,5 +1,5 @@
 import { createSignal, For, onCleanup, Show } from "solid-js";
-import { Table, type Edits } from "@surefold/grid";
+import { Table, type Edits, type GridView } from "@surefold/grid";
 import { Grid } from "@surefold/grid-solid";
 
 // DummyJSON answers a PATCH as if it had saved it, but keeps nothing: fetch again and the old values are back.
@@ -20,8 +20,13 @@ export function EditAndSave() {
   const [unsaved, setUnsaved] = createSignal<[string, Partial<Product>][]>([]);
   const [saving, setSaving] = createSignal(false);
   const [log, setLog] = createSignal<string[]>([]);
+  let view: GridView | undefined;
   const say = (line: string) => setLog((l) => [line, ...l].slice(0, 6));
-  const show = () => setUnsaved([...changed].map(([key, fields]) => [key, { ...fields }]));
+  // Show what is unsaved, above the grid and on its rows (rowClass, below).
+  const show = () => {
+    setUnsaved([...changed].map(([key, fields]) => [key, { ...fields }]));
+    view?.redrawRows();
+  };
 
   // The grid says what a person changed: typing, pasting, filling a block,
   // undoing. Changes made from code (loading, discarding) are not reported.
@@ -102,9 +107,11 @@ export function EditAndSave() {
         </span>
       </div>
       <Grid
+        ref={(v) => (view = v)}
         class="grid"
         table={products}
         onEdit={onEdit}
+        rowClass={(key) => (changed.has(key) ? "unsaved" : undefined)}
         keyColumn={{ title: "id", width: 70 }}
         columns={{ title: { width: 260 }, stock: { decimals: 0 } }}
       />

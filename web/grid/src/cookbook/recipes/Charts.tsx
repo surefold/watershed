@@ -1,6 +1,6 @@
 import { For, onCleanup, onMount } from "solid-js";
 import { GroupChart, Table, type GridView } from "@surefold/grid";
-import { Grid, createReading } from "@surefold/grid-solid";
+import { Grid, createGroups } from "@surefold/grid-solid";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
@@ -37,8 +37,8 @@ export function Charts() {
     onCleanup(stock.watch(draw));
   });
 
-  // 2. Your own chart: a signal that follows groups(); hand it to any chart library.
-  const groups = createReading(stock, (t) => t.groups());
+  // 2. Your own chart: a signal that follows groups(), set when a group's totals change. Hand it to any chart library.
+  const groups = createGroups(stock);
   const most = () => Math.max(1, ...groups().map((g) => g.totals.value ?? 0));
 
   return (
