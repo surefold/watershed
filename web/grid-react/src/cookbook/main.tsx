@@ -69,11 +69,15 @@ function Cookbook() {
           <a href="#setup">Setting up</a>
         </h2>
         <p>
-          The packages are on GitHub Packages. Put this <code>.npmrc</code> beside your <code>package.json</code>, with a GitHub token that can read packages (a
+          The packages are on GitHub Packages. Put this <code>.npmrc</code> beside your <code>package.json</code> (npm and Bun both read it), with a GitHub token that can read packages (a
           classic token with <code>read:packages</code>):
         </p>
         <pre>{install.npmrc}</pre>
         <pre>{install.react}</pre>
+        <p>
+          Bun reads the same <code>.npmrc</code>. If your project keeps its settings in <code>bunfig.toml</code> instead:
+        </p>
+        <pre>{install.bunfig}</pre>
         <p>
           The engine is WebAssembly, loaded with a top-level <code>await</code>, so build for ES2022. With Vite:
         </p>

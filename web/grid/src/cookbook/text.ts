@@ -76,8 +76,12 @@ export const recipes: Recipe[] = [
 
 export const install = {
   npmrc: "@surefold:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}",
-  solid: "npm install @surefold/grid @surefold/grid-solid",
-  react: "npm install @surefold/grid @surefold/grid-react",
+  solid: "npm install @surefold/grid @surefold/grid-solid\n# or\nbun add @surefold/grid @surefold/grid-solid",
+  react: "npm install @surefold/grid @surefold/grid-react\n# or\nbun add @surefold/grid @surefold/grid-react",
+  /** Bun reads .npmrc too; this is the same, for a project that keeps its settings in bunfig.toml. */
+  bunfig: `# bunfig.toml
+[install.scopes]
+"@surefold" = { url = "https://npm.pkg.github.com", token = "$GITHUB_TOKEN" }`,
   vite: `// vite.config.ts
 import { defineConfig } from "vite";
 
