@@ -10,6 +10,7 @@ import { FirstGrid } from "./recipes/FirstGrid";
 import { FromAnApi } from "./recipes/FromAnApi";
 import { PagedApi } from "./recipes/PagedApi";
 import { Charts } from "./recipes/Charts";
+import { InAWorker } from "./recipes/InAWorker";
 
 const sources = import.meta.glob<string>("./recipes/*.tsx", { query: "?raw", import: "default", eager: true });
 
@@ -18,6 +19,7 @@ const live: Record<string, { file: string; run: () => JSX.Element }> = {
   fetch: { file: "FromAnApi.tsx", run: FromAnApi },
   paged: { file: "PagedApi.tsx", run: PagedApi },
   charts: { file: "Charts.tsx", run: Charts },
+  worker: { file: "InAWorker.tsx", run: InAWorker },
 };
 
 const REPO = "https://github.com/surefold/watershed/blob/main/web/grid/src/cookbook/recipes/";
@@ -45,7 +47,7 @@ function Cookbook() {
           Watershed <span>Grid</span> cookbook
         </h1>
         <p>
-          Small, whole examples of the grid in an app: a first table, rows from an API, pages loaded as you scroll, and charts that follow the table. Each one runs
+          Small, whole examples of the grid in an app: a first table, rows from an API, pages loaded as you scroll, charts that follow the table, and a large table in a worker. Each one runs
           here, and the code under it is the file that runs. <a href="../">Back to the grid</a>.
         </p>
         <div class="switch" aria-label="Framework">
@@ -100,8 +102,8 @@ function Cookbook() {
         <h2>Further</h2>
         <p>
           Every method and option is in the READMEs: <a href="https://github.com/surefold/watershed/tree/main/packages/grid">@surefold/grid</a> (the table and the
-          grid), <a href="https://github.com/surefold/watershed/tree/main/packages/grid-solid">@surefold/grid-solid</a>. For a million rows, put the table in a
-          worker with <code>WorkerTable</code>; <a href="../">the grid page</a> does, and <a href="https://github.com/surefold/watershed/tree/main/web/grid/src/App.tsx">its source</a> shows streaming, looking back and adding columns as it runs.
+          grid), <a href="https://github.com/surefold/watershed/tree/main/packages/grid-solid">@surefold/grid-solid</a>. <a href="../">The grid page</a> streams prices into a
+          <code>WorkerTable</code>, and <a href="https://github.com/surefold/watershed/tree/main/web/grid/src/App.tsx">its source</a> shows streaming, looking back and adding columns as it runs.
         </p>
       </section>
     </div>
