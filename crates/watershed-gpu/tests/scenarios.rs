@@ -3,7 +3,7 @@
 
 use watershed_core::prelude::*;
 use watershed_core::{AggregateOp, Collection, NodeId, Type, Value, choose, text, when};
-use watershed_gpu::{PlanError, Scenarios};
+use watershed_gpu::{Kept, PlanError, Scenarios};
 
 /// A small deterministic random number generator, so every run is the same.
 struct Rng(u64);
@@ -729,6 +729,85 @@ fn an_expression_deeper_than_the_stack_is_split_into_nodes() {
     let inputs = [-1.0, 0.0, 0.25, 0.5, 7.0, 149.5, 1000.0, f64::NAN];
     let want = by_the_graph(&mut g, &[x], &outputs, &inputs);
     assert_same("a deep lookup", &plan.run_cpu(&inputs), &want);
+}
+
+/// Forty random graphs, each run once with some of its nodes kept, then
+/// brought up to date after rounds of changes to the inputs built into the
+/// plan, naming every changed input, some of them, or none: every kept value
+/// must be the same to the last bit as making the plan again and running it.
+#[test]
+fn a_refresh_gives_what_making_and_running_the_plan_again_gives() {
+    for seed in 1..=40u64 {
+        let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
+        let mut r = random_graph(&mut rng, 14, 300);
+        let vary = ids(&r.inputs[..6]);
+        let shared = ids(&r.inputs[6..8]);
+        let built_in: Vec<Input<f64>> = r.inputs[8..].to_vec();
+        let mut outputs: Vec<NodeId> = (0..6)
+            .map(|_| r.nodes[rng.below(r.nodes.len())].id())
+            .collect();
+        outputs.push(r.nodes.last().unwrap().id());
+        // Sometimes the nodes nearest the outputs, sometimes nodes anywhere.
+        let keep: Vec<NodeId> = match seed % 2 {
+            0 => Kept::nearest(&r.g, &outputs, rng.below(120)),
+            _ => (0..rng.below(60))
+                .map(|_| r.nodes[rng.below(r.nodes.len())].id())
+                .collect(),
+        };
+        let mut kept = Kept::new(&r.g, &vary, &shared, &outputs, &keep).unwrap();
+        let inputs: Vec<f64> = (0..30 * vary.len()).map(|_| rng.value()).collect();
+        let results = kept.plan().run_cpu(&inputs);
+        kept.hold(inputs.clone(), results);
+
+        for round in 0..6 {
+            let mut changed = Vec::new();
+            for _ in 0..1 + rng.below(3) {
+                let input = built_in[rng.below(built_in.len())];
+                // Now and then to the value it has: no change at all.
+                let x = match rng.below(5) {
+                    0 => r.g.get(input).unwrap(),
+                    _ => rng.value(),
+                };
+                r.g.set(input, x).unwrap();
+                changed.push(input.id());
+            }
+            r.g.stabilize();
+            let named: Vec<NodeId> = match round % 3 {
+                0 => changed.clone(),
+                1 => changed[..1].to_vec(),
+                _ => Vec::new(),
+            };
+            kept.refresh_cpu(&r.g, &named).unwrap();
+            let fresh = Kept::new(&r.g, &vary, &shared, &outputs, &keep).unwrap();
+            let want = fresh.plan().run_cpu(&inputs);
+            assert_same(&format!("seed {seed}, round {round}"), kept.values(), &want);
+            assert!(kept.changed(&r.g).is_empty(), "seed {seed}, round {round}");
+        }
+    }
+}
+
+#[test]
+fn a_refresh_after_the_graphs_shape_changed_is_refused() {
+    let mut r = random_graph(&mut Rng(77), 6, 40);
+    let vary = ids(&r.inputs[..2]);
+    let output = r.nodes.last().unwrap().id();
+    let mut kept = Kept::new(&r.g, &vary, &[], &[output], &[]).unwrap();
+    let inputs = vec![0.5, 1.5];
+    let results = kept.plan().run_cpu(&inputs);
+    kept.hold(inputs, results);
+    // A value changing is what a refresh is for.
+    r.g.set(r.inputs[4], 9.0).unwrap();
+    r.g.stabilize();
+    assert!(kept.refresh_cpu(&r.g, &[]).is_ok());
+    // What a node reads changing is not: the plan is made again.
+    let input = r.inputs[5];
+    r.g.redefine(r.nodes[3], input * 2.0).unwrap();
+    r.g.stabilize();
+    assert_eq!(kept.refresh_cpu(&r.g, &[]), Err(PlanError::Reshaped));
+    assert_eq!(
+        kept.patch(&r.g, &[]).map(|p| p.is_some()),
+        Err(PlanError::Reshaped)
+    );
 }
 
 /// Needs an NVIDIA GPU and the CUDA libraries: `cargo test --features cuda`.

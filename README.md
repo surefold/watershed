@@ -133,7 +133,7 @@ The same model, run the way the question needs.
 - **Fused.** Groups of formulas that feed one another run in one GPU
   thread, keeping intermediate values out of memory. Experimental.
 - **Refreshed.** After a batch, only the part of the plan a change reaches
-  is rerun. Experimental.
+  is rerun, to the last bit what running it all again gives.
 - **Across several GPUs.** A saved plan runs in lots, one worker per GPU,
   with a lot moved if a worker stops. Experimental; run on eight GPUs in one
   machine.
@@ -149,9 +149,9 @@ research in progress.
 | History, explanation, change sinks, formulas as text | Built | [core guide](crates/watershed-core/README.md#history-and-change-tracking) |
 | Scenario plans on CPU threads and CUDA; data resident on the GPU | Built | [watershed-gpu](crates/watershed-gpu/README.md), [how plans work](docs/scenario-plans.md) |
 | Python, Kotlin, Scala and WebAssembly interfaces to the incremental engine | Built | [Architecture](#architecture) |
-| Refreshing a batch after a change | Experimental | [watershed-gpu](crates/watershed-gpu/README.md#bringing-a-run-up-to-date-after-a-change) |
+| Refreshing a batch after a change | Built | [watershed-gpu](crates/watershed-gpu/README.md#bringing-a-run-up-to-date-after-a-change) |
 | Fused kernels | Experimental, off by default | [watershed-gpu](crates/watershed-gpu/README.md#working-nodes-out-in-clusters) |
-| Saved plans, and lots across GPUs | Experimental; run on eight GPUs in one machine | [watershed-gpu](crates/watershed-gpu/README.md#running-a-batch-somewhere-else), [watershed-jvm](https://github.com/surefold/watershed-jvm) |
+| Saved plans, and lots across GPUs | Built; lots run on eight GPUs in one machine, not yet on several machines | [watershed-gpu](crates/watershed-gpu/README.md#running-a-batch-somewhere-else), [watershed-jvm](https://github.com/surefold/watershed-jvm) |
 | Scenario plans from Kotlin, and in the browser on one thread | Experimental | [watershed-jvm](https://github.com/surefold/watershed-jvm), [grid README](crates/watershed-grid/README.md) |
 | Reading a model from an `.xlsx` workbook | Experimental; one workbook tried | [watershed-gpu](crates/watershed-gpu/README.md#running-the-examples) |
 | Choosing CPU or GPU automatically from measured costs | Research | [research note](docs/research/heterogeneous-execution.md) |
