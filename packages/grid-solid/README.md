@@ -28,6 +28,8 @@ trades.put("T-1", { symbol: "OAKS", qty: 500, price: 101.2, mark: 101.5 });
 trades.set("T-1", "mark", 102);   // the grid and pnl() follow
 ```
 
+**[The cookbook](https://surefold.dev/watershed/grid/cookbook/)** has whole, running examples in Solid: a first grid, rows from an API, pages loaded as you scroll, and charts that follow the table.
+
 ## Install
 
 The packages are on GitHub Packages. Tell npm where `@surefold` packages
