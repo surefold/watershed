@@ -1,5 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "types": ["vite/client", "node"] },
-  "include": ["fixtures", "tests", "playwright.config.ts", "vite.config.ts"]
+  "include": ["fixtures", "tests", "playwright.config.ts", "vite.config.ts"],
+  // The unmount fixtures are Solid's JSX or React's: web/grid and web/grid-react check them.
+  "exclude": ["fixtures/unmount-solid.tsx", "fixtures/unmount-react.tsx"]
 }

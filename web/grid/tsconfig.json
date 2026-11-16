@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "jsx": "preserve", "jsxImportSource": "solid-js", "types": ["vite/client"] },
-  "include": ["src", "../../packages/grid-solid/src"]
+  "include": ["src", "../../packages/grid-solid/src", "../e2e/fixtures/unmount-solid.tsx"]
 }

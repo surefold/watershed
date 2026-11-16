@@ -7,17 +7,18 @@ import { cell, row, typeInto } from "./grid";
 import { PRODUCTS, STREAMED, WIKIS, expect, test } from "./mocks";
 
 const COOKBOOKS = [
-  { name: "Solid", path: "/grid/cookbook/" },
-  { name: "React", path: "/grid/react/cookbook/" },
+  // `unmount`: the page with the Effect recipe and a button that unmounts it (fixtures/unmount-*.tsx).
+  { name: "Solid", path: "/grid/cookbook/", unmount: "/e2e/unmount-solid.html" },
+  { name: "React", path: "/grid/react/cookbook/", unmount: "/e2e/unmount-react.html" },
 ];
-const RECIPES = ["first-grid", "fetch", "paged", "save", "websocket", "sse", "charts", "worker"];
+const RECIPES = ["first-grid", "fetch", "paged", "save", "websocket", "sse", "effect", "charts", "worker"];
 
 /** A recipe's running example. */
 const live = (page: Page, id: string) => page.locator(`section#${id} .live`);
 const money = (n: number, digits = 2) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n);
 
-for (const { name, path } of COOKBOOKS) {
+for (const { name, path, unmount } of COOKBOOKS) {
   test.describe(`${name} cookbook`, () => {
     test.beforeEach(async ({ page }) => {
       await page.goto(path);
@@ -233,6 +234,138 @@ for (const { name, path } of COOKBOOKS) {
       await expect(recipe.locator(".wg-row.wg-group")).toHaveCount(WIKIS.length);
       await recipe.getByRole("button", { name: "Disconnect" }).click();
       await expect(recipe.getByRole("button", { name: "Connect" })).toBeVisible();
+    });
+
+    test.describe("Effect", () => {
+      // The recipe waits 0.5 s, give or take 20%, before its first try again, then 1 s, give or take 20%.
+      const FIRST_WAIT = /Reconnecting in 0\.[4-6] s \(attempt 1\)/;
+      const SECOND_WAIT = /Reconnecting in (0\.[89]|1\.[0-2]) s \(attempt 2\)/;
+      /** Longer than any first wait: a connection still to come would have come by then. */
+      const PAST_A_WAIT = 1500;
+
+      test("rows and the gain follow the ticks", async ({ page, net }) => {
+        const recipe = live(page, "effect");
+        await recipe.getByRole("button", { name: "Connect" }).click();
+        const subscription = await net.coinbase.subscribed;
+        expect(subscription.channels).toEqual(["ticker"]);
+        expect(subscription.product_ids).toEqual(expect.arrayContaining(["BTC-USD", "ETH-USD"]));
+        await expect(recipe).toContainText("Live");
+
+        net.coinbase.send({ type: "heartbeat", product_id: "BTC-USD" }); // not a price: passed over
+        net.coinbase.tick([
+          ["BTC-USD", 50000],
+          ["ETH-USD", 3000],
+        ]);
+        await expect(row(recipe, "BTC-USD")).toBeVisible();
+        await expect(row(recipe, "ETH-USD")).toBeVisible();
+        await expect(recipe).toContainText("2 messages");
+        await expect(recipe).toContainText(`Gain since connecting: ${money(0)}`);
+
+        // A burst: only the latest price of each coin counts.
+        net.coinbase.tick([
+          ["BTC-USD", 50050],
+          ["ETH-USD", 2995],
+          ["BTC-USD", 50100],
+          ["ETH-USD", 2990],
+        ]);
+        // 0.5 × 100 + 8 × -10
+        await expect(recipe).toContainText(`Gain since connecting: ${money(-30)}`);
+        await expect(recipe).toContainText("6 messages");
+        await expect(await cell(recipe, "BTC-USD", "price")).toContainText("50,100");
+        await expect(await cell(recipe, "BTC-USD", "open")).toContainText("50,000");
+        // The WebSocket recipe's table is its own.
+        await expect(row(live(page, "websocket"), "BTC-USD")).toHaveCount(0);
+      });
+
+      test("a dropped connection is opened again after a backoff, and subscribes again", async ({ page, net }) => {
+        const recipe = live(page, "effect");
+        await recipe.getByRole("button", { name: "Connect" }).click();
+        await expect.poll(() => net.coinbase.subscriptions).toBe(1);
+        await expect(recipe).toContainText("Live");
+        net.coinbase.tick([["BTC-USD", 50000]]);
+        await expect(row(recipe, "BTC-USD")).toBeVisible();
+
+        await net.coinbase.drop();
+        await expect(recipe).toContainText(FIRST_WAIT);
+        await expect.poll(() => net.coinbase.subscriptions).toBe(2);
+        expect(net.coinbase.connections).toBe(2);
+        await expect(recipe).toContainText("Live");
+        // The prices flow again, into the same rows.
+        net.coinbase.tick([["BTC-USD", 50100]]);
+        await expect(recipe).toContainText(`Gain since connecting: ${money(50)}`);
+        await expect(recipe).toContainText("2 messages");
+
+        // While the server is down, each wait is longer than the one before.
+        net.coinbase.refusing = true;
+        await net.coinbase.drop();
+        await expect(recipe).toContainText(FIRST_WAIT);
+        await expect(recipe).toContainText(SECOND_WAIT);
+        expect(net.coinbase.connections).toBe(3);
+        net.coinbase.refusing = false;
+        await expect.poll(() => net.coinbase.subscriptions).toBe(3);
+        expect(net.coinbase.connections).toBe(4);
+        await expect(recipe).toContainText("Live");
+
+        // A connection that worked starts the backoff again from the first wait.
+        await net.coinbase.drop();
+        await expect(recipe).toContainText(FIRST_WAIT);
+        await expect.poll(() => net.coinbase.subscriptions).toBe(4);
+        net.coinbase.tick([["BTC-USD", 50200]]);
+        await expect(recipe).toContainText(`Gain since connecting: ${money(100)}`);
+      });
+
+      test("Disconnect closes the socket, and stops a reconnect", async ({ page, net }) => {
+        const recipe = live(page, "effect");
+        await recipe.getByRole("button", { name: "Connect" }).click();
+        await expect.poll(() => net.coinbase.subscriptions).toBe(1);
+        await recipe.getByRole("button", { name: "Disconnect" }).click();
+        await expect.poll(() => net.coinbase.open).toBe(false);
+        await expect(recipe).toContainText("Not connected");
+        await expect(recipe.getByRole("button", { name: "Connect" })).toBeVisible();
+
+        // Disconnected while waiting to reconnect: no more tries.
+        await recipe.getByRole("button", { name: "Connect" }).click();
+        await expect.poll(() => net.coinbase.subscriptions).toBe(2);
+        await net.coinbase.drop();
+        await expect(recipe).toContainText(FIRST_WAIT);
+        await recipe.getByRole("button", { name: "Disconnect" }).click();
+        await page.waitForTimeout(PAST_A_WAIT);
+        expect(net.coinbase.connections).toBe(2);
+        await expect(recipe).toContainText("Not connected");
+      });
+
+      test("unmounting closes the socket, and stops a reconnect", async ({ page, net }) => {
+        await page.goto(unmount);
+        const recipe = page.locator("#recipe");
+        await recipe.getByRole("button", { name: "Connect" }).click();
+        await expect.poll(() => net.coinbase.subscriptions).toBe(1);
+        net.coinbase.tick([["BTC-USD", 50000]]);
+        await expect(row(recipe, "BTC-USD")).toBeVisible();
+        await page.getByRole("button", { name: "Unmount" }).click();
+        await expect(page.getByText("Unmounted")).toBeVisible();
+        await expect.poll(() => net.coinbase.open).toBe(false);
+
+        // Unmounted while waiting to reconnect: no more tries.
+        await page.reload();
+        await recipe.getByRole("button", { name: "Connect" }).click();
+        await expect.poll(() => net.coinbase.subscriptions).toBe(2);
+        await net.coinbase.drop();
+        await expect(recipe).toContainText(FIRST_WAIT);
+        await page.getByRole("button", { name: "Unmount" }).click();
+        await page.waitForTimeout(PAST_A_WAIT);
+        expect(net.coinbase.connections).toBe(2);
+      });
+
+      test("leaving the page while waiting to reconnect makes no more connections", async ({ page, net }) => {
+        const recipe = live(page, "effect");
+        await recipe.getByRole("button", { name: "Connect" }).click();
+        await expect.poll(() => net.coinbase.subscriptions).toBe(1);
+        await net.coinbase.drop();
+        await expect(recipe).toContainText(FIRST_WAIT);
+        await page.goto(COOKBOOKS.find((other) => other.path !== path)!.path);
+        await page.waitForTimeout(PAST_A_WAIT);
+        expect(net.coinbase.connections).toBe(1);
+      });
     });
 
     test("charts: the bars follow the table", async ({ page }) => {

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Unmount fixture · React</title>
+<style>
+  body { margin: 0; font: 14px system-ui, sans-serif; }
+  .bar { display: flex; gap: 12px; align-items: center; padding: 8px; }
+  .grid { height: 300px; }
+</style>
+</head>
+<body>
+<!-- The cookbook's Effect recipe, with a button that takes it off the page, for
+     tests/cookbook.spec.ts to check what it leaves running. -->
+<div id="fixture"></div>
+<script type="module" src="./unmount-react.tsx"></script>
+</body>
+</html>

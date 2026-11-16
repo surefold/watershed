@@ -1,7 +1,8 @@
 // Every request a page makes off the test server is answered here or refused,
 // so the tests never touch the network: DummyJSON's products, Coinbase's
-// ticker WebSocket, Wikimedia's stream of edits (SSE) and Google Fonts.
-// Anything else is refused and fails the test, as do page and console errors.
+// ticker WebSocket (which a test can drop, as a server would), Wikimedia's
+// stream of edits (SSE) and Google Fonts. Anything else is refused and fails
+// the test, as do page and console errors.
 
 import { test as base, expect, type Page, type Route, type WebSocketRoute } from "@playwright/test";
 
@@ -111,10 +112,23 @@ export interface Coinbase {
   tick(prices: [string, number][]): void;
   /** Sends any message to the page. */
   send(message: object): void;
+  /** How many times the page has opened the WebSocket. */
+  readonly connections: number;
+  /** How many subscribe messages the page has sent, over every connection. */
+  readonly subscriptions: number;
+  /** Whether the latest connection is still open: neither the page nor the server has closed it. */
+  readonly open: boolean;
+  /** Closes the latest connection from the server's side, as a dropped connection. */
+  drop(): Promise<void>;
+  /** While true, each new connection is closed as soon as it opens, as by a server that is down. */
+  refusing: boolean;
 }
 
 function coinbase(): Coinbase & { connect(ws: WebSocketRoute): void } {
   let socket: WebSocketRoute | undefined;
+  let open = false;
+  let connections = 0;
+  let subscriptions = 0;
   let subscribe!: (message: { product_ids: string[]; channels: string[] }) => void;
   const received: Record<string, unknown>[] = [];
   const subscribed = new Promise<{ product_ids: string[]; channels: string[] }>((resolve) => (subscribe = resolve));
@@ -124,20 +138,43 @@ function coinbase(): Coinbase & { connect(ws: WebSocketRoute): void } {
     socket.send(JSON.stringify(message));
   };
   return {
+    refusing: false,
     connect(ws) {
+      connections++;
+      if (this.refusing) return void ws.close({ code: 1013, reason: "Try again later" });
       socket = ws; // not connected to the real server
+      open = true;
       ws.onMessage((text) => {
         const message = JSON.parse(String(text)) as Record<string, unknown>;
         received.push(message);
         if (message.type === "subscribe") {
+          subscriptions++;
           ws.send(JSON.stringify({ type: "subscriptions", channels: [{ name: "ticker", product_ids: message.product_ids }] }));
           subscribe(message as { product_ids: string[]; channels: string[] });
         }
+      });
+      // The page closed it.
+      ws.onClose(() => {
+        if (ws === socket) open = false;
       });
     },
     received,
     subscribed,
     send,
+    get connections() {
+      return connections;
+    },
+    get subscriptions() {
+      return subscriptions;
+    },
+    get open() {
+      return open;
+    },
+    async drop() {
+      if (!socket || !open) throw new Error("No open WebSocket to drop");
+      open = false;
+      await socket.close({ code: 1011, reason: "Dropped by the test" });
+    },
     tick(prices) {
       for (const [coin, price] of prices) {
         send({ type: "ticker", sequence: sequence++, product_id: coin, price: String(price), time: new Date().toISOString() });
