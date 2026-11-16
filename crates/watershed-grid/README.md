@@ -173,8 +173,9 @@ change.
 Group totals are aggregates in the graph only for small tables. A
 [grouping in the graph](../watershed-core/README.md#grouping) costs a
 membership node for each row in each totalled column, for every column ever
-grouped by, and those nodes are not reclaimed: 50,000 rows with six totals
-took about 175 MB per grouping column. Above 100,000 row-and-column pairs
+grouped by (a removed row's are reused by the next row, but a column no
+longer grouped by keeps its): 50,000 rows with six totals took about 175 MB
+per grouping column. Above 100,000 row-and-column pairs
 (`set_group_budget`), the grid adds each group's totals up over its rows
 instead, which adds nothing to the graph.
 

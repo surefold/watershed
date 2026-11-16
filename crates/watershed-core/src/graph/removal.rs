@@ -6,15 +6,18 @@
 //! never come to mean a different node, and history still answers for the
 //! updates before it went.
 //!
-//! The node's slot stays in the graph's arrays, holding its last value, as
-//! an input that nothing reads and nothing can set. That keeps every other
-//! part of the graph as it was: the cost is that removing nodes frees their
-//! names and their work, not their memory.
+//! The node's slot stays in the graph's arrays, as an input that nothing
+//! reads and nothing can set. That keeps every other part of the graph as it
+//! was, and an id is never reused, so the slot (some tens of bytes) is not
+//! given back. What the node held beyond that is: a total's members and
+//! tree, what a calculated node last read, and, when the graph keeps no
+//! history, a text or list value, which becomes empty.
 
 use super::{Graph, Hot, Kind};
 use crate::aggregate::Aggregate;
 use crate::error::CalcError;
 use crate::handle::{Handle, NodeId};
+use crate::value::{TextList, Value};
 
 impl Graph {
     /// Removes a node that nothing uses.
@@ -91,6 +94,15 @@ impl Graph {
             self.needed[i] = super::pull::IDLE;
             if was_needed {
                 self.work_out_what_is_needed();
+            }
+        }
+        // Without history nothing reads its value again: let go of text.
+        if self.history.is_none() {
+            match &self.values[i] {
+                Value::Str(_) => self.values[i] = Value::Str("".into()),
+                Value::List(_) => self.values[i] = Value::List(TextList::from(Vec::new())),
+                Value::Error(_) => self.values[i] = Value::Error("".into()),
+                _ => {}
             }
         }
         self.redefined.remove(&id);

@@ -95,6 +95,9 @@ struct Names {
     index: HashMap<u64, NodeId, Prehashed>,
     collisions: HashMap<String, NodeId>,
     rows: RowNames,
+    /// Nodes given a new name after they were made (a group's membership
+    /// node taken for another group): their names now.
+    renamed: HashMap<u32, String>,
 }
 
 /// A name for `Graph::define_like`: given, or a collection row's.
@@ -227,6 +230,11 @@ impl RowNames {
 
 impl Names {
     fn get(&self, id: NodeId) -> Cow<'_, str> {
+        if !self.renamed.is_empty() {
+            if let Some(name) = self.renamed.get(&id.0) {
+                return Cow::Borrowed(name);
+            }
+        }
         let i = id.index();
         let (from, to) = (self.starts[i] as usize, self.starts[i + 1] as usize);
         if from == to {
@@ -256,6 +264,21 @@ impl Names {
             self.index.remove(&hash);
         } else {
             self.collisions.remove(&name);
+        }
+    }
+
+    /// Gives a stored-name node a new name, which the caller has checked is
+    /// free (its hash `hash`). Its old name is free from now on.
+    fn rename(&mut self, id: NodeId, name: &str, hash: u64) {
+        self.forget(id);
+        self.renamed.insert(id.0, name.to_string());
+        match self.index.entry(hash) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(id);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                self.collisions.insert(name.to_string(), id);
+            }
         }
     }
 
@@ -450,6 +473,10 @@ pub struct Graph {
     changed: Vec<NodeId>,
     /// Totals per group (see the `keyed` module).
     keyed: Vec<keyed::Keyed>,
+    /// A `bool` input that is always false, standing in for the value and
+    /// presence of a total's member that has been emptied. Made when first
+    /// needed.
+    hole: Option<NodeId>,
     /// Calculated nodes whose value names a row's group: for each, the
     /// groupings and rows that follow it.
     watched: HashMap<u32, Vec<(u32, u32)>>,
@@ -525,6 +552,7 @@ impl Graph {
             sink: None,
             changed: Vec::new(),
             keyed: Vec::new(),
+            hole: None,
             watched: HashMap::new(),
             rekey: Vec::new(),
             updating: false,

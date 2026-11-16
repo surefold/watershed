@@ -616,6 +616,51 @@ fn a_count_gives_what_the_graph_gives() {
 }
 
 #[test]
+fn group_totals_whose_rows_came_and_went_give_what_the_graph_gives() {
+    // Rows come and go in groups, so the groups' totals have members that
+    // were emptied and filled again by other rows; a plan follows the
+    // totals as they are, holes and all.
+    let mut g = Graph::new();
+    let fx = g.input("fx", 1.25).unwrap();
+    let mut window = Collection::new(&g, "window");
+    let group = window.field::<String>("group").unwrap();
+    let amount = window.field::<f64>("amount").unwrap();
+    let value = window.column(&mut g, "value", amount * fx).unwrap();
+    let by_group = window.group_sum(&mut g, "value", group, value).unwrap();
+    let counts = window.group_count(&mut g, "rows", group).unwrap();
+    let mut rng = Rng(11);
+    for i in 0..3000 {
+        let row = [
+            group.is(format!("g{}", rng.below(12))),
+            amount.is(rng.value()),
+        ];
+        window.upsert(&mut g, &format!("r{i}"), &row).unwrap();
+        if i >= 200 {
+            window.remove(&mut g, &format!("r{}", i - 200)).unwrap();
+        }
+        g.stabilize();
+    }
+    let mut outputs = Vec::new();
+    for key in window.group_keys(&g, by_group) {
+        outputs.push(window.group(&g, by_group, key.clone()).unwrap().id());
+        outputs.push(window.group(&g, counts, key).unwrap().id());
+    }
+    // Some members were emptied: they read the graph's always-false node.
+    let hole = g.find("(no member)").expect("a member was emptied");
+    let holes = outputs
+        .iter()
+        .filter_map(|&id| g.aggregate_members(id))
+        .flat_map(|(_, members)| members)
+        .filter(|&(_, present)| present == hole)
+        .count();
+    assert!(holes > 0);
+    let plan = Scenarios::new(&g, &[fx.id()], &outputs).unwrap();
+    let inputs = [0.5, 1.0, -3.0, f64::NAN, 0.0, -0.0, 1e300, 7.25];
+    let want = by_the_graph(&mut g, &[fx], &outputs, &inputs);
+    assert_same("group totals after churn", &plan.run_cpu(&inputs), &want);
+}
+
+#[test]
 fn a_choice_by_a_number_the_same_in_every_scenario_takes_that_option() {
     let mut g = Graph::new();
     let a = g.input("a", 1.0).unwrap();

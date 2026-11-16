@@ -191,6 +191,11 @@ impl Tree {
 /// this bit set, an index into `Aggregate::many`.
 const MANY: u32 = 1 << 31;
 
+/// In `by_node`, a node that is linked to the aggregate (it tells the
+/// aggregate when it changes) but is part of no member now: it was, and its
+/// member was emptied (see `Aggregate::vacate`).
+const LINKED: u32 = MANY - 1;
+
 /// One aggregate's members and its tree of partial results.
 #[derive(Debug)]
 pub(crate) struct Aggregate {
@@ -216,6 +221,9 @@ pub(crate) struct Aggregate {
     tree: Tree,
     /// Nodes that changed since the last recalculation.
     pub(crate) changed: Vec<u32>,
+    /// Members that have been emptied (see `vacate`), to be filled again
+    /// before the aggregate grows.
+    free: Vec<u32>,
     /// When members joined: for each update that added some, the update
     /// and how many members there were before it. Members are only ever
     /// added at the end, so this says which members there were at any
@@ -264,6 +272,7 @@ impl Aggregate {
             many: Vec::new(),
             tree: Tree::new(op, value_type, 2, identity(op, value_type)),
             changed: Vec::new(),
+            free: Vec::new(),
             joined: Vec::new(),
         }
     }
@@ -293,6 +302,17 @@ impl Aggregate {
     /// this aggregate (and so needs a link to it). When they are one node,
     /// only the first answer can be true.
     pub(crate) fn push(&mut self, value: u32, present: u32) -> (bool, bool) {
+        // An emptied member is filled first (the aggregate is out of order
+        // once one has been emptied).
+        if let Some(index) = self.free.pop() {
+            self.members[index as usize] = (value, present);
+            let new = (
+                self.note(value, index),
+                present != value && self.note(present, index),
+            );
+            self.changed.push(value);
+            return new;
+        }
         let index = self.members.len() as u32;
         if self.ordered {
             let follows = self
@@ -376,8 +396,59 @@ impl Aggregate {
                         .map(|&i| i as usize),
                 );
             }
+            Some(&LINKED) | None => {}
             Some(&i) => out.push(i as usize),
-            None => {}
+        }
+    }
+
+    /// Empties the member whose presence node is `present`, if there is one,
+    /// and says whether there was: from now on its value node and presence
+    /// node are `hole`, a `bool` that is always false, so it counts as
+    /// absent, and the next member to join takes its place. The nodes it had
+    /// stay linked to the aggregate (they still tell it when they change,
+    /// and it ignores them), so a node that joins again needs no new link.
+    ///
+    /// This is for a member that will not come back as it was, when the
+    /// graph keeps no history: an earlier update's members cannot be told
+    /// once one has been emptied and refilled.
+    pub(crate) fn vacate(&mut self, present: u32, hole: u32) -> bool {
+        if self.ordered {
+            self.stop_ordering();
+        }
+        let mut indexes = Vec::new();
+        self.members_of(present, &mut indexes);
+        let Some(&index) = indexes.iter().find(|&&i| self.members[i].1 == present) else {
+            return false;
+        };
+        let (value, present) = self.members[index];
+        self.unnote(value, index as u32);
+        if present != value {
+            self.unnote(present, index as u32);
+        }
+        self.members[index] = (hole, hole);
+        self.free.push(index as u32);
+        // Its leaf is the identity now: its path to the root is worked out
+        // again at once.
+        let capacity = self.capacity();
+        self.tree
+            .set(capacity + index, identity(self.op, self.value_type));
+        let mut k = (capacity + index) / 2;
+        while k >= 1 {
+            self.tree.recombine(self.op, k);
+            k /= 2;
+        }
+        true
+    }
+
+    /// Records that `node` is no longer part of member `index`. It stays
+    /// linked (see `LINKED`).
+    fn unnote(&mut self, node: u32, index: u32) {
+        match self.by_node.get_mut(&node) {
+            Some(held) if *held & MANY != 0 => {
+                self.many[(*held & !MANY) as usize].retain(|&i| i != index);
+            }
+            Some(held) if *held == index => *held = LINKED,
+            _ => {}
         }
     }
 
@@ -396,7 +467,10 @@ impl Aggregate {
     /// Records that `node` is part of member `index`. Returns whether the
     /// node was not part of any member before.
     fn note(&mut self, node: u32, index: u32) -> bool {
-        assert!(index < MANY, "an aggregate holds fewer than 2^31 members");
+        assert!(
+            index < LINKED,
+            "an aggregate holds fewer than 2^31 - 1 members"
+        );
         match self.by_node.entry(node) {
             Entry::Vacant(slot) => {
                 slot.insert(index);
@@ -404,7 +478,10 @@ impl Aggregate {
             }
             Entry::Occupied(mut slot) => {
                 let held = *slot.get();
-                if held & MANY != 0 {
+                if held == LINKED {
+                    // Linked already, from a member that was emptied.
+                    slot.insert(index);
+                } else if held & MANY != 0 {
                     self.many[(held & !MANY) as usize].push(index);
                 } else {
                     slot.insert(MANY | self.many.len() as u32);

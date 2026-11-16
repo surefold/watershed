@@ -2,7 +2,7 @@
 //! tests reads as a specification. `cargo test` runs them all.
 
 use watershed_core::prelude::*;
-use watershed_core::{AggregateOp, Ir, Type, Value};
+use watershed_core::{AggregateOp, Collection, Groups, Ir, Type, Value};
 
 type Result = std::result::Result<(), CalcError>;
 
@@ -849,6 +849,93 @@ fn groups_total_their_rows_and_follow_rows_that_move() -> Result {
     g.stabilize();
     assert_eq!(g.get(eu)?, 0.0);
     assert_eq!(sales.group_keys(&g, by_region), ["APAC", "US"]);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+/// A window of rows that come and go, as a stream keeps the latest: each
+/// new row in one of fifty groups, the oldest of 500 removed. The graph's
+/// size after every thousand edits, and each row's group and bytes at the end.
+struct Stream {
+    window: Collection,
+    by_group: Groups<String, f64>,
+    sizes: Vec<usize>,
+    rows: Vec<(String, f64)>,
+}
+
+fn stream_into_groups(g: &mut Graph, edits: u64) -> std::result::Result<Stream, CalcError> {
+    let mut window = Collection::new(g, "window");
+    let group = window.field::<String>("group")?;
+    let bytes = window.field::<f64>("bytes")?;
+    let by_group = window.group_sum(g, "bytes", group, bytes)?;
+    window.group_count(g, "edits", group)?;
+    let mut sizes = Vec::new();
+    let mut rng: u64 = 7;
+    for i in 0..edits {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        let row = [
+            group.is(format!("g{}", rng % 50)),
+            bytes.is((rng % 1000) as f64),
+        ];
+        window.upsert(g, &format!("e{i}"), &row)?;
+        if i >= 500 {
+            window.remove(g, &format!("e{}", i - 500))?;
+        }
+        g.stabilize();
+        if (i + 1) % 1000 == 0 {
+            sizes.push(g.len());
+        }
+    }
+    let keys: Vec<String> = window.keys().map(str::to_string).collect();
+    let rows = keys
+        .iter()
+        .map(|key| Ok((window.get(g, key, group)?, window.get(g, key, bytes)?)))
+        .collect::<std::result::Result<_, CalcError>>()?;
+    Ok(Stream {
+        window,
+        by_group,
+        sizes,
+        rows,
+    })
+}
+
+#[test]
+fn a_collection_whose_rows_come_and_go_stays_the_size_of_the_rows_it_holds() -> Result {
+    let mut g = Graph::new();
+    let Stream {
+        window,
+        by_group,
+        sizes,
+        rows,
+    } = stream_into_groups(&mut g, 20_000)?;
+    // A removed row's membership nodes are taken by the next row to reuse
+    // its nodes, so after the first few thousand edits no node is made.
+    assert!(sizes[3..].iter().all(|&n| n == sizes[3]), "{sizes:?}");
+    assert!(sizes[3] < 2 * 501 * 4, "{} nodes for 500 rows", sizes[3]);
+    for key in window.group_keys(&g, by_group) {
+        let total = window.group(&g, by_group, key.clone()).unwrap();
+        // Every group still adds up its rows.
+        let want: f64 = rows.iter().filter(|(k, _)| *k == key).map(|(_, b)| b).sum();
+        assert_eq!(g.get(total)?, want, "group {key}");
+        // And holds no more members than it had rows at once.
+        let (_, members) = g.aggregate_members(total.id()).unwrap();
+        assert!(members.len() <= 500, "{key}: {} members", members.len());
+    }
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn with_history_a_collection_keeps_its_rows_membership_nodes() -> Result {
+    // An earlier update's group totals are explained by the members they
+    // had then, so nothing is taken and the graph grows with the groups its
+    // rows have been in.
+    let mut g = Graph::new();
+    g.keep_history(10);
+    let sizes = stream_into_groups(&mut g, 5_000)?.sizes;
+    assert!(sizes[4] > sizes[1], "{sizes:?}");
     g.check_consistency().map_err(CalcError::Invalid)?;
     Ok(())
 }

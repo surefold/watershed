@@ -524,7 +524,7 @@ impl Collection {
         g.set_value(self.slots[slot].present, Value::Bool(false))?;
         self.free.push(slot);
         for grouping in &self.groupings {
-            g.keyed_leave(grouping.keyed, slot);
+            g.keyed_remove(grouping.keyed, slot);
         }
         Ok(true)
     }
