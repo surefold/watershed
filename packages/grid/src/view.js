@@ -847,7 +847,8 @@ export class GridView {
 
   /**
    * Asks `loadMore` for more rows, unless it is already loading or has said
-   * there are no more. Runs by itself as the person nears the end.
+   * there are no more. Runs by itself as the person nears the end. If
+   * `loadMore` throws, the grid says so and asks again next time.
    */
   async fetchMore() {
     if (!this.loadMore || this.loading || this.done) return;
@@ -855,16 +856,24 @@ export class GridView {
     this.onStatus({ loading: true, done: false });
     const before = this.viewLen;
     let more = false;
+    let failed = null;
     try {
       more = await this.loadMore();
     } catch (error) {
-      this.onError(error.message);
+      failed = error instanceof Error ? error.message : String(error);
     }
     if (this.destroyed) return;
     this.loading = false;
+    if (failed !== null) {
+      // Not done: the next scroll near the end, or fetchMore(), tries again.
+      this.onError(failed);
+      this.refresh();
+      this.onStatus({ loading: false, done: false, failed: true, error: failed });
+      return;
+    }
     this.done = !more;
     this.refresh();
-    this.onStatus({ loading: false, done: this.done });
+    this.onStatus({ loading: false, done: this.done, failed: false });
     // Still at the end, and the view grew: keep going. If it did not grow
     // (a filter hides the new rows, or groups are closed), wait to be asked.
     if (more && this.viewLen > before && this.nearEnd()) this.fetchMore();

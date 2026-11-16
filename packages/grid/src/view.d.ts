@@ -35,7 +35,12 @@ export interface Status extends Partial<Change> {
   range?: { cells: number; numbers: number; sum: number; avg: number; min: number; max: number } | null;
   /** While rows load as the person scrolls. */
   loading?: boolean;
+  /** `loadMore` said there are no more rows. */
   done?: boolean;
+  /** `loadMore` threw. The grid asks again on the next scroll near the end, or on `fetchMore()`. */
+  failed?: boolean;
+  /** What `loadMore` threw, when `failed`. */
+  error?: string;
 }
 
 /** The cell, group total or bottom-row total the person is on. */
@@ -84,7 +89,11 @@ export interface GridOptions {
   rowHeight?: number;
   /** What a screen reader calls the grid. */
   label?: string;
-  /** Called as the person nears the end: add rows to the table, and resolve to whether there may be more. */
+  /**
+   * Called as the person nears the end: add rows to the table, and resolve to
+   * whether there may be more. If it throws, `onError` and `onStatus` say so,
+   * and it is called again on the next scroll near the end.
+   */
   loadMore?: () => Promise<boolean>;
   onStatus?: (status: Status) => void;
   onFocus?: (focus: Focus | null) => void;
@@ -147,7 +156,7 @@ export declare class GridView {
   explainFocus(): { title: string; text: string } | null;
   selectedKeys(): string[];
   removeSelected(): void;
-  /** Asks `loadMore` for more rows now. */
+  /** Asks `loadMore` for more rows now: the first page, or again after one failed. */
   fetchMore(): Promise<void>;
   destroy(): void;
 }

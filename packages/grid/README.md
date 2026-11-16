@@ -116,7 +116,7 @@ and returns the view. Options:
 | `keyColumn` | The first column, which shows each row's key: `{ title, width }`. |
 | `columns` | How each column looks, by name: `decimals`, `signed` (colour by sign), `width`, and `trend` (how the cell moved; needs `history`). |
 | `theme` | One of `themes` (light, dark, paper, dusk, terminal, high contrast), or a `[data-wg-theme="name"]` rule of your own. With none, it takes the page's colours. |
-| `loadMore` | `async () => boolean`, called as the person nears the end: add rows to the table, and resolve to whether there may be more. |
+| `loadMore` | `async () => boolean`, called as the person nears the end: add rows to the table, and resolve to whether there may be more. If it throws, `onError` gets the message, `onStatus` gets `{ failed: true, error }`, and it is called again on the next scroll near the end (or `view.fetchMore()`). |
 | `onStatus`, `onFocus`, `onGroup`, `onError`, `onNote` | What happened: each recalculation and its cost, the cell the person is on, grouping, and messages to show them. |
 | `onEdit` | What a person changed: `{ cause, cells, removed }`, with each cell's `key`, `column`, `before` and `after`, and the keys of rows they deleted. Not called for changes made from code, so an app can save what people did. |
 
