@@ -64,3 +64,5 @@ details > summary { cursor: pointer; font-weight: 600; font-size: 14px; color: v
 button { font: 600 13px/1 var(--body); padding: 7px 12px; border-radius: 8px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--water); }
 button:disabled { opacity: 0.5; cursor: default; }
+/* What a recipe sent to its API, newest first. */
+.live pre.log { margin: 0; max-height: 140px; font-size: 12px; color: var(--muted); }

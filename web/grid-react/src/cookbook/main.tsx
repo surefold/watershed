@@ -10,6 +10,7 @@ import { install, recipes } from "../../../grid/src/cookbook/text";
 import { FirstGrid } from "./recipes/FirstGrid";
 import { FromAnApi } from "./recipes/FromAnApi";
 import { PagedApi } from "./recipes/PagedApi";
+import { EditAndSave } from "./recipes/EditAndSave";
 import { WebSocketPrices } from "./recipes/WebSocketPrices";
 import { ServerSentEvents } from "./recipes/ServerSentEvents";
 import { Charts } from "./recipes/Charts";
@@ -21,6 +22,7 @@ const live: Record<string, { file: string; Run: ComponentType }> = {
   "first-grid": { file: "FirstGrid.tsx", Run: FirstGrid },
   fetch: { file: "FromAnApi.tsx", Run: FromAnApi },
   paged: { file: "PagedApi.tsx", Run: PagedApi },
+  save: { file: "EditAndSave.tsx", Run: EditAndSave },
   websocket: { file: "WebSocketPrices.tsx", Run: WebSocketPrices },
   sse: { file: "ServerSentEvents.tsx", Run: ServerSentEvents },
   charts: { file: "Charts.tsx", Run: Charts },
@@ -52,7 +54,7 @@ function Cookbook() {
           Watershed <span>Grid</span> cookbook
         </h1>
         <p>
-          Small, whole examples of the grid in an app: a first table, rows from an API, pages loaded as you scroll, live updates over a WebSocket or SSE, charts that follow the table, and a large table in a worker. Each one runs
+          Small, whole examples of the grid in an app: a first table, rows from an API, pages loaded as you scroll, edits saved back to an API, live updates over a WebSocket or SSE, charts that follow the table, and a large table in a worker. Each one runs
           here, and the code under it is the file that runs. <a href="../">Back to the grid</a>.
         </p>
         <div className="switch" aria-label="Framework">

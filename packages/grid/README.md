@@ -31,7 +31,7 @@ orders.total("line");           // 60
 orders.why("o-1", "line");      // what line was worked out from
 ```
 
-**[The cookbook](https://surefold.dev/watershed/grid/cookbook/)** has whole, running examples in Solid and React: a first grid, rows from an API, pages loaded as you scroll, live updates over a WebSocket or SSE, charts that follow the table, and a large table in a worker.
+**[The cookbook](https://surefold.dev/watershed/grid/cookbook/)** has whole, running examples in Solid and React: a first grid, rows from an API, pages loaded as you scroll, edits saved back to an API, live updates over a WebSocket or SSE, charts that follow the table, and a large table in a worker.
 
 ## Install
 
