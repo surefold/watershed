@@ -68,8 +68,11 @@ when they are called, so a new one is used without drawing again.
 ## Signals
 
 - `createTotal(table, column)`: a column's total.
-- `createReading(table, (t) => …)`: anything read from the table, such as
-  `(t) => t.get("T-1")?.pnl`.
+- `createReading(table, (t) => …, isEqual?)`: anything read from the table,
+  such as `(t) => t.get("T-1")?.pnl`. It is set after every recalculation;
+  with `isEqual`, only when the new value compares unequal to the last.
+- `createGroups(table)`: the table's `groups()`, set only when a group, its
+  row count or a total changed.
 - `createChange(table)`: what the last recalculation did.
 
 Each follows the table from its first recalculation after it is made, and

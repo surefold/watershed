@@ -2,7 +2,7 @@
 //! inputs on the graph, update it, and read the outputs.
 
 use watershed_core::prelude::*;
-use watershed_core::{NodeId, Value, text, when};
+use watershed_core::{AggregateOp, Collection, NodeId, Type, Value, text, when};
 use watershed_gpu::{PlanError, Scenarios};
 
 /// A small deterministic random number generator, so every run is the same.
@@ -353,6 +353,174 @@ fn what_cannot_be_done_is_refused_by_name() {
     ));
 }
 
+/// Forty random totals (a sum, a minimum and a maximum of the same members),
+/// each over up to seventy members whose values are varied, shared or the
+/// same always, and which are present always, never, or in only some
+/// scenarios. The plan must give the graph's totals bit for bit: it combines
+/// the members in the tree the graph keeps.
+fn totals_give_what_the_graph_gives(run: impl Fn(&Scenarios, &[f64]) -> Vec<f64>) {
+    totals_give_what_the_graph_gives_in(false, run);
+}
+
+/// As above, with the plan's nodes in clusters if `clusters`.
+fn totals_give_what_the_graph_gives_in(
+    clusters: bool,
+    run: impl Fn(&Scenarios, &[f64]) -> Vec<f64>,
+) {
+    for seed in 1..=40u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
+        let mut g = Graph::new();
+        let vary: Vec<Input<f64>> = (0..4)
+            .map(|k| g.input(&format!("v{k}"), rng.value()).unwrap())
+            .collect();
+        let shared: Vec<Input<f64>> = (0..2)
+            .map(|k| g.input(&format!("s{k}"), rng.value()).unwrap())
+            .collect();
+        let mut members = Vec::new();
+        for m in 0..rng.below(71) {
+            let value = match rng.below(4) {
+                0 => g.input(&format!("fixed{m}"), rng.value()).unwrap().id(),
+                1 => {
+                    let s = shared[rng.below(shared.len())];
+                    g.define(&format!("x{m}"), s * rng.value()).unwrap().id()
+                }
+                _ => {
+                    let v = vary[rng.below(vary.len())];
+                    g.define(&format!("x{m}"), v + rng.value()).unwrap().id()
+                }
+            };
+            let present = match rng.below(5) {
+                0 => g.input(&format!("p{m}"), false).unwrap().id(),
+                1 => {
+                    let v = vary[rng.below(vary.len())];
+                    g.define(&format!("p{m}"), v.gt(0.0)).unwrap().id()
+                }
+                _ => g.input(&format!("p{m}"), true).unwrap().id(),
+            };
+            members.push((value, present));
+        }
+        let ops = [AggregateOp::Sum, AggregateOp::Min, AggregateOp::Max];
+        let mut outputs: Vec<NodeId> = ops
+            .iter()
+            .map(|&op| {
+                g.aggregate(&format!("{op}"), op, Type::F64, 0, &members)
+                    .unwrap()
+            })
+            .collect();
+        outputs.push(vary[0].id());
+        g.stabilize();
+
+        let make = match clusters {
+            true => Scenarios::with_clusters,
+            false => Scenarios::with_shared,
+        };
+        let mut plan = make(&g, &ids(&vary), &ids(&shared), &outputs).unwrap();
+        for round in 0..3 {
+            if round > 0 {
+                let values: Vec<f64> = shared.iter().map(|_| rng.value()).collect();
+                plan.set_shared(&values);
+                for (&input, &x) in shared.iter().zip(&values) {
+                    g.set(input, x).unwrap();
+                }
+            }
+            let inputs: Vec<f64> = (0..40 * vary.len()).map(|_| rng.value()).collect();
+            let got = run(&plan, &inputs);
+            let want = by_the_graph(&mut g, &vary, &outputs, &inputs);
+            assert_same(&format!("seed {seed}, round {round}"), &got, &want);
+        }
+    }
+}
+
+#[test]
+fn on_the_cpu_a_total_gives_what_the_graph_gives_bit_for_bit() {
+    totals_give_what_the_graph_gives(|plan, inputs| plan.run_cpu(inputs));
+}
+
+#[test]
+fn on_the_cpu_a_total_in_clusters_gives_what_the_graph_gives() {
+    totals_give_what_the_graph_gives_in(true, |plan, inputs| plan.run_cpu(inputs));
+}
+
+/// A collection of `rows` rows whose `line` column reads the varied `fx`, and
+/// its sum, largest and smallest line, then a node that reads the sum.
+fn orders(rows: usize) -> (Graph, Input<f64>, Vec<NodeId>) {
+    let mut g = Graph::new();
+    let fx = g.input("fx", 1.25).unwrap();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty").unwrap();
+    let price = orders.field::<f64>("price").unwrap();
+    let line = orders.column(&mut g, "line", qty * price * fx).unwrap();
+    let revenue = orders.sum(&mut g, "revenue", line).unwrap();
+    let largest = orders.max(&mut g, "largest", line).unwrap();
+    let smallest = orders.min(&mut g, "smallest", line).unwrap();
+    for i in 0..rows {
+        let row = [
+            qty.is((i % 37) as f64 + 0.5),
+            price.is(1.0 + (i % 11) as f64 / 7.0),
+        ];
+        orders.upsert(&mut g, &format!("o{i}"), &row).unwrap();
+    }
+    g.stabilize();
+    let after = g.define("after", revenue * 2.0 + fx).unwrap();
+    g.stabilize();
+    let outputs = vec![revenue.id(), largest.id(), smallest.id(), after.id()];
+    (g, fx, outputs)
+}
+
+#[test]
+fn a_long_total_gives_what_the_graph_gives_on_the_cpu() {
+    let (mut g, fx, outputs) = orders(2000);
+    let plan = Scenarios::new(&g, &[fx.id()], &outputs).unwrap();
+    let inputs = [0.5, 1.0, -3.0, f64::NAN, 0.0, -0.0, 1e300, 7.25];
+    let want = by_the_graph(&mut g, &[fx], &outputs, &inputs);
+    assert_same("a long total", &plan.run_cpu(&inputs), &want);
+}
+
+#[test]
+fn a_collections_totals_run_as_a_plan_and_can_be_read_by_what_follows() {
+    let mut g = Graph::new();
+    let fx = g.input("fx", 1.25).unwrap();
+    let mut orders = Collection::new(&g, "orders");
+    let qty = orders.field::<f64>("qty").unwrap();
+    let price = orders.field::<f64>("price").unwrap();
+    let line = orders.column(&mut g, "line", qty * price * fx).unwrap();
+    let revenue = orders.sum(&mut g, "revenue", line).unwrap();
+    let largest = orders.max(&mut g, "largest", line).unwrap();
+    let smallest = orders.min(&mut g, "smallest", line).unwrap();
+    let count = orders.count(&mut g, "count").unwrap();
+    for i in 0..1000 {
+        let row = [
+            qty.is((i % 37) as f64 + 0.5),
+            price.is(1.0 + (i % 11) as f64 / 7.0),
+        ];
+        orders.upsert(&mut g, &format!("o{i}"), &row).unwrap();
+    }
+    g.stabilize();
+    // A removed row is absent from the totals.
+    orders.remove(&mut g, "o7").unwrap();
+    let after = g.define("after", revenue * 2.0 + fx).unwrap();
+    g.stabilize();
+
+    let outputs = [revenue.id(), largest.id(), smallest.id(), after.id()];
+    let plan = Scenarios::new(&g, &[fx.id()], &outputs).unwrap();
+    let inputs = [0.5, 1.0, -3.0, f64::NAN, 0.0, -0.0, 1e300];
+    let got = plan.run_cpu(&inputs);
+    let want = by_the_graph(&mut g, &[fx], &outputs, &inputs);
+    assert_same("a collection's totals", &got, &want);
+
+    // Saved and read back, it gives the same.
+    let mut file = Vec::new();
+    plan.save(&mut file).unwrap();
+    let back = Scenarios::load(&file[..]).unwrap();
+    assert_same("read back", &back.run_cpu(&inputs), &want);
+
+    // A count is a whole number, which a plan does not give.
+    assert!(matches!(
+        Scenarios::new(&g, &[fx.id()], &[count.id()]),
+        Err(PlanError::NotAFloat { .. })
+    ));
+}
+
 /// Needs an NVIDIA GPU and the CUDA libraries: `cargo test --features cuda`.
 #[cfg(feature = "gpu")]
 mod on_the_gpu {
@@ -384,6 +552,38 @@ mod on_the_gpu {
             gpu.run(&Scenarios::load(&file[..]).unwrap(), inputs)
                 .unwrap()
         });
+    }
+
+    #[test]
+    fn on_the_gpu_a_total_gives_what_the_graph_gives_bit_for_bit() {
+        let gpu = Gpu::new().unwrap();
+        totals_give_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());
+        // And by the general kernel.
+        let gpu = gpu.without_compiling();
+        totals_give_what_the_graph_gives(|plan, inputs| gpu.run(plan, inputs).unwrap());
+    }
+
+    #[test]
+    fn a_total_in_clusters_gives_what_the_graph_gives() {
+        let gpu = Gpu::new().unwrap();
+        totals_give_what_the_graph_gives_in(true, |plan, inputs| gpu.run(plan, inputs).unwrap());
+    }
+
+    #[test]
+    fn a_total_too_long_for_its_own_kernel_is_run_by_the_general_one() {
+        // 2,000 rows: each total is one node of about 4,000 instructions,
+        // longer than a shape gets a kernel written for.
+        let (mut g, fx, outputs) = orders(2000);
+        let plan = Scenarios::new(&g, &[fx.id()], &outputs).unwrap();
+        let inputs = [0.5, 1.0, -3.0, f64::NAN, 0.0, -0.0, 1e300, 7.25];
+        let want = by_the_graph(&mut g, &[fx], &outputs, &inputs);
+        let gpu = Gpu::new().unwrap();
+        assert_same(
+            "a long total on the GPU",
+            &gpu.run(&plan, &inputs).unwrap(),
+            &want,
+        );
+        assert_same("a long total on the CPU", &plan.run_cpu(&inputs), &want);
     }
 
     #[test]

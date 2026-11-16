@@ -5,11 +5,13 @@
   "workspaces": [
     "packages/*",
     "web/grid",
-    "web/grid-react"
+    "web/grid-react",
+    "web/e2e"
   ],
   "scripts": {
     "build": "web/build.sh",
     "check": "npm run check --workspaces --if-present",
-    "build:packages": "npm run build --workspace packages/grid --workspace packages/grid-solid --workspace packages/grid-react"
+    "build:packages": "npm run build --workspace packages/grid --workspace packages/grid-solid --workspace packages/grid-react",
+    "e2e": "npm run e2e --workspace web/e2e"
   }
 }

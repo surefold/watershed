@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
-import { GroupChart, Table, type GridView, type Group } from "@surefold/grid";
-import { Grid, useReading, useTable } from "@surefold/grid-react";
+import { GroupChart, Table, type GridView } from "@surefold/grid";
+import { Grid, useGroups, useTable } from "@surefold/grid-react";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
@@ -39,11 +39,9 @@ export function Charts() {
     return stock.watch(draw);
   }, [stock]);
 
-  // 2. Your own chart: useReading renders again when what it reads changes. It
-  // compares with ===, so read the groups as a string, then parse them. Hand
-  // them to any chart library.
-  const read = useReading(stock, (t) => JSON.stringify(t.groups()));
-  const groups = JSON.parse(read) as Group[];
+  // 2. Your own chart: useGroups renders again when a group's totals change,
+  // with a new array only then. Hand it to any chart library.
+  const groups = useGroups(stock);
   const most = Math.max(1, ...groups.map((g) => g.totals.value ?? 0));
 
   return (

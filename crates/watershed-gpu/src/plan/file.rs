@@ -9,8 +9,12 @@ use std::io::{self, Read, Write};
 use super::{Group, Output, Scenarios};
 use crate::fuse::Fused;
 
-/// The first bytes of a plan's file. The last is the layout's version.
-const MAGIC: [u8; 8] = *b"WSPLAN\0\x02";
+/// The first bytes of a plan's file. The last is the layout's version: 3
+/// since plans could hold totals, whose instructions an earlier crate does
+/// not know, so it refuses the file rather than misread it.
+const MAGIC: [u8; 8] = *b"WSPLAN\0\x03";
+/// The same layout, from before totals: read, and never written.
+const BEFORE_TOTALS: [u8; 8] = *b"WSPLAN\0\x02";
 /// The layout before clusters were written: read, and never written.
 const BEFORE_CLUSTERS: [u8; 8] = *b"WSPLAN\0\x01";
 /// A node of a clustered plan that is not written to a slot.
@@ -266,7 +270,7 @@ impl Scenarios {
         from.inner
             .read_exact(&mut magic)
             .map_err(|_| LoadError::NotAPlan)?;
-        if magic != MAGIC && magic != BEFORE_CLUSTERS {
+        if magic != MAGIC && magic != BEFORE_TOTALS && magic != BEFORE_CLUSTERS {
             return Err(LoadError::NotAPlan);
         }
         let vary = from.a_count()?;
@@ -288,7 +292,7 @@ impl Scenarios {
         let shared = from.some_f64s()?;
         let shared_programs = from.some_u32s()?;
         let shared_ops = from.some_u32s()?;
-        let clustered = match magic == MAGIC {
+        let clustered = match magic != BEFORE_CLUSTERS {
             true => from.take::<1>()?[0],
             false => 0,
         };
@@ -465,6 +469,23 @@ mod tests {
         let old = [&BEFORE_CLUSTERS[..], body, &summed.sum.to_le_bytes()].concat();
         let back = Scenarios::load(&old[..]).unwrap();
         assert!(back.fused.is_none());
+        let (was, now) = (plan.run_cpu(&inputs()), back.run_cpu(&inputs()));
+        assert!(
+            was.iter()
+                .zip(&now)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
+
+    #[test]
+    fn a_file_written_before_totals_were_is_still_read() {
+        let plan = plan();
+        let mut file = Vec::new();
+        plan.save(&mut file).unwrap();
+        // The same layout under its older first bytes; the sum is of what
+        // follows them, so it stands.
+        let old = [&BEFORE_TOTALS[..], &file[8..]].concat();
+        let back = Scenarios::load(&old[..]).unwrap();
         let (was, now) = (plan.run_cpu(&inputs()), back.run_cpu(&inputs()));
         assert!(
             was.iter()

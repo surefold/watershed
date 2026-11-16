@@ -70,6 +70,10 @@ extern "C" __global__ void level(
                     // equal values (0.0 and -0.0) the second.
                     case 6: a = (b != b) ? a : ((a < b) ? a : b); break;
                     case 7: a = (b != b) ? a : ((a > b) ? a : b); break;
+                    // A total's halves: a NaN wins, the left one first.
+                    case 26: a = (a != a) ? a : ((b != b) ? b : a + b); break;
+                    case 27: a = (a != a) ? a : ((b != b) ? b : ((a < b) ? a : b)); break;
+                    case 28: a = (a != a) ? a : ((b != b) ? b : ((a > b) ? a : b)); break;
                     // With a NaN on either side only "not equal" is true.
                     case 11: a = (a < b) ? 1.0 : 0.0; break;
                     case 12: a = (a <= b) ? 1.0 : 0.0; break;

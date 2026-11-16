@@ -14,6 +14,7 @@ import { PagedApi } from "./recipes/PagedApi";
 import { EditAndSave } from "./recipes/EditAndSave";
 import { WebSocketPrices } from "./recipes/WebSocketPrices";
 import { ServerSentEvents } from "./recipes/ServerSentEvents";
+import { EffectPrices } from "./recipes/EffectPrices";
 import { Charts } from "./recipes/Charts";
 import { InAWorker } from "./recipes/InAWorker";
 
@@ -26,6 +27,7 @@ const live: Record<string, { file: string; Run: ComponentType }> = {
   save: { file: "EditAndSave.tsx", Run: EditAndSave },
   websocket: { file: "WebSocketPrices.tsx", Run: WebSocketPrices },
   sse: { file: "ServerSentEvents.tsx", Run: ServerSentEvents },
+  effect: { file: "EffectPrices.tsx", Run: EffectPrices },
   charts: { file: "Charts.tsx", Run: Charts },
   worker: { file: "InAWorker.tsx", Run: InAWorker },
 };

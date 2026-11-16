@@ -9,7 +9,8 @@
 // Writes are messages, run in order. Reads the page needs at once (the
 // totals, the columns, the rows in view) come from a snapshot the worker
 // sends after each recalculation; the rest are answered by the worker, so
-// they return promises.
+// they return promises. The worker answers a write after the snapshot that
+// includes it, so once a write resolves, the totals here include it.
 
 import type { Call, FromWorker, Snapshot, ToWorker, Window } from "./protocol.js";
 import type { Cell, Change, Column, ColumnsOf, Fields, Group, Kind, RowOf, TableSpec, Total, ValueOf, ViewState } from "./table.js";
@@ -46,7 +47,7 @@ export class WorkerTable<F extends Fields = Fields, C extends string = string> {
   #pending = new Map<number, Pending>();
   #nextCall = 1;
   #nextView = 1;
-  #batch: Call[] | null = null;
+  #batch: { calls: Call[]; answered: Promise<void>; settle: () => void } | null = null;
   #ready: Promise<void>;
 
   /** A table of rows in a new worker. */
@@ -101,11 +102,16 @@ export class WorkerTable<F extends Fields = Fields, C extends string = string> {
     else for (const draw of this.#drawers.values()) draw();
   }
 
-  /** Sends calls to the worker; inside `batch`, gathers them instead. */
+  /**
+   * Sends calls to the worker; inside `batch`, gathers them instead. The
+   * worker replies after sending the snapshot that includes the calls, so
+   * when this resolves the page has it.
+   */
   #calls(calls: Call[], batch = false, tolerant = false): Promise<unknown[]> {
     if (this.#batch) {
-      this.#batch.push(...calls);
-      return Promise.resolve([]);
+      this.#batch.calls.push(...calls);
+      // Resolves when the batch is answered; if it fails, the batch's own promise says so.
+      return this.#batch.answered.then(() => []);
     }
     const id = this.#nextCall++;
     const done = new Promise<unknown[]>((resolve, reject) => this.#pending.set(id, { resolve, reject }));
@@ -166,21 +172,32 @@ export class WorkerTable<F extends Fields = Fields, C extends string = string> {
 
   /**
    * Runs `edits` and sends them as one message: one recalculation, and one
-   * step for undo. Inside it, writes are gathered rather than sent.
+   * step for undo. Inside it, writes are gathered rather than sent, and
+   * their promises resolve once the batch has been answered.
    */
   batch(edits: () => void): Promise<void> {
     const outer = this.#batch === null;
-    if (outer) this.#batch = [];
+    if (outer) {
+      let settle!: () => void;
+      const answered = new Promise<void>((resolve) => (settle = resolve));
+      this.#batch = { calls: [], answered, settle };
+    }
+    const mine = this.#batch!;
     try {
       edits();
     } catch (error) {
-      if (outer) this.#batch = null;
+      if (outer) {
+        // Nothing was sent: nothing to wait for.
+        this.#batch = null;
+        mine.settle();
+      }
       throw error;
     }
-    if (!outer) return Promise.resolve();
-    const calls = this.#batch!;
+    if (!outer) return mine.answered;
     this.#batch = null;
-    return this.#calls(calls, true).then(() => undefined);
+    const sent = this.#calls(mine.calls, true);
+    sent.then(mine.settle, mine.settle);
+    return sent.then(() => undefined);
   }
 
   // ------------------------------------------------------------- the view

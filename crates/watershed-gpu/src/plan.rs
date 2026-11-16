@@ -18,7 +18,7 @@ use std::fmt;
 use std::ops::Range;
 
 use rayon::prelude::*;
-use watershed_core::{BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
+use watershed_core::{AggregateOp, BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
 
 use crate::fuse::{Fused, fuse};
 mod file;
@@ -56,6 +56,14 @@ const EXP: u32 = 21;
 const LN: u32 = 22;
 const SQRT: u32 = 23;
 const POW: u32 = 24;
+// 25 is `fuse::LOCAL`.
+// A total's two halves combined as the graph's totals combine them: a NaN
+// on the left wins, then one on the right; otherwise added, or the smaller
+// or larger. (`MIN` and `MAX` let a number win over a NaN, as `f64::min`
+// does; a total does not, so that its result does not depend on its tree.)
+const AGG_SUM: u32 = 26;
+const AGG_MIN: u32 = 27;
+const AGG_MAX: u32 = 28;
 
 /// Where a load reads from.
 #[cfg(feature = "gpu")]
@@ -111,6 +119,9 @@ pub(crate) fn in_c(code: u32, on: &[&str]) -> String {
         // gives the other side, and of two equal values the second.
         MIN => format!("({b} != {b}) ? {a} : (({a} < {b}) ? {a} : {b})"),
         MAX => format!("({b} != {b}) ? {a} : (({a} > {b}) ? {a} : {b})"),
+        AGG_SUM => format!("({a} != {a}) ? {a} : (({b} != {b}) ? {b} : {a} + {b})"),
+        AGG_MIN => format!("({a} != {a}) ? {a} : (({b} != {b}) ? {b} : (({a} < {b}) ? {a} : {b}))"),
+        AGG_MAX => format!("({a} != {a}) ? {a} : (({b} != {b}) ? {b} : (({a} > {b}) ? {a} : {b}))"),
         LT => truth(format!("{a} < {b}")),
         LE => truth(format!("{a} <= {b}")),
         GT => truth(format!("{a} > {b}")),
@@ -148,7 +159,7 @@ pub enum PlanError {
     /// between them is neither an `f64` nor a bool.
     NotAFloat { node: String, ty: Type },
     /// A node that depends on a varied or shared input does something
-    /// scenarios cannot yet do: a choice, a total, or work on text, whole
+    /// scenarios cannot yet do: a choice, a count, or work on text, whole
     /// numbers or decimals.
     Unsupported { node: String, what: String },
     /// A node that stays the same in every scenario holds an error.
@@ -548,6 +559,145 @@ fn rough(g: &Graph, nodes: &[NodeId]) -> Rough {
     rough
 }
 
+/// Part of a total's tree, as it is lowered: nothing (room no member holds,
+/// or members that are absent: the operation's identity, which never changes
+/// a result), a number the same in every scenario, or instructions.
+enum Part {
+    Nothing,
+    Fixed(f64),
+    Ops(Vec<u32>, usize),
+}
+
+/// The instructions for a total (a `sum`, `min` or `max` over a collection
+/// or a group) whose members vary, and the stack they need.
+///
+/// They combine the members in the tree the graph keeps (see
+/// `watershed_core`'s aggregate): room for the next power of two, each slot
+/// its two halves combined, so the result is the graph's, bit for bit.
+/// Room no member holds, and members that are absent in every scenario, hold
+/// the identity, so they are left out; members that are the same in every
+/// scenario are combined now, in the same order, into one number.
+fn lowered_total(b: &mut Builder, id: NodeId) -> Result<(Vec<u32>, usize), PlanError> {
+    let g = b.g;
+    let refuse = |what: &str| PlanError::Unsupported {
+        node: g.name(id).to_string(),
+        what: what.into(),
+    };
+    let Some((op, members)) = g.aggregate_members(id) else {
+        return Err(refuse("a total"));
+    };
+    let (code, identity) = match op {
+        AggregateOp::Sum => (AGG_SUM, -0.0),
+        AggregateOp::Min => (AGG_MIN, f64::INFINITY),
+        AggregateOp::Max => (AGG_MAX, f64::NEG_INFINITY),
+        AggregateOp::Count => return Err(refuse("a count, which is a whole number")),
+    };
+    if g.node_type(id) != Type::F64 {
+        return Err(refuse("a total of whole numbers or decimals"));
+    }
+    let tree = Tree {
+        op,
+        code,
+        identity,
+        members: &members,
+    };
+    let capacity = members.len().max(1).next_power_of_two();
+    match tree.fold(b, 0, capacity)? {
+        Part::Nothing => Part::Fixed(identity).placed(b),
+        part => part.placed(b),
+    }
+}
+
+/// A total being lowered: how it combines, and its members (each a value
+/// node and a node saying whether the member is present).
+struct Tree<'m> {
+    op: AggregateOp,
+    code: u32,
+    identity: f64,
+    members: &'m [(NodeId, NodeId)],
+}
+
+impl Tree<'_> {
+    /// Two parts combined as the graph's totals combine them.
+    fn combine(&self, x: f64, y: f64) -> f64 {
+        if x.is_nan() {
+            return x;
+        }
+        if y.is_nan() {
+            return y;
+        }
+        match self.op {
+            AggregateOp::Min => x.min(y),
+            AggregateOp::Max => x.max(y),
+            _ => x + y,
+        }
+    }
+
+    /// The members in `lo..hi` of the tree, combined as the graph combines
+    /// them: the two halves, each folded the same way.
+    fn fold(&self, b: &mut Builder, lo: usize, hi: usize) -> Result<Part, PlanError> {
+        if lo >= self.members.len() {
+            return Ok(Part::Nothing);
+        }
+        if hi - lo == 1 {
+            let (value, present) = self.members[lo];
+            let value = Part::load(b, value)?;
+            return match b.place(present) {
+                None => Ok(match b.fixed(present)? != 0.0 {
+                    true => value,
+                    false => Part::Nothing,
+                }),
+                Some(_) => {
+                    // Present in some scenarios: the value, or the identity.
+                    let (mut ops, _) = Part::load(b, present)?.placed(b)?;
+                    let (value, depth) = value.placed(b)?;
+                    ops.extend(value);
+                    ops.push(CONST | b.constant(self.identity)? << CODE_BITS);
+                    ops.push(SELECT);
+                    Ok(Part::Ops(ops, depth + 2))
+                }
+            };
+        }
+        let mid = (lo + hi) / 2;
+        let left = self.fold(b, lo, mid)?;
+        let right = self.fold(b, mid, hi)?;
+        Ok(match (left, right) {
+            // The identity changes nothing, so a half that is only room or
+            // absent members is left out.
+            (Part::Nothing, part) | (part, Part::Nothing) => part,
+            (Part::Fixed(x), Part::Fixed(y)) => Part::Fixed(self.combine(x, y)),
+            (left, right) => {
+                let (mut ops, left_depth) = left.placed(b)?;
+                let (right, right_depth) = right.placed(b)?;
+                ops.extend(right);
+                ops.push(self.code);
+                Part::Ops(ops, left_depth.max(right_depth + 1))
+            }
+        })
+    }
+}
+
+impl Part {
+    /// A node's value: a load from where it is, or the number it always is.
+    fn load(b: &mut Builder, node: NodeId) -> Result<Part, PlanError> {
+        Ok(match b.place(node) {
+            Some(Place::Slot(slot)) => Part::Ops(vec![LOAD | slot << CODE_BITS], 1),
+            Some(Place::Shared(at)) => Part::Ops(vec![LOAD_SHARED | at << CODE_BITS], 1),
+            None => Part::Fixed(b.fixed(node)?),
+        })
+    }
+
+    /// The instructions that leave this part on the stack, and the stack
+    /// they need.
+    fn placed(self, b: &mut Builder) -> Result<(Vec<u32>, usize), PlanError> {
+        Ok(match self {
+            Part::Ops(ops, depth) => (ops, depth),
+            Part::Fixed(x) => (vec![CONST | b.constant(x)? << CODE_BITS], 1),
+            Part::Nothing => unreachable!("an empty part is left out, not placed"),
+        })
+    }
+}
+
 enum Visit {
     Enter(NodeId),
     Leave(NodeId),
@@ -599,6 +749,11 @@ fn eval(ops: &[u32], consts: &[f64], shared: &[f64], vals: &[f64]) -> f64 {
                     POW => a.powf(b),
                     MIN => a.min(b),
                     MAX => a.max(b),
+                    AGG_SUM | AGG_MIN | AGG_MAX if a.is_nan() => a,
+                    AGG_SUM | AGG_MIN | AGG_MAX if b.is_nan() => b,
+                    AGG_SUM => a + b,
+                    AGG_MIN => a.min(b),
+                    AGG_MAX => a.max(b),
                     // As the graph compares: with a NaN on either side,
                     // only "not equal" is true.
                     LT => truth(a < b),
@@ -796,64 +951,76 @@ impl Scenarios {
         let mut shared_programs: Vec<u32> = Vec::new();
         for (nodes, rough) in order.chunks(AT_A_TIME).zip(&roughs) {
             for (&id, node) in nodes.iter().zip(&rough.nodes) {
-                let (range, deepest) = match node {
+                let varied = |b: &Builder| g.dependencies(id).iter().any(|&d| b.place(d).is_some());
+                // The node's instructions, with where each reads from; the
+                // level after the highest slot read; and whether it reads a
+                // slot, so is worked out for every scenario.
+                let mut placed: Vec<u32> = Vec::new();
+                let mut level = 0;
+                let deepest = match node {
                     RoughNode::Total => {
-                        if g.dependencies(id).iter().any(|&d| b.place(d).is_some()) {
-                            return Err(PlanError::Unsupported {
-                                node: b.name(id),
-                                what: "a total".into(),
-                            });
+                        if !varied(&b) {
+                            continue;
                         }
-                        continue;
+                        let (ops, deepest) = lowered_total(&mut b, id)?;
+                        placed = ops;
+                        deepest
                     }
                     RoughNode::Refused(refused) => {
                         // Whether it matters: does it read anything that is
                         // not the same always?
-                        if g.dependencies(id).iter().any(|&d| b.place(d).is_some()) {
+                        if varied(&b) {
                             kind_of(g, id)?;
                             return Err(refused.clone());
                         }
                         continue;
                     }
-                    RoughNode::Ops(range, deepest) => (range.clone(), *deepest),
+                    RoughNode::Ops(range, deepest) => {
+                        let reads = |op: &u32| match op & CODE {
+                            LOAD => b.place(rough.reads[(op >> CODE_BITS) as usize]),
+                            _ => None,
+                        };
+                        if !rough.ops[range.clone()]
+                            .iter()
+                            .any(|op| reads(op).is_some())
+                        {
+                            continue;
+                        }
+                        kind_of(g, id)?;
+                        for &op in &rough.ops[range.clone()] {
+                            let at = (op >> CODE_BITS) as usize;
+                            placed.push(match op & CODE {
+                                LOAD => match b.place(rough.reads[at]) {
+                                    Some(Place::Slot(slot)) => LOAD | slot << CODE_BITS,
+                                    Some(Place::Shared(at)) => LOAD_SHARED | at << CODE_BITS,
+                                    None => {
+                                        let x = b.fixed(rough.reads[at])?;
+                                        CONST | b.constant(x)? << CODE_BITS
+                                    }
+                                },
+                                CONST => CONST | b.constant(rough.consts[at])? << CODE_BITS,
+                                _ => op,
+                            });
+                        }
+                        *deepest
+                    }
                 };
-                let reads = |op: &u32| match op & CODE {
-                    LOAD => b.place(rough.reads[(op >> CODE_BITS) as usize]),
-                    _ => None,
-                };
-                let mut places = rough.ops[range.clone()].iter().filter_map(reads);
-                let every_scenario = places.clone().any(|p| matches!(p, Place::Slot(_)));
-                if !every_scenario && places.next().is_none() {
-                    continue;
-                }
-                kind_of(g, id)?;
                 if deepest > MAX_STACK {
                     return Err(PlanError::TooDeep(b.name(id)));
+                }
+                let mut every_scenario = false;
+                for &op in &placed {
+                    if op & CODE == LOAD {
+                        every_scenario = true;
+                        level = level.max(b.level_of[(op >> CODE_BITS) as usize] + 1);
+                    }
                 }
                 let into = match every_scenario {
                     true => &mut ops,
                     false => &mut shared_ops,
                 };
                 let start = into.len();
-                let mut level = 0;
-                for &op in &rough.ops[range] {
-                    let at = (op >> CODE_BITS) as usize;
-                    into.push(match op & CODE {
-                        LOAD => match b.place(rough.reads[at]) {
-                            Some(Place::Slot(slot)) => {
-                                level = level.max(b.level_of[slot as usize] + 1);
-                                LOAD | slot << CODE_BITS
-                            }
-                            Some(Place::Shared(at)) => LOAD_SHARED | at << CODE_BITS,
-                            None => {
-                                let x = b.fixed(rough.reads[at])?;
-                                CONST | b.constant(x)? << CODE_BITS
-                            }
-                        },
-                        CONST => CONST | b.constant(rough.consts[at])? << CODE_BITS,
-                        _ => op,
-                    });
-                }
+                into.extend_from_slice(&placed);
                 if into.len() > u32::MAX as usize {
                     return Err(PlanError::TooLarge);
                 }

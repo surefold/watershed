@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "jsx": "react-jsx", "types": ["vite/client"] },
-  "include": ["src", "../../packages/grid-react/src"]
+  "include": ["src", "../../packages/grid-react/src", "../e2e/fixtures/unmount-react.tsx"]
 }

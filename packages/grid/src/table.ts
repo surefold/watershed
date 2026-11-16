@@ -452,6 +452,11 @@ export class Table<F extends Fields = Fields, C extends string = string> {
     this.#changed();
   }
 
+  /** @internal Recalculates now if writes are waiting (as a worker does before it replies). */
+  flushWaiting(): Change | undefined {
+    return this.#waiting ? this.flush() : undefined;
+  }
+
   /** @internal The engine was changed directly (as the demo does): recalculate soon. */
   touched(): void {
     this.#changed();

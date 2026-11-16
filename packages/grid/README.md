@@ -116,7 +116,8 @@ and returns the view. Options:
 | `keyColumn` | The first column, which shows each row's key: `{ title, width }`. |
 | `columns` | How each column looks, by name: `decimals`, `signed` (colour by sign), `width`, and `trend` (how the cell moved; needs `history`). |
 | `theme` | One of `themes` (light, dark, paper, dusk, terminal, high contrast), or a `[data-wg-theme="name"]` rule of your own. With none, it takes the page's colours. |
-| `loadMore` | `async () => boolean`, called as the person nears the end: add rows to the table, and resolve to whether there may be more. |
+| `loadMore` | `async () => boolean`, called as the person nears the end: add rows to the table, and resolve to whether there may be more. If it throws, `onError` gets the message, `onStatus` gets `{ failed: true, error }`, and it is called again on the next scroll near the end (or `view.fetchMore()`). |
+| `rowClass` | `(key) => string \| undefined`: classes to give a row, such as `"unsaved"`, for your own CSS. Called each time a row is drawn, so the classes follow the row as people scroll and sort. When what it would give changes, call `view.redrawRows()`. Works the same for a `Table` and a `WorkerTable`. |
 | `onStatus`, `onFocus`, `onGroup`, `onError`, `onNote` | What happened: each recalculation and its cost, the cell the person is on, grouping, and messages to show them. |
 | `onEdit` | What a person changed: `{ cause, cells, removed }`, with each cell's `key`, `column`, `before` and `after`, and the keys of rows they deleted. Not called for changes made from code, so an app can save what people did. |
 
@@ -126,7 +127,8 @@ filter (`setSort`, `setFilter`, `setQuickFilter`, the same as the table's
 they show (`fitColumn`, `fitColumns`; people double-click a column's edge),
 look back
 (`setAsOf(epoch)`), explain the focused cell (`explainFocus`), keep and restore
-the column layout (`getLayout`, `setLayout`), and `destroy()` it.
+the column layout (`getLayout`, `setLayout`), draw the rows again for new
+`rowClass` classes (`redrawRows`), and `destroy()` it.
 
 People can sort, filter, group, pin, hide, move and resize columns, edit,
 undo, copy and paste to and from a spreadsheet, and pick out a block of cells,
@@ -147,7 +149,7 @@ recalculation (seconds).
 import { WorkerTable, drawGrid } from "@surefold/grid";
 
 const trades = await WorkerTable.create({ fields: { … }, formulas: { … }, totals: { … } });
-await trades.putMany(keys, columns);
+await trades.putMany(keys, columns);       // resolves once the page has the totals with these rows
 drawGrid(element, trades);                  // the same grid, drawing from the worker
 trades.set("T-1", "mark", 102);             // a message; the grid redraws when the worker has recalculated
 trades.total("pnl");                        // from the last snapshot, at once
@@ -157,8 +159,13 @@ await trades.why("T-1", "pnl");             // answered by the worker
 It has `Table`'s methods, with two differences:
 
 - **Writes are messages**, run in order, and return promises (which can be
-  ignored). `batch(() => …)` sends what it gathers as one message: one
-  recalculation, one step for undo.
+  ignored). A write's promise resolves once the worker has recalculated and
+  the page has the snapshot that includes it, so after `await
+  trades.putMany(…)`, `size` and `total()` count those rows. A write that
+  changes nothing resolves as soon as the worker answers. `batch(() => …)`
+  sends what it gathers as one message: one recalculation, one step for
+  undo; the writes inside it resolve with it. `sort`, `filter`, `search` and
+  `group` resolve the same way.
 - **Reads come in two kinds.** `size`, `columns()`, `total()`, `groups()`,
   `totalTrend()` and `history()` read the snapshot the worker sends after
   each recalculation, at once; so do `peek`, `watch` and the Solid and React

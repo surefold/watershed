@@ -52,8 +52,12 @@
 //! Both branches of a condition are worked out and one is kept, which gives
 //! the same answer as the graph because none of these can fail.
 //!
+//! Totals too: the `sum`, `min` or `max` of numbers over a collection or a
+//! grouping. A plan combines the members in the tree the graph keeps, so it
+//! gives the graph's total bit for bit.
+//!
 //! A node that depends on a varied or shared input and holds a choice, a
-//! total, or work on text, whole numbers or decimals is refused when the
+//! count, or work on text, whole numbers or decimals is refused when the
 //! plan is made, with its name. So is one that reads a node holding an
 //! error, even in a branch that is not taken.
 

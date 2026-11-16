@@ -53,7 +53,7 @@ export const recipes: Recipe[] = [
       "Scroll down: each page is twenty more products from the same API.",
     ],
     notes: [
-      "If <code>loadMore</code> throws, the grid says so through <code>onError</code> and stops asking. Here a failed page is caught and reported, and <code>loadMore</code> resolves to <code>true</code>, so scrolling asks for it again.",
+      "If <code>loadMore</code> throws, the grid passes the message to <code>onError</code>, calls <code>onStatus</code> with <code>{ failed: true, error }</code>, and asks again on the next scroll near the end, or when you call <code>fetchMore()</code>. A list already at its end cannot scroll further, so a person there needs a way to ask: here the status says the page did not load, and a Try again button calls <code>fetchMore()</code>.",
       "Sorting, filtering and grouping work over the rows loaded so far, and totals are of those rows.",
     ],
   },
@@ -72,6 +72,7 @@ export const recipes: Recipe[] = [
       "A row that fails to save stays unsaved, so pressing Save again retries it. A field changed again while a save is on its way also stays unsaved, because only what was sent is marked as saved.",
       "To save as people type, call the same <code>save</code> from <code>onEdit</code>, after a pause of a second or so with no edits.",
       "Deleted rows come in <code>removed</code>, for a <code>DELETE</code> each; new rows are ones your code puts, so it knows to <code>POST</code> them.",
+      "The grid's <code>rowClass</code> gives a row classes by its key: here <code>unsaved</code>, tinted in the page's CSS. It is asked each time a row is drawn, so the tint follows the row as you scroll or sort; when the unsaved rows change, <code>view.redrawRows()</code> draws the rows in view again.",
     ],
   },
   {
@@ -102,6 +103,24 @@ export const recipes: Recipe[] = [
     ],
   },
   {
+    id: "effect",
+    title: "Streams and retries with Effect",
+    intro: [
+      "The WebSocket recipe again, with <a href=\"https://effect.website\">Effect</a> doing the parts a real app needs and the hand-written one leaves out. " +
+        "The connection is a <code>Stream</code> of messages whose socket is opened with <code>acquireRelease</code>, so it is closed however the stream stops. " +
+        "When the server drops it, <code>Stream.retry</code> opens another on a <code>Schedule</code>: an exponential backoff, capped, with jitter, which starts again once messages come. " +
+        "Batching is a step of the stream, <code>groupedWithin</code>, in place of the frame timer, and each batch is one <code>table.batch</code>.",
+      "Connect runs it all as a fiber. Disconnect, or the component going, interrupts the fiber: the socket closes, or the wait to reconnect stops, and nothing is left running. The table and the grid are the same as before. Press Connect.",
+    ],
+    notes: [
+      "<code>npm install effect</code>. This page uses Effect 4. The grid packages do not depend on it: Effect lives in your app, and the table only sees <code>batch</code>, <code>put</code> and <code>set</code>.",
+      "It costs some bundle. The parts of Effect this recipe uses come to 55 KB minified, 19 KB gzipped; with the recipe and its source, this page's JavaScript went from 55 KB to 77 KB gzipped (Solid), and from 118 KB to 140 KB (React). Most of it is Effect's runtime, which more Effect elsewhere in the app shares.",
+      "The schedule's <code>tap</code> sees each wait before it starts, with its length and the attempt: that is where the status line comes from. To give up after ten failed tries in a row, add <code>Schedule.upTo({ times: 10 })</code> to the schedule's <code>pipe</code>; the fiber then ends with the last error.",
+      "The same shape fits SSE or polling. For SSE, open an <code>EventSource</code> in the <code>acquireRelease</code>, offer its messages to the queue, and fail on its <code>error</code>, so that your schedule decides when to try again rather than the browser. " +
+        "For polling, the stream is <code>Stream.fromEffectSchedule(load, Schedule.spaced(\"5 seconds\"))</code>, where <code>load</code> is an <code>Effect.tryPromise((signal) =&gt; fetch(url, { signal }))</code>: interrupting the fiber aborts the request, and the same <code>retry</code> backs off while the server is down.",
+    ],
+  },
+  {
     id: "charts",
     title: "Charts from the table",
     intro: [
@@ -113,7 +132,7 @@ export const recipes: Recipe[] = [
     notes: [
       "With <code>history</code> set on the table, <code>totalTrend(column)</code> gives how a total moved over recent recalculations, for a line or sparkline.",
       "<code>groups()</code> follows the grid's filters and group order: filter the grid and the bars are of the rows that pass.",
-      "In React, <code>useReading</code> wants a value that compares with <code>===</code>, so a list such as <code>groups()</code> is read as a string and parsed. In Solid, <code>createReading</code> follows any value.",
+      "<code>useGroups</code> (React) and <code>createGroups</code> (Solid) follow <code>groups()</code>, and change only when a group, its row count or a total does. For other lists or objects, give <code>useReading</code> or <code>createReading</code> a third argument, <code>isEqual(a, b)</code>, so a value that compares equal is kept rather than drawn again.",
     ],
   },
   {
@@ -125,7 +144,7 @@ export const recipes: Recipe[] = [
       "Press the button to load 300,000 rows in blocks of 50,000. Scroll and sort while they load, then move a thousand prices at once.",
     ],
     notes: [
-      "Writes (<code>put</code>, <code>putMany</code>, <code>set</code>, <code>batch</code>) are messages to the worker, run in order. Each returns a promise, which you can ignore or wait for. It resolves once the worker has taken the write; the totals it changes come a moment later, with the recalculation's snapshot, so read them in <code>watch</code>, <code>createTotal</code> or <code>useTotal</code>.",
+      "Writes (<code>put</code>, <code>putMany</code>, <code>set</code>, <code>batch</code>) are messages to the worker, run in order. Each returns a promise, which you can ignore or wait for. It resolves once the worker has recalculated and the page has the snapshot that includes the write, so after <code>await table.putMany(…)</code>, <code>size</code> and <code>total</code> count those rows. To follow totals as they change, whoever changed them, read them in <code>watch</code>, <code>createTotal</code> or <code>useTotal</code>.",
       "<code>size</code>, <code>total</code>, <code>groups</code> and <code>columns</code> read the snapshot the worker sends after each recalculation, so they answer at once. <code>get</code>, <code>why</code> and <code>csv</code> ask the worker, so they return promises.",
       "With Vite, set <code>worker: { format: \"es\" }</code> in the config: the worker is a module. Webpack 5 and Rollup bundle it as they are.",
       "<code>dispose()</code> stops the worker. A table made in a component should be disposed when the component goes, and promises still waiting on it reject.",

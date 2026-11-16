@@ -37,6 +37,16 @@ const THREADS_PER_BLOCK: u32 = 256;
 /// and compiling a kernel for each would take longer than it saves.
 const MOST_SHAPES: usize = 256;
 
+/// A plan with a shape longer than this is run by the general kernel too: a
+/// large total is one long shape (two instructions a member), and its kernel
+/// would be as long.
+const LONGEST_SHAPE: usize = 1024;
+
+/// Whether shapes are few and short enough to write a kernel for each.
+fn writable(shapes: &[Vec<u32>]) -> bool {
+    shapes.len() <= MOST_SHAPES && shapes.iter().all(|shape| shape.len() <= LONGEST_SHAPE)
+}
+
 /// Why a GPU run failed.
 #[derive(Debug)]
 pub enum GpuError {
@@ -461,7 +471,7 @@ impl Gpu {
 
     /// Whether a kernel is compiled for each of a plan's shapes.
     fn compiles(&self, plan: &Scenarios) -> bool {
-        self.compiles && plan.shapes.len() <= MOST_SHAPES
+        self.compiles && writable(&plan.shapes)
     }
 
     /// The plan's clusters, if its nodes are to be worked out in them: it
@@ -469,7 +479,7 @@ impl Gpu {
     fn clusters<'p>(&self, plan: &'p Scenarios) -> Option<&'p Fused> {
         plan.fused
             .as_ref()
-            .filter(|f| self.compiles && self.fuses && f.shapes.len() <= MOST_SHAPES)
+            .filter(|f| self.compiles && self.fuses && writable(&f.shapes))
     }
 
     /// How many slots a scenario takes on this GPU.
