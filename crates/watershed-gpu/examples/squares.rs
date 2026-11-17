@@ -33,6 +33,11 @@
 //!
 //!     cargo run --release -p watershed-gpu --example squares -- polish record.csv tighter.csv
 //!
+//! and after that a number of times to shake it and try again (`-` for no
+//! file out):
+//!
+//!     cargo run --release -p watershed-gpu --example squares -- polish record.csv - 40
+//!
 //! `shared/squares_check.py` scores such a file with the competition's own
 //! metric.
 
@@ -626,9 +631,15 @@ fn centre(packing: &mut [Square]) {
 /// Tries to tighten a packing that is already good, such as a published
 /// record: squeezes it to a slightly smaller side, goes down the penalty's
 /// gradient from there, and keeps the result if what comes out, spread until
-/// nothing overlaps, fills a smaller square than before. The arrangement is
-/// kept: only pairs of squares that start near each other are modelled.
-fn polish(path: &str, out: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+/// nothing overlaps, fills a smaller square than before. Then the same
+/// `shakes` times over from the packing shaken, by a little and by more.
+/// The arrangement is kept: only pairs of squares that start near each
+/// other are modelled.
+fn polish(
+    path: &str,
+    out: Option<String>,
+    shakes: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut best = read(path)?;
     let n = best.len();
     centre(&mut best);
@@ -643,24 +654,44 @@ fn polish(path: &str, out: Option<String>) -> Result<(), Box<dyn std::error::Err
     let made = started.elapsed();
     let started = Instant::now();
     let (mut descents, mut batches) = (0, 0);
+    // Squeezed by `shrink` and shaken by up to `shake`, then downhill:
+    // whether that came out smaller than the best, which it then replaces.
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+    let mut attempt = |best: &mut Vec<Square>, side: &mut f64, shrink: f64, shake: f64| {
+        let aim = *side * (1.0 - shrink);
+        let mut packing: Vec<Square> = best
+            .iter()
+            .map(|&[x, y, a]| {
+                [
+                    x * (1.0 - shrink) + shake * rng.spread(),
+                    y * (1.0 - shrink) + shake * rng.spread(),
+                    a + shake * rng.spread(),
+                ]
+            })
+            .collect();
+        plan.set_shared(&[aim / 2.0]);
+        let (_, ran) = descend(&plan, &mut packing, 400);
+        descents += 1;
+        batches += ran;
+        centre(&mut packing);
+        let reached = spread(&mut packing);
+        if reached >= *side - 1e-10 {
+            return false;
+        }
+        *side = reached;
+        *best = packing;
+        true
+    };
     for shrink in [1e-3, 1e-5, 1e-7] {
-        loop {
-            let aim = side * (1.0 - shrink);
-            let mut packing: Vec<Square> = best
-                .iter()
-                .map(|&[x, y, a]| [x * (1.0 - shrink), y * (1.0 - shrink), a])
-                .collect();
-            plan.set_shared(&[aim / 2.0]);
-            let (_, ran) = descend(&plan, &mut packing, 400);
-            descents += 1;
-            batches += ran;
-            centre(&mut packing);
-            let reached = spread(&mut packing);
-            if reached >= side - 1e-10 {
-                break;
+        while attempt(&mut best, &mut side, shrink, 0.0) {}
+    }
+    // Shaken, to see whether a nearby arrangement is tighter.
+    for k in 0..shakes {
+        let shake = [0.003, 0.01, 0.03, 0.1][k % 4];
+        if attempt(&mut best, &mut side, 1e-4, shake) {
+            for shrink in [1e-3, 1e-5, 1e-7] {
+                while attempt(&mut best, &mut side, shrink, 0.0) {}
             }
-            side = reached;
-            best = packing;
         }
     }
     assert_eq!(penalty_by_hand(&best, side), 0.0, "the packing overlaps");
@@ -685,7 +716,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arg = |nth: usize| std::env::args().nth(nth);
     if arg(1).as_deref() == Some("polish") {
         let path = arg(2).ok_or("polish needs a packing file")?;
-        return polish(&path, arg(3));
+        let shakes = arg(4).map_or(0, |s| s.parse().expect("the shakes are a number"));
+        return polish(&path, arg(3).filter(|out| out != "-"), shakes);
     }
     let n: usize = arg(1).map_or(10, |n| n.parse().expect("the count is a number"));
     let seconds: f64 = arg(2).map_or(20.0, |s| s.parse().expect("the seconds are a number"));
