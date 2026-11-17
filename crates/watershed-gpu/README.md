@@ -449,33 +449,42 @@ python3 examples/shared/grid_data.py /path/to/data             # a week, about 6
 cargo run --release --example grid_balancing -- /path/to/data
 ```
 
-`squares` is a search with the engine as its evaluator, and a case where
-the engine is the slower choice. It packs unit squares into the smallest
-square it can, as Kaggle's "Squares in Squares" competition asks: the model
-is how far the squares overlap and stick out of a container, a move of one
-square is an update of the graph, and plans try many places for a square,
-or every input nudged, at once.
+`squares` is a search with the engine as its evaluator. It packs unit
+squares into the smallest square it can, as Kaggle's "Squares in Squares"
+competition asks: the model is how far the squares overlap and stick out of
+a container, a move of one square is an update of the graph, and plans try
+many places for a square at once, or go downhill on the penalty's
+derivative nodes ([`Graph::gradient`](../watershed-core/README.md#derivatives)).
 
 ```bash
 cargo run --release --example squares -- 10 60 packing.csv     # 10 squares, searched for 60 s
+cargo run --release --example squares -- polish record.csv tighter.csv   # tighten a packing from a file
 python3 examples/shared/squares_check.py /path/to/metric.py packing.csv   # the competition's own metric
 ```
 
 One run of each, on four cores of a 2.1 GHz Xeon, no GPU:
 
-| Squares | A move on the graph | The same by hand | A whole packing in a plan | A gradient by nudging |
-|---|---|---|---|---|
-| 20 | 8.6 µs | 0.25 µs | 21 µs | 2.6 ms |
-| 100 | 57 µs | 0.38 µs | 0.51 ms | 0.31 s |
-| 400 | 352 µs | 0.93 µs | 9.3 ms | 22 s |
+| Squares | A move on the graph | The same by hand | A whole packing in a plan | Its gradient by nudging | Its gradient from derivative nodes |
+|---|---|---|---|---|---|
+| 20 | 8.3 µs | 0.21 µs | 17 µs | 2.0 ms | 63 µs |
+| 100 | 45 µs | 0.38 µs | 0.45 ms | 0.27 s | 1.9 ms |
+| 400 | 334 µs | 0.88 µs | 7.8 ms | 18.6 s | 36 ms |
 
-A move changes about one node a square, each some hundred operations, and
-the sum by hand skips squares that are far apart, which a formula cannot.
-A gradient by nudging runs the whole model six times for every square; a
-derivative worked out from the formulas would cost a few runs, and the
-engine has none. In a minute the search reaches the best side known for 5
-squares (to 7 × 10⁻⁹) and for 10 (to 2 × 10⁻⁵), stays on the grid for 11, and
-for 17 reaches 4.850 where 4.676 is known.
+- **A single move is where the engine is the slower choice.** It changes
+  about one node a square, each some hundred operations, and the sum by
+  hand skips squares that are far apart, which a formula cannot.
+- **The gradient costs four to five times the model.** Nudging runs the
+  model six times for every square. The derivative nodes are 6 million
+  nodes at 400 squares, 18 s to make and 5 s to plan.
+- **The search finds small packings and not hard ones.** In a minute it
+  reaches the best side known for 5 squares (to 6 × 10⁻⁸) and for 10 (to
+  4 × 10⁻⁶), stays on the grid for 11, and for 17 reaches 4.708 where 4.676
+  is known.
+- **Polishing does not beat a record.** Of the published packings for 2 to
+  113 squares, squeezed and sent downhill, none came out tighter; seven
+  larger ones tried (up to 300 squares) did not either. A packing that is
+  loose does tighten: one of 37 squares spread by 1% came back to within
+  10⁻⁵ of the record in 4 s.
 
 `liabilities` and `capital` need the reference model's tables and answers.
 `examples/shared/liabilities_reference.py` runs lifelib and writes them:
