@@ -1,0 +1,12 @@
+[package]
+name = "santa-2025"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# An experiment, kept out of the main workspace and its CI.
+[workspace]
+
+[dependencies]
+watershed-core = { path = "../../crates/watershed-core", default-features = false }
