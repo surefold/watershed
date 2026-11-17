@@ -25,6 +25,10 @@ pub enum UnOp {
     Ln,
     /// The square root of an `f64`. Of a negative number it is not a number.
     Sqrt,
+    /// The sine of an `f64`, taken as an angle in radians.
+    Sin,
+    /// The cosine of an `f64`, taken as an angle in radians.
+    Cos,
     /// Any value as text: `3` as `"3"`, `2.0` as `"2.0"`, `true` as `"true"`.
     /// Text stays as it is.
     ToText,
@@ -205,7 +209,9 @@ impl Ir {
                 let a = a.type_check(type_of_node)?;
                 match op {
                     UnOp::Neg | UnOp::Abs if a.is_numeric() => Ok(a),
-                    UnOp::Exp | UnOp::Ln | UnOp::Sqrt if a == Type::F64 => Ok(a),
+                    UnOp::Exp | UnOp::Ln | UnOp::Sqrt | UnOp::Sin | UnOp::Cos if a == Type::F64 => {
+                        Ok(a)
+                    }
                     UnOp::Not if a == Type::Bool => Ok(Type::Bool),
                     UnOp::ToText => Ok(Type::Str),
                     UnOp::ToDecimal if a == Type::I64 => Ok(Type::Decimal),
@@ -432,6 +438,8 @@ impl Ir {
             Ir::Unary(UnOp::Exp, a) => format!("exp({})", a.render(name)),
             Ir::Unary(UnOp::Ln, a) => format!("ln({})", a.render(name)),
             Ir::Unary(UnOp::Sqrt, a) => format!("sqrt({})", a.render(name)),
+            Ir::Unary(UnOp::Sin, a) => format!("sin({})", a.render(name)),
+            Ir::Unary(UnOp::Cos, a) => format!("cos({})", a.render(name)),
             Ir::Unary(UnOp::ToText, a) => format!("text({})", a.render(name)),
             Ir::Unary(UnOp::ToDecimal, a) => format!("decimal({})", a.render(name)),
             Ir::Unary(UnOp::ToFloat, a) => format!("float({})", a.render(name)),
@@ -540,6 +548,8 @@ pub(crate) fn unary(op: UnOp, a: Value) -> Value {
         (UnOp::Exp, Value::F64(x)) => Value::F64(x.exp()),
         (UnOp::Ln, Value::F64(x)) => Value::F64(x.ln()),
         (UnOp::Sqrt, Value::F64(x)) => Value::F64(x.sqrt()),
+        (UnOp::Sin, Value::F64(x)) => Value::F64(x.sin()),
+        (UnOp::Cos, Value::F64(x)) => Value::F64(x.cos()),
         (UnOp::Abs, Value::I64(x)) => x
             .checked_abs()
             .map_or_else(|| Value::error("integer overflow"), Value::I64),

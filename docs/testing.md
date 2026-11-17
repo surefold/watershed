@@ -25,6 +25,7 @@ its `parallel` feature), the workspace tests on stable Rust and on Rust 1.85
 | [`crates/watershed-core/tests/behaviour.rs`](../crates/watershed-core/tests/behaviour.rs) | One test per guarantee, named as a sentence: `only_nodes_that_depend_on_a_change_are_recalculated`, `an_update_stops_where_a_value_comes_out_the_same`, `a_node_reached_by_two_paths_is_recalculated_once_and_never_sees_half_an_update`, and so on. The list of names is the specification. |
 | [`crates/watershed-core/tests/properties.rs`](../crates/watershed-core/tests/properties.rs) | Property tests (proptest). They build thousands of random graphs with awkward values (NaN, infinity, integer overflow, failed inputs), apply random updates, and check the invariants below after every update. Separate properties cover history, node removal, pull mode, collections and collection history. |
 | [`crates/watershed-core/tests/decimal.rs`](../crates/watershed-core/tests/decimal.rs), [`history.rs`](../crates/watershed-core/tests/history.rs), [`sink.rs`](../crates/watershed-core/tests/sink.rs) | Decimal arithmetic and rounding, reading earlier updates, and change sinks. |
+| [`crates/watershed-core/tests/derivative.rs`](../crates/watershed-core/tests/derivative.rs) | Derivative nodes against the model itself, nudged: every function, corners and conditions on both sides, totals, and formulas taken in steps. A plan's derivative nodes are held to the graph's bit for bit in `watershed-gpu`'s tests. |
 | Doc examples in `crates/watershed-core/src/` | The examples in the API documentation run as tests. Two in [`lib.rs`](../crates/watershed-core/src/lib.rs) must fail to compile: a number plus a string, and setting a calculated node. |
 | [`crates/watershed-gpu/tests/scenarios.rs`](../crates/watershed-gpu/tests/scenarios.rs) | Scenario plans against the graph, and with `--features cuda` the GPU against the CPU. See below. |
 | [`crates/watershed-grid/tests/grid.rs`](../crates/watershed-grid/tests/grid.rs) | The grid's table logic, natively. |
@@ -64,7 +65,7 @@ proof:
   100,000-row total in pieces with no slot a row, counts of groups whose rows
   change with the varied input, choices, and a 300-row lookup split into
   nodes.
-- `exp`, `ln` and `pow` on the GPU are tested to a relative 10⁻¹⁴ of the CPU
+- `exp`, `ln`, `pow`, `sin` and `cos` on the GPU are tested to a relative 10⁻¹⁴ of the CPU
   result, not to bit equality.
 - The larger examples assert bit equality between the graph and the plan on
   a sample of scenarios, and several are checked against independent

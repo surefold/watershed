@@ -59,6 +59,7 @@ pub mod aggregate;
 pub mod collection;
 mod compile;
 pub mod decimal;
+mod derivative;
 pub mod error;
 pub mod expr;
 pub mod formula;
