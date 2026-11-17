@@ -281,10 +281,10 @@ fn maths_functions_give_what_the_graph_gives() {
     }
 }
 
-#[test]
-fn derivative_nodes_give_what_the_graph_gives() {
-    // A sum of long formulas with corners in them, and its derivative by
-    // every input: totals, conditions and formulas taken in steps.
+/// A sum of long formulas with corners in them, and its derivative by
+/// every input: totals, conditions and formulas taken in steps. With the
+/// plan, the graph, its inputs, the outputs and the scenarios to try.
+fn with_derivatives() -> (Scenarios, Graph, Vec<Input<f64>>, Vec<NodeId>, Vec<f64>) {
     let mut g = Graph::new();
     let present = g.input("present", true).unwrap();
     let inputs: Vec<Input<f64>> = (0..6)
@@ -318,8 +318,17 @@ fn derivative_nodes_give_what_the_graph_gives() {
     let scenarios: Vec<f64> = (0..50 * by.len())
         .map(|k| ((k * 37 % 101) as f64 - 50.0) / 40.0)
         .collect();
+    (plan, g, inputs, outputs, scenarios)
+}
+
+#[test]
+fn derivative_nodes_give_what_the_graph_gives() {
+    let (plan, mut g, inputs, outputs, scenarios) = with_derivatives();
     let got = plan.run_cpu(&scenarios);
-    for (scenario, got) in scenarios.chunks(by.len()).zip(got.chunks(outputs.len())) {
+    for (scenario, got) in scenarios
+        .chunks(inputs.len())
+        .zip(got.chunks(outputs.len()))
+    {
         for (&input, &value) in inputs.iter().zip(scenario) {
             g.set(input, value).unwrap();
         }
@@ -938,6 +947,49 @@ mod on_the_gpu {
         let on_gpu = gpu.run(&plan, &inputs).unwrap();
         for (cpu, gpu) in on_cpu.iter().zip(&on_gpu) {
             assert!((cpu - gpu).abs() <= 1e-14 * cpu.abs(), "{cpu} and {gpu}");
+        }
+    }
+
+    #[test]
+    fn the_general_kernels_maths_functions_are_within_a_few_last_digits_of_the_cpu() {
+        // Read from each node's instructions, not compiled for its shape:
+        // the general kernel has a case of its own for every function.
+        let gpu = Gpu::new().unwrap().without_compiling();
+        let (plan, _, _, _, inputs) = with_maths();
+        let on_cpu = plan.run_cpu(&inputs);
+        let on_gpu = gpu.run(&plan, &inputs).unwrap();
+        for (cpu, gpu) in on_cpu.iter().zip(&on_gpu) {
+            assert!((cpu - gpu).abs() <= 1e-14 * cpu.abs(), "{cpu} and {gpu}");
+        }
+    }
+
+    #[test]
+    fn derivative_nodes_are_within_a_few_last_digits_of_the_cpu() {
+        // Sines and cosines are in them, so not to the last bit. Three ways:
+        // a kernel for each shape, a node at a time, and the general kernel.
+        let (plan, _, _, outputs, scenarios) = with_derivatives();
+        let on_cpu = plan.run_cpu(&scenarios);
+        let ways = [
+            ("compiled", Gpu::new().unwrap()),
+            ("a node at a time", Gpu::new().unwrap().without_fusing()),
+            (
+                "the general kernel",
+                Gpu::new().unwrap().without_compiling(),
+            ),
+        ];
+        for (way, gpu) in ways {
+            let on_gpu = gpu.run(&plan, &scenarios).unwrap();
+            assert_eq!(on_cpu.len(), on_gpu.len(), "{way}");
+            for (k, (cpu, gpu)) in on_cpu.iter().zip(&on_gpu).enumerate() {
+                // A derivative is a sum of terms that can cancel: a few last
+                // digits of the terms, which are of the order of one.
+                assert!(
+                    (cpu - gpu).abs() <= 1e-13 * cpu.abs().max(1.0),
+                    "{way}: output {} of scenario {}: {cpu} and {gpu}",
+                    k % outputs.len(),
+                    k / outputs.len()
+                );
+            }
         }
     }
 
