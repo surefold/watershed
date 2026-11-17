@@ -33,6 +33,10 @@ use crate::plan::{
 
 const THREADS_PER_BLOCK: u32 = 256;
 
+/// The most numbers gathered on the GPU to copy back in one piece: 32 MB.
+/// More outputs than this come back in several pieces.
+const GATHERED: usize = 1 << 22;
+
 /// A plan with more shapes than this is run by the general kernel: writing
 /// and compiling a kernel for each would take longer than it saves.
 const MOST_SHAPES: usize = 256;
@@ -108,6 +112,7 @@ pub struct Gpu {
     stream: Arc<CudaStream>,
     level: CudaFunction,
     total: CudaFunction,
+    gather: CudaFunction,
     /// Whether to compile a kernel for each shape of a plan.
     compiles: bool,
     /// Whether to work nodes out in clusters, where a plan has them.
@@ -141,6 +146,13 @@ struct Device {
     consts: CudaSlice<f64>,
     shared: CudaSlice<f64>,
     vals: CudaSlice<f64>,
+    /// For each output that is a slot, where it goes in a scenario's
+    /// outputs and its slot; and how many there are.
+    picks: CudaSlice<u32>,
+    picked: usize,
+    /// Where outputs are gathered to be copied back in one piece: some
+    /// scenarios' outputs, a scenario after another.
+    gathered: CudaSlice<f64>,
     /// How many scenarios `vals` has room for, and how many slots each has.
     room: usize,
     slots: usize,
@@ -340,12 +352,14 @@ impl Gpu {
         let module = ctx.load_module(ptx)?;
         let level = module.load_function("level")?;
         let total = module.load_function("total")?;
+        let gather = module.load_function("gather")?;
         let stream = ctx.default_stream();
         Ok(Gpu {
             ctx,
             stream,
             level,
             total,
+            gather,
             compiles: true,
             fuses: true,
             compiled: Mutex::new(HashMap::new()),
@@ -427,7 +441,7 @@ impl Gpu {
 
             let started = Instant::now();
             self.take(
-                &device,
+                &mut device,
                 plan,
                 count,
                 &mut results[first * outputs..(first + count) * outputs],
@@ -629,11 +643,33 @@ impl Gpu {
         let started = Instant::now();
         let slots = self.slots(plan);
         let fused = self.clusters(plan).is_some();
+        let outputs = match fused {
+            true => &plan.fused_outputs,
+            false => &plan.outputs,
+        };
+        let picks: Vec<u32> = outputs
+            .iter()
+            .enumerate()
+            .filter_map(|(at, output)| match *output {
+                Output::Slot(slot) => Some([at as u32, slot]),
+                Output::Shared(_) | Output::Fixed(_) => None,
+            })
+            .flatten()
+            .collect();
+        let gathered = (room * outputs.len()).min(GATHERED).max(outputs.len());
         let device = Device {
             program,
             consts: self.some(&plan.consts)?,
             shared: self.some(&plan.shared)?,
             vals: self.stream.alloc_zeros::<f64>(slots * room)?,
+            picked: picks.len() / 2,
+            // An empty allocation is refused, and a plan may have no
+            // outputs that are slots, or none at all.
+            picks: match picks.is_empty() {
+                true => self.stream.clone_htod(&[0u32])?,
+                false => self.stream.clone_htod(&picks)?,
+            },
+            gathered: self.stream.alloc_zeros::<f64>(gathered.max(1))?,
             room,
             slots,
             fused,
@@ -729,38 +765,90 @@ impl Gpu {
     }
 
     /// Copies the outputs of the first `count` scenarios back, a scenario
-    /// after another.
+    /// after another. The outputs that are slots are gathered on the GPU
+    /// in that order and copied back in one piece, or in a few if there
+    /// are more than [`GATHERED`] numbers: a copy for each output costs
+    /// more than working a small batch out does.
     fn take(
         &self,
-        device: &Device,
+        device: &mut Device,
         plan: &Scenarios,
         count: usize,
         results: &mut [f64],
     ) -> Result<(), GpuError> {
         let outputs = plan.outputs.len();
-        // The outputs come back an output at a time, and are wanted a
-        // scenario at a time.
-        let mut back = vec![0.0; outputs * count];
-        for (output, column) in device.outputs(plan).iter().zip(back.chunks_mut(count)) {
-            match *output {
-                Output::Slot(slot) => {
-                    let row = slot as usize * count;
-                    self.stream
-                        .memcpy_dtoh(&device.vals.slice(row..row + count), column)?;
-                }
-                Output::Shared(at) => column.fill(plan.shared[at as usize]),
-                Output::Fixed(x) => column.fill(x),
-            }
+        if outputs == 0 {
+            return Ok(());
         }
-        self.stream.synchronize()?;
-        results
-            .par_chunks_mut(outputs)
+        if device.picked > 0 {
+            let at_a_time = (device.gathered.len() / outputs).max(1);
+            for first in (0..count).step_by(at_a_time) {
+                let some = at_a_time.min(count - first);
+                self.launch_gather(
+                    device,
+                    outputs as u32,
+                    first as u32,
+                    some as u32,
+                    count as u32,
+                )?;
+                self.stream.memcpy_dtoh(
+                    &device.gathered.slice(..some * outputs),
+                    &mut results[first * outputs..(first + some) * outputs],
+                )?;
+            }
+            self.stream.synchronize()?;
+        }
+        // The rest are the same for every scenario, and are not on the GPU.
+        let same: Vec<(usize, f64)> = device
+            .outputs(plan)
+            .iter()
             .enumerate()
-            .for_each(|(s, row)| {
-                for (o, x) in row.iter_mut().enumerate() {
-                    *x = back[o * count + s];
+            .filter_map(|(at, output)| match *output {
+                Output::Slot(_) => None,
+                Output::Shared(shared) => Some((at, plan.shared[shared as usize])),
+                Output::Fixed(x) => Some((at, x)),
+            })
+            .collect();
+        if !same.is_empty() {
+            results.par_chunks_mut(outputs).for_each(|row| {
+                for &(at, x) in &same {
+                    row[at] = x;
                 }
             });
+        }
+        Ok(())
+    }
+
+    /// Gathers the outputs that are slots, for `count` scenarios from
+    /// `first` on, into `device.gathered`.
+    #[allow(unsafe_code)]
+    fn launch_gather(
+        &self,
+        device: &mut Device,
+        outputs: u32,
+        first: u32,
+        count: u32,
+        scenarios: u32,
+    ) -> Result<(), GpuError> {
+        let picked = device.picked as u32;
+        let mut launch = self.stream.launch_builder(&self.gather);
+        launch
+            .arg(&device.vals)
+            .arg(&device.picks)
+            .arg(&mut device.gathered)
+            .arg(&picked)
+            .arg(&outputs)
+            .arg(&first)
+            .arg(&count)
+            .arg(&scenarios);
+        // SAFETY: the arguments are those `gather` in kernel.cu declares, in
+        // order. `picks` has `picked` pairs, each a place below `outputs`
+        // and a slot below the device's slots; `vals` has a row of
+        // `scenarios` columns for each slot, and `first + count` is at most
+        // `scenarios`, so every read is inside it; `gathered` has at least
+        // `count * outputs` numbers, and a thread past `picked * count`
+        // writes nothing.
+        unsafe { launch.launch(Self::config(picked as u64 * count as u64)) }?;
         Ok(())
     }
 
@@ -916,7 +1004,7 @@ impl Loaded<'_> {
         self.work_out(plan)?;
         let mut results = vec![0.0; self.scenarios * plan.outputs.len()];
         self.gpu
-            .take(&self.device, plan, self.scenarios, &mut results)?;
+            .take(&mut self.device, plan, self.scenarios, &mut results)?;
         Ok(results)
     }
 
