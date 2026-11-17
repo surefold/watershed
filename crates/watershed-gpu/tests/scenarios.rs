@@ -282,6 +282,58 @@ fn maths_functions_give_what_the_graph_gives() {
 }
 
 #[test]
+fn derivative_nodes_give_what_the_graph_gives() {
+    // A sum of long formulas with corners in them, and its derivative by
+    // every input: totals, conditions and formulas taken in steps.
+    let mut g = Graph::new();
+    let present = g.input("present", true).unwrap();
+    let inputs: Vec<Input<f64>> = (0..6)
+        .map(|k| g.input(&format!("x{k}"), 0.3 * k as f64 - 0.7).unwrap())
+        .collect();
+    let mut parts = Vec::new();
+    for i in 0..inputs.len() {
+        for j in i + 1..inputs.len() {
+            let (a, b) = (inputs[i], inputs[j]);
+            let d = a - b;
+            let part = (d.clone() * a.cos() + b.sin())
+                .abs()
+                .max((d.clone() * d - 0.2).abs())
+                .min(a * b + 1.5);
+            let part = g
+                .define(&format!("part{i}_{j}"), part.clone() * part)
+                .unwrap();
+            parts.push((part.id(), present.id()));
+        }
+    }
+    let sum = g
+        .aggregate("sum", AggregateOp::Sum, Type::F64, 0, &parts)
+        .unwrap();
+    let by: Vec<_> = inputs.iter().map(|i| i.id()).collect();
+    let slopes = g.gradient(sum, &by, "slope").unwrap();
+    g.stabilize();
+
+    let mut outputs = vec![sum];
+    outputs.extend(&slopes);
+    let plan = Scenarios::new(&g, &by, &outputs).unwrap();
+    let scenarios: Vec<f64> = (0..50 * by.len())
+        .map(|k| ((k * 37 % 101) as f64 - 50.0) / 40.0)
+        .collect();
+    let got = plan.run_cpu(&scenarios);
+    for (scenario, got) in scenarios.chunks(by.len()).zip(got.chunks(outputs.len())) {
+        for (&input, &value) in inputs.iter().zip(scenario) {
+            g.set(input, value).unwrap();
+        }
+        g.stabilize();
+        for (&output, &got) in outputs.iter().zip(got) {
+            let Value::F64(want) = *g.value(output) else {
+                panic!("{} is not a number", g.name(output));
+            };
+            assert_eq!(want.to_bits(), got.to_bits(), "{}", g.name(output));
+        }
+    }
+}
+
+#[test]
 fn a_chain_needs_room_for_a_few_nodes_at_once_not_all_of_them() {
     // Each node reads only the one before, so its slot is free two levels on.
     let mut g = Graph::new();

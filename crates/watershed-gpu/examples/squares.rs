@@ -14,9 +14,10 @@
 //!
 //! - **a move at a time**, on the graph: set one square's inputs, update,
 //!   read the penalty. Annealing runs on this.
-//! - **whole packings in a batch**, as a plan over all the inputs: every
-//!   nudge of every input at once gives a gradient, and every step length at
-//!   once a line search. The polish runs on this.
+//! - **whole packings in a batch**, as a plan over all the inputs whose
+//!   outputs are the penalty and its derivative by every input
+//!   (`Graph::gradient`): the way downhill, and every step length along it
+//!   at once. The polish runs on this.
 //! - **one square in a batch**, as a plan over one square's inputs with the
 //!   others fixed: many places to put it, tried at once.
 //!
@@ -26,6 +27,11 @@
 //! competition's format:
 //!
 //!     cargo run --release -p watershed-gpu --example squares -- 11 60 packing.csv
+//!
+//! or give it a packing to tighten, such as a published record, keeping its
+//! arrangement:
+//!
+//!     cargo run --release -p watershed-gpu --example squares -- polish record.csv tighter.csv
 //!
 //! `shared/squares_check.py` scores such a file with the competition's own
 //! metric.
@@ -91,13 +97,33 @@ struct Model {
     half: Input<f64>,
     penalty: NodeId,
     side: NodeId,
+    /// The penalty's derivative by each input, in the order of `inputs`.
+    /// Empty in a model made without them.
+    slopes: Vec<NodeId>,
+}
+
+/// Which pairs of squares a model has an overlap node for.
+#[derive(Clone, Copy)]
+enum Pairs {
+    /// Every pair: the squares may go anywhere.
+    All,
+    /// Pairs whose centres start within this distance: for squares that
+    /// will only be moved a little.
+    Within(f64),
 }
 
 impl Model {
-    fn new(packing: &[Square], half: f64) -> Result<Model, Box<dyn std::error::Error>> {
+    /// The model with `packing` in it. With `slopes`, it also has the
+    /// penalty's derivative by every input, which every move then updates:
+    /// a model for moving one square at a time is made without.
+    fn new(
+        packing: &[Square],
+        half: f64,
+        pairs: Pairs,
+        slopes: bool,
+    ) -> Result<Model, Box<dyn std::error::Error>> {
         let n = packing.len();
         let mut g = Graph::new();
-        g.reserve(8 * n + n * n / 2, 5 * n * n);
         let half = g.input("half", half)?;
         let present = g.input("present", true)?;
 
@@ -135,6 +161,12 @@ impl Model {
         }
         for i in 0..n {
             for j in i + 1..n {
+                if let Pairs::Within(reach) = pairs {
+                    let (dx, dy) = (packing[j][0] - packing[i][0], packing[j][1] - packing[i][1]);
+                    if dx * dx + dy * dy > reach * reach {
+                        continue;
+                    }
+                }
                 let (dx, dy) = (squares[j][0] - squares[i][0], squares[j][1] - squares[i][1]);
                 let (ci, si, cj, sj) = (cos[i], sin[i], cos[j], sin[j]);
                 // Along any side of either square, the two reach this far
@@ -171,6 +203,12 @@ impl Model {
         };
         let side = Ir::Binary(BinOp::Max, span(&g, right, left), span(&g, top, bottom));
         let side = g.define_ir("side", side)?;
+        let slopes = if slopes {
+            let inputs: Vec<NodeId> = squares.iter().flatten().map(|i| i.id()).collect();
+            g.gradient(penalty, &inputs, "slope")?
+        } else {
+            Vec::new()
+        };
         g.stabilize();
         Ok(Model {
             g,
@@ -178,6 +216,7 @@ impl Model {
             half,
             penalty,
             side,
+            slopes,
         })
     }
 
@@ -218,6 +257,19 @@ impl Model {
             &self.inputs(),
             &[self.half.id()],
             &[self.penalty, self.side],
+        )?)
+    }
+
+    /// A plan over whole packings: the penalty of each, and its derivative
+    /// by every input.
+    fn downhill(&self) -> Result<Scenarios, Box<dyn std::error::Error>> {
+        let mut outputs = vec![self.penalty];
+        outputs.extend(&self.slopes);
+        Ok(Scenarios::with_shared(
+            &self.g,
+            &self.inputs(),
+            &[self.half.id()],
+            &outputs,
         )?)
     }
 
@@ -409,53 +461,82 @@ fn replace_worst(
     Ok(())
 }
 
-/// Lowers the penalty of a nearly valid packing by its gradient, with whole
-/// packings run through the plan in batches: one batch of every input nudged
-/// up and down, then one of every step length. Returns the penalty reached
-/// and the batches run.
-fn polish(plan: &Scenarios, packing: &mut [Square], rounds: usize) -> (f64, usize) {
+/// Lowers the penalty of a packing as far as it will go, down its
+/// gradient, which the plan gives with the penalty: the derivative nodes are
+/// among its outputs. Each round runs one batch, of every step length at
+/// once along a direction that remembers the last few rounds (L-BFGS).
+/// Returns the penalty reached and the batches run.
+fn descend(plan: &Scenarios, packing: &mut [Square], rounds: usize) -> (f64, usize) {
     let width = 3 * packing.len();
-    let flat = |p: &[Square]| p.iter().flatten().copied().collect::<Vec<f64>>();
-    let nudge = 1e-7;
-    let mut at = flat(packing);
-    let mut now = plan.run_cpu(&at)[0];
-    let mut batches = 0;
+    let out = width + 1;
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    let mut at: Vec<f64> = packing.iter().flatten().copied().collect();
+    let first = plan.run_cpu(&at);
+    let (mut now, mut slope) = (first[0], first[1..].to_vec());
+    // The last few steps and what each did to the slope.
+    let mut memory: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
+    let mut batches = 1;
     for _ in 0..rounds {
-        if now <= 1e-26 {
+        if now <= 1e-28 || dot(&slope, &slope) == 0.0 {
             break;
         }
-        let mut nudged = Vec::with_capacity(2 * width * width);
-        for k in 0..width {
-            for sign in [1.0, -1.0] {
-                nudged.extend_from_slice(&at);
-                let last = nudged.len() - width + k;
-                nudged[last] += sign * nudge;
-            }
+        // The way to go: downhill, bent by what the remembered steps say of
+        // the curvature.
+        let mut way: Vec<f64> = slope.iter().map(|s| -s).collect();
+        let mut weights = Vec::with_capacity(memory.len());
+        for (step, change) in memory.iter().rev() {
+            let weight = dot(step, &way) / dot(step, change);
+            way.iter_mut()
+                .zip(change)
+                .for_each(|(w, c)| *w -= weight * c);
+            weights.push(weight);
         }
-        let around = plan.run_cpu(&nudged);
-        let slope: Vec<f64> = (0..width)
-            .map(|k| (around[4 * k] - around[4 * k + 2]) / (2.0 * nudge))
-            .collect();
-        let steep = slope.iter().map(|s| s * s).sum::<f64>();
-        if steep == 0.0 {
-            break;
+        if let Some((step, change)) = memory.last() {
+            let scale = dot(step, change) / dot(change, change);
+            way.iter_mut().for_each(|w| *w *= scale);
         }
-        // Every step length from far too long to far too short, at once.
-        let lengths: Vec<f64> = (0..40).map(|k| 4.0 * 0.6_f64.powi(k)).collect();
+        for ((step, change), weight) in memory.iter().zip(weights.iter().rev()) {
+            let back = dot(change, &way) / dot(step, change);
+            way.iter_mut()
+                .zip(step)
+                .for_each(|(w, s)| *w += (weight - back) * s);
+        }
+        if dot(&way, &slope) >= 0.0 {
+            way = slope.iter().map(|s| -s).collect();
+            memory.clear();
+        }
+        // Every step length from too long to far too short, at once.
+        let lengths: Vec<f64> = (0..12).map(|k| 2.0 * 0.4_f64.powi(k)).collect();
         let mut tried = Vec::with_capacity(lengths.len() * width);
         for length in &lengths {
-            tried.extend(at.iter().zip(&slope).map(|(x, s)| x - length * s));
+            tried.extend(at.iter().zip(&way).map(|(x, w)| x + length * w));
         }
         let reached = plan.run_cpu(&tried);
-        batches += 2;
+        batches += 1;
         let best = (0..lengths.len())
-            .min_by(|&a, &b| reached[2 * a].total_cmp(&reached[2 * b]))
+            .min_by(|&a, &b| reached[out * a].total_cmp(&reached[out * b]))
             .expect("there are step lengths");
-        if reached[2 * best] >= now {
-            break;
+        if reached[out * best] >= now {
+            if memory.is_empty() {
+                break;
+            }
+            // The remembered curvature misled: forget it and go straight down.
+            memory.clear();
+            continue;
         }
-        now = reached[2 * best];
-        at.copy_from_slice(&tried[best * width..(best + 1) * width]);
+        let to = &tried[best * width..(best + 1) * width];
+        let new_slope = &reached[out * best + 1..out * (best + 1)];
+        let step: Vec<f64> = to.iter().zip(&at).map(|(a, b)| a - b).collect();
+        let change: Vec<f64> = new_slope.iter().zip(&slope).map(|(a, b)| a - b).collect();
+        if dot(&step, &change) > 1e-300 {
+            memory.push((step, change));
+            if memory.len() > 12 {
+                memory.remove(0);
+            }
+        }
+        now = reached[out * best];
+        at.copy_from_slice(to);
+        slope.copy_from_slice(new_slope);
     }
     for (square, numbers) in packing.iter_mut().zip(at.chunks(3)) {
         square.copy_from_slice(numbers);
@@ -485,15 +566,134 @@ fn spread(packing: &mut [Square]) -> f64 {
     side_by_hand(packing)
 }
 
+/// Reads a packing in the competition's format: a line a square, with
+/// columns named `x`, `y` and `angle` among them.
+fn read(path: &str) -> Result<Vec<Square>, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut lines = text.lines();
+    let heading: Vec<&str> = lines
+        .next()
+        .ok_or("the file is empty")?
+        .split(',')
+        .collect();
+    let column = |name: &str| {
+        heading
+            .iter()
+            .position(|h| h.trim() == name)
+            .ok_or(format!("{path} has no column {name}"))
+    };
+    let columns = [column("x")?, column("y")?, column("angle")?];
+    let mut packing = Vec::new();
+    for line in lines.filter(|l| !l.trim().is_empty()) {
+        let cells: Vec<&str> = line.split(',').collect();
+        let mut square = [0.0; 3];
+        for (number, &at) in square.iter_mut().zip(&columns) {
+            *number = cells.get(at).ok_or("a line is short")?.trim().parse()?;
+        }
+        packing.push(square);
+    }
+    Ok(packing)
+}
+
+fn write(path: &str, packing: &[Square]) -> std::io::Result<()> {
+    let n = packing.len();
+    let mut csv = String::from("id,n,square_id,x,y,angle\n");
+    for (k, [x, y, angle]) in packing.iter().enumerate() {
+        csv.push_str(&format!("{k},{n},{k},{x},{y},{angle}\n"));
+    }
+    std::fs::write(path, csv)
+}
+
+/// Moves a packing so that the square it fills is centred on the origin,
+/// where the model's container is.
+fn centre(packing: &mut [Square]) {
+    let end = |k: usize, sign: f64| {
+        packing
+            .iter()
+            .map(|&a| sign * a[k] + reach(a))
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let shift = [
+        (end(0, 1.0) - end(0, -1.0)) / 2.0,
+        (end(1, 1.0) - end(1, -1.0)) / 2.0,
+    ];
+    for square in packing.iter_mut() {
+        square[0] -= shift[0];
+        square[1] -= shift[1];
+    }
+}
+
+/// Tries to tighten a packing that is already good, such as a published
+/// record: squeezes it to a slightly smaller side, goes down the penalty's
+/// gradient from there, and keeps the result if what comes out, spread until
+/// nothing overlaps, fills a smaller square than before. The arrangement is
+/// kept: only pairs of squares that start near each other are modelled.
+fn polish(path: &str, out: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut best = read(path)?;
+    let n = best.len();
+    centre(&mut best);
+    let given = side_by_hand(&best);
+    // As doubles, squares that touched may overlap by a rounding: the side
+    // to beat is the side once they do not.
+    let mut side = spread(&mut best);
+    let start = side;
+    let started = Instant::now();
+    let model = Model::new(&best, side / 2.0, Pairs::Within(2.5), true)?;
+    let mut plan = model.downhill()?;
+    let made = started.elapsed();
+    let started = Instant::now();
+    let (mut descents, mut batches) = (0, 0);
+    for shrink in [1e-3, 1e-5, 1e-7] {
+        loop {
+            let aim = side * (1.0 - shrink);
+            let mut packing: Vec<Square> = best
+                .iter()
+                .map(|&[x, y, a]| [x * (1.0 - shrink), y * (1.0 - shrink), a])
+                .collect();
+            plan.set_shared(&[aim / 2.0]);
+            let (_, ran) = descend(&plan, &mut packing, 400);
+            descents += 1;
+            batches += ran;
+            centre(&mut packing);
+            let reached = spread(&mut packing);
+            if reached >= side - 1e-10 {
+                break;
+            }
+            side = reached;
+            best = packing;
+        }
+    }
+    assert_eq!(penalty_by_hand(&best, side), 0.0, "the packing overlaps");
+    let gain = start - side;
+    println!(
+        "{n} squares: side {given:.12} given, {start:.12} as doubles with nothing overlapping, {side:.12} polished: {} ({descents} descents, {batches} batches, {}; the model made in {})",
+        if gain > 1e-9 {
+            format!("TIGHTER by {gain:.3e}")
+        } else {
+            "no tighter".to_string()
+        },
+        time(started.elapsed()),
+        time(made)
+    );
+    if let Some(out) = out {
+        write(&out, &best)?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arg = |nth: usize| std::env::args().nth(nth);
+    if arg(1).as_deref() == Some("polish") {
+        let path = arg(2).ok_or("polish needs a packing file")?;
+        return polish(&path, arg(3));
+    }
     let n: usize = arg(1).map_or(10, |n| n.parse().expect("the count is a number"));
     let seconds: f64 = arg(2).map_or(20.0, |s| s.parse().expect("the seconds are a number"));
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
 
     let ceiling = (n as f64).sqrt().ceil();
     let started = Instant::now();
-    let mut model = Model::new(&grid(n), ceiling / 2.0)?;
+    let mut model = Model::new(&grid(n), ceiling / 2.0, Pairs::All, false)?;
     let built = started.elapsed();
     let started = Instant::now();
     let whole = model.whole()?;
@@ -505,8 +705,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time(started.elapsed())
     );
 
+    // The same model with the penalty's derivatives, and a plan that gives
+    // them: what the polish goes downhill on.
+    let started = Instant::now();
+    let with_slopes = Model::new(&grid(n), ceiling / 2.0, Pairs::All, true)?;
+    let built = started.elapsed();
+    let started = Instant::now();
+    let mut downhill = with_slopes.downhill()?;
+    println!(
+        "with the penalty's derivative by all {} inputs: a graph of {} nodes, made in {}; a plan of {} nodes, made in {}",
+        3 * n,
+        with_slopes.g.len(),
+        time(built),
+        downhill.nodes(),
+        time(started.elapsed())
+    );
+
     check(&mut model, &whole, &mut rng);
-    timings(&mut model, &whole, &mut rng)?;
+    check_slopes(&whole, &downhill, &mut rng);
+    timings(&mut model, &whole, &downhill, &mut rng)?;
 
     // The search. A side a step below the best is tried by annealing at it.
     // One that works is polished and kept; after one that does not, the
@@ -571,9 +788,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 continue;
             }
-            let mut plan = model.whole()?;
-            plan.set_shared(&[aim / 2.0]);
-            let (left, ran) = polish(&plan, &mut packing, 200);
+            downhill.set_shared(&[aim / 2.0]);
+            let (left, ran) = descend(&downhill, &mut packing, 500);
             batches += ran;
             let side = spread(&mut packing);
             if side < best.0 {
@@ -591,7 +807,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!(
-        "{tries} tries: {moves} moves on the graph ({} a move over the search), {replaced} squares put elsewhere by a plan of {PLACES} places, {batches} batches of whole packings",
+        "{tries} tries: {moves} moves on the graph ({} a move over the search), {replaced} squares put elsewhere by a plan of {PLACES} places, {batches} batches down the gradient",
         time(search.elapsed() / moves.max(1) as u32)
     );
 
@@ -614,11 +830,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if let Some(path) = arg(3) {
-        let mut csv = String::from("id,n,square_id,x,y,angle\n");
-        for (k, [x, y, angle]) in packing.iter().enumerate() {
-            csv.push_str(&format!("{k},{n},{k},{x},{y},{angle}\n"));
-        }
-        std::fs::write(&path, csv)?;
+        write(&path, &packing)?;
         println!("  written to {path}");
     }
     Ok(())
@@ -655,10 +867,40 @@ fn check(model: &mut Model, whole: &Scenarios, rng: &mut Rng) {
     );
 }
 
+/// The derivative nodes give what nudging each input gives.
+fn check_slopes(whole: &Scenarios, downhill: &Scenarios, rng: &mut Rng) {
+    let n = downhill.inputs() / 3;
+    let half = 0.45 * (n as f64).sqrt().ceil();
+    let (mut whole, mut downhill) = (whole.clone(), downhill.clone());
+    whole.set_shared(&[half]);
+    downhill.set_shared(&[half]);
+    let flat: Vec<f64> = scattered(n, half, rng).into_iter().flatten().collect();
+    let slopes = downhill.run_cpu(&flat);
+    let nudge = 1e-6;
+    let mut worst = 0.0_f64;
+    for k in 0..flat.len() {
+        let mut both = [flat.clone(), flat.clone()].concat();
+        both[k] += nudge;
+        both[flat.len() + k] -= nudge;
+        let around = whole.run_cpu(&both);
+        let nudged = (around[0] - around[2]) / (2.0 * nudge);
+        worst = worst.max((slopes[1 + k] - nudged).abs() / nudged.abs().max(1.0));
+    }
+    assert!(
+        worst < 1e-6,
+        "a derivative is {worst:e} from what nudging gives"
+    );
+    println!(
+        "checked on a scattered packing: each of the {} derivatives is what nudging its input gives, to {worst:.0e}",
+        flat.len()
+    );
+}
+
 /// What each way of asking costs.
 fn timings(
     model: &mut Model,
     whole: &Scenarios,
+    downhill: &Scenarios,
     rng: &mut Rng,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n = model.squares.len();
@@ -734,10 +976,25 @@ fn timings(
     std::hint::black_box(plan.run_cpu(&many));
     let each = started.elapsed() / count as u32;
     row("a whole packing", each, &format!("{count} at once"));
+    let nudging = each * 6 * n as u32;
     row(
         "a gradient: every input nudged up and down",
-        each * 6 * n as u32,
+        nudging,
         &format!("{} packings", 6 * n),
+    );
+    let mut plan = downhill.clone();
+    plan.set_shared(&[half]);
+    let fewer = (count / 8).max(cores());
+    let started = Instant::now();
+    std::hint::black_box(plan.run_cpu(&many[..fewer * 3 * n]));
+    let each = started.elapsed() / fewer as u32;
+    row(
+        "a gradient: the derivative nodes",
+        each,
+        &format!(
+            "{fewer} at once; {:.0} times quicker",
+            nudging.as_secs_f64() / each.as_secs_f64()
+        ),
     );
     model.place_all(&packing, half);
     let started = Instant::now();
