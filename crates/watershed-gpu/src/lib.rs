@@ -26,8 +26,8 @@
 //! Each result is the same, to the last bit, as setting those inputs on the
 //! graph and updating it, with three exceptions on the GPU: a result that is
 //! not a number may be a different not-a-number; `min` and `max` of `0.0`
-//! and `-0.0` follow x86-64; and `exp`, `ln` and `pow` may differ in the last
-//! digit or two, because no two maths libraries round them alike. (`sqrt` is
+//! and `-0.0` follow x86-64; and `exp`, `ln`, `pow`, `sin` and `cos` may differ in the
+//! last digit or two, because no two maths libraries round them alike. (`sqrt` is
 //! exact everywhere.)
 //!
 //! # Trying the same things on other data
@@ -48,7 +48,7 @@
 //! # What it handles
 //!
 //! Numbers (`f64`) and yes-or-no values: arithmetic, `min`, `max`, `abs`,
-//! `exp`, `ln`, `sqrt`, `pow`, comparisons, `&`, `|`, `!`, and conditions (`when(..).then(..).otherwise(..)`).
+//! `exp`, `ln`, `sqrt`, `pow`, `sin`, `cos`, comparisons, `&`, `|`, `!`, and conditions (`when(..).then(..).otherwise(..)`).
 //! Both branches of a condition are worked out and one is kept, which gives
 //! the same answer as the graph because none of these can fail.
 //!

@@ -64,7 +64,7 @@ proof:
   100,000-row total in pieces with no slot a row, counts of groups whose rows
   change with the varied input, choices, and a 300-row lookup split into
   nodes.
-- `exp`, `ln` and `pow` on the GPU are tested to a relative 10⁻¹⁴ of the CPU
+- `exp`, `ln`, `pow`, `sin` and `cos` on the GPU are tested to a relative 10⁻¹⁴ of the CPU
   result, not to bit equality.
 - The larger examples assert bit equality between the graph and the plan on
   a sample of scenarios, and several are checked against independent

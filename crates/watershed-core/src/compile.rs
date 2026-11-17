@@ -755,7 +755,13 @@ impl Compiler<'_> {
                 if ty == Type::Decimal
                     || matches!(
                         op,
-                        UnOp::ToDecimal | UnOp::ToFloat | UnOp::Exp | UnOp::Ln | UnOp::Sqrt
+                        UnOp::ToDecimal
+                            | UnOp::ToFloat
+                            | UnOp::Exp
+                            | UnOp::Ln
+                            | UnOp::Sqrt
+                            | UnOp::Sin
+                            | UnOp::Cos
                     )
                 {
                     self.ops.push(Op::Un(*op));
@@ -768,7 +774,16 @@ impl Compiler<'_> {
                     (UnOp::Abs, false) => Op::AbsI,
                     (UnOp::Not, _) => Op::Not,
                     (UnOp::ToText, _) => Op::ToText,
-                    (UnOp::ToDecimal | UnOp::ToFloat | UnOp::Exp | UnOp::Ln | UnOp::Sqrt, _) => {
+                    (
+                        UnOp::ToDecimal
+                        | UnOp::ToFloat
+                        | UnOp::Exp
+                        | UnOp::Ln
+                        | UnOp::Sqrt
+                        | UnOp::Sin
+                        | UnOp::Cos,
+                        _,
+                    ) => {
                         unreachable!("handled above")
                     }
                 });

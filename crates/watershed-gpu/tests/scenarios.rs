@@ -258,7 +258,10 @@ fn with_maths() -> (Scenarios, Graph, Input<f64>, Node<f64>, Vec<f64>) {
     let rate = g.input("rate", 0.05).unwrap();
     let grown = g.define("grown", (1.0 + rate).pow(x)).unwrap();
     let curve = g
-        .define("curve", (x * rate).exp() - (x + 1.0).ln() + x.sqrt())
+        .define(
+            "curve",
+            (x * rate).exp() - (x + 1.0).ln() + x.sqrt() + x.sin() * 0.25 + (x * rate).cos(),
+        )
         .unwrap();
     let both = g.define("both", grown / curve).unwrap();
     g.stabilize();

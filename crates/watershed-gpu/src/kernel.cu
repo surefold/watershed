@@ -54,6 +54,8 @@ extern "C" __global__ void level(
             case 21: stack[sp - 1] = exp(stack[sp - 1]); break;
             case 22: stack[sp - 1] = log(stack[sp - 1]); break;
             case 23: stack[sp - 1] = sqrt(stack[sp - 1]); break;
+            case 29: stack[sp - 1] = sin(stack[sp - 1]); break;
+            case 30: stack[sp - 1] = cos(stack[sp - 1]); break;
             case 19: stack[sp - 1] = (stack[sp - 1] == 0.0) ? 1.0 : 0.0; break;
             // Otherwise, then, condition: keep the one the condition picks.
             case 20: sp -= 2; stack[sp - 1] = (stack[sp - 1] != 0.0) ? stack[sp] : stack[sp + 1]; break;

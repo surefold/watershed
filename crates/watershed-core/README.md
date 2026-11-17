@@ -281,8 +281,8 @@ let (line, _) = orders.add_formula_column(&mut g, "line", "qty * price * fx")?;
 ```
 
 The language has `+ - * /`, comparisons, `&&`, `||`, `!`, `if(c, a, b)`,
-`min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, `round`, `text`, `concat`,
-`join`, `choose` and lists of strings. A name refers to a node (in a
+`min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, `sin`, `cos`, `round`, `text`,
+`concat`, `join`, `choose` and lists of strings. A name refers to a node (in a
 collection, a field or column first). A name with spaces or punctuation
 goes between backticks. A number literal is an `f64` unless it ends in `d`
 (`19.99d`, a decimal) or `i` (`3i`, an `i64`). The grid's formula box and

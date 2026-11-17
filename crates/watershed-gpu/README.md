@@ -30,8 +30,8 @@ assert_eq!(plan.run_cpu(&[2.5, 3.0, 4.0]), [25.0, 30.0, 40.0]);
 Each result is the same, to the last bit, as setting those inputs on the
 graph and updating it. On the GPU there are three exceptions: a result that
 is not a number may be a different not-a-number; `min` and `max` of `0.0`
-and `-0.0` follow x86-64; and `exp`, `ln` and `pow` may differ in the last
-digit or two.
+and `-0.0` follow x86-64; and `exp`, `ln`, `pow`, `sin` and `cos` may differ
+in the last digit or two.
 
 ## Two kinds of input
 
@@ -52,7 +52,7 @@ test, a changed tax rule, a shuffled price history.
 ## What it handles
 
 Numbers (`f64`) and yes-or-no values: arithmetic, `min`, `max`, `abs`, `exp`,
-`ln`, `sqrt`, `pow`, comparisons, `&`, `|`, `!`, and conditions. Both
+`ln`, `sqrt`, `pow`, `sin`, `cos`, comparisons, `&`, `|`, `!`, and conditions. Both
 branches of a condition are worked out and one is kept, which gives the
 same answer as the graph because none of these can fail.
 
@@ -448,6 +448,34 @@ fetched, not kept here:
 python3 examples/shared/grid_data.py /path/to/data             # a week, about 690,000 readings
 cargo run --release --example grid_balancing -- /path/to/data
 ```
+
+`squares` is a search with the engine as its evaluator, and a case where
+the engine is the slower choice. It packs unit squares into the smallest
+square it can, as Kaggle's "Squares in Squares" competition asks: the model
+is how far the squares overlap and stick out of a container, a move of one
+square is an update of the graph, and plans try many places for a square,
+or every input nudged, at once.
+
+```bash
+cargo run --release --example squares -- 10 60 packing.csv     # 10 squares, searched for 60 s
+python3 examples/shared/squares_check.py /path/to/metric.py packing.csv   # the competition's own metric
+```
+
+One run of each, on four cores of a 2.1 GHz Xeon, no GPU:
+
+| Squares | A move on the graph | The same by hand | A whole packing in a plan | A gradient by nudging |
+|---|---|---|---|---|
+| 20 | 8.6 µs | 0.25 µs | 21 µs | 2.6 ms |
+| 100 | 57 µs | 0.38 µs | 0.51 ms | 0.31 s |
+| 400 | 352 µs | 0.93 µs | 9.3 ms | 22 s |
+
+A move changes about one node a square, each some hundred operations, and
+the sum by hand skips squares that are far apart, which a formula cannot.
+A gradient by nudging runs the whole model six times for every square; a
+derivative worked out from the formulas would cost a few runs, and the
+engine has none. In a minute the search reaches the best side known for 5
+squares (to 7 × 10⁻⁹) and for 10 (to 2 × 10⁻⁵), stays on the grid for 11, and
+for 17 reaches 4.850 where 4.676 is known.
 
 `liabilities` and `capital` need the reference model's tables and answers.
 `examples/shared/liabilities_reference.py` runs lifelib and writes them:
