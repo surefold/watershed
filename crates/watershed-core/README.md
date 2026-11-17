@@ -310,9 +310,10 @@ The derivatives are worked out backwards from the node differentiated, so all
 of them together cost a small multiple of the model, however many there are.
 A formula of more than a dozen operations that reads several nodes is taken
 in steps, each step a node, so that the work is shared between the
-derivatives. In the `squares` example of `watershed-gpu`, the derivative of
-a penalty by 300 inputs costs four times the penalty itself in a plan, and
-adds about 75 nodes for each of its 4,950 long formulas.
+derivatives. On one model, a sum of 4,950 formulas of about a hundred
+operations each, the derivative by 300 inputs cost four times the sum itself
+in a plan (1.9 ms against 0.45 ms, one run on four cores of a 2.1 GHz Xeon),
+and added about 75 nodes for each formula.
 
 At a corner the derivative is taken on one side: `abs` at zero as for a
 positive number, `min` and `max` of equal values as for the first, a
