@@ -48,7 +48,7 @@
 //! # What it handles
 //!
 //! Numbers (`f64`) and yes-or-no values: arithmetic, `min`, `max`, `abs`,
-//! `exp`, `ln`, `sqrt`, `pow`, `sin`, `cos`, comparisons, `&`, `|`, `!`, and conditions (`when(..).then(..).otherwise(..)`).
+//! `exp`, `ln`, `sqrt`, `pow`, `sin`, `cos`, `floor`, comparisons, `&`, `|`, `!`, and conditions (`when(..).then(..).otherwise(..)`).
 //! Both branches of a condition are worked out and one is kept, which gives
 //! the same answer as the graph because none of these can fail.
 //!

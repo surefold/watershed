@@ -439,6 +439,8 @@ fn slope(of: &Arc<Ir>, by: NodeId) -> Option<Arc<Ir>> {
                 )),
                 UnOp::Sin => Some(times(da, unary(UnOp::Cos, a.clone()))),
                 UnOp::Cos => Some(negated(times(da, unary(UnOp::Sin, a.clone())))),
+                // Flat between its steps.
+                UnOp::Floor => None,
                 // Not numbers, or not `f64`: `between` has refused a model
                 // whose derivative would have to pass through these.
                 UnOp::Not | UnOp::ToText | UnOp::ToDecimal | UnOp::ToFloat => None,

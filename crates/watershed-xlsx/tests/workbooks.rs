@@ -35,8 +35,21 @@ fn agrees(here: f64, excel: &Val) -> bool {
 
 #[test]
 fn every_formula_gives_what_libreoffice_gave_for_every_row() {
+    every_row_agrees("Cases", 20, 80);
+}
+
+/// Rounding what depends on an input, where it is hard: halves, numbers a
+/// hair under a half or a whole number, and both signs.
+#[test]
+fn rounding_gives_what_libreoffice_gave_for_every_row() {
+    every_row_agrees("Rounding", 350, 16);
+}
+
+/// Translates each formula in the sheet's second row, sets its inputs to
+/// each row's in turn, and holds every value to what LibreOffice has there.
+fn every_row_agrees(name: &str, least_rows: usize, least_cases: usize) {
     let book = functions();
-    let cases = sheet(&book, "Cases");
+    let cases = sheet(&book, name);
     let at = |row, col| Cell {
         sheet: cases,
         row,
@@ -50,7 +63,7 @@ fn every_formula_gives_what_libreoffice_gave_for_every_row() {
             },
         )
         .collect();
-    assert!(rows.len() >= 20);
+    assert!(rows.len() >= least_rows, "only {} rows", rows.len());
     let mut tried = 0;
     let mut wrong = Vec::new();
     for col in 2.. {
@@ -93,7 +106,7 @@ fn every_formula_gives_what_libreoffice_gave_for_every_row() {
             }
         }
     }
-    assert!(tried >= 80, "only {tried} cases");
+    assert!(tried >= least_cases, "only {tried} cases");
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 

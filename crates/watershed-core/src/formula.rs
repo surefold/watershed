@@ -379,13 +379,14 @@ impl Parser<'_> {
                         let mut args = self.arguments("abs", 1)?.into_iter();
                         Ok(Ir::Unary(UnOp::Abs, Arc::new(args.next().unwrap())))
                     }
-                    ("exp" | "ln" | "sqrt" | "sin" | "cos", true) => {
+                    ("exp" | "ln" | "sqrt" | "sin" | "cos" | "floor", true) => {
                         let mut args = self.arguments(&name, 1)?.into_iter();
                         let op = match name.as_str() {
                             "exp" => UnOp::Exp,
                             "ln" => UnOp::Ln,
                             "sin" => UnOp::Sin,
                             "cos" => UnOp::Cos,
+                            "floor" => UnOp::Floor,
                             _ => UnOp::Sqrt,
                         };
                         Ok(Ir::Unary(op, Arc::new(args.next().unwrap())))

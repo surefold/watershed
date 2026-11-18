@@ -613,7 +613,8 @@ mod not_whole {
         });
         refused("an unknown instruction", false, |p| {
             let last = p.ops.len() - 1;
-            p.ops[last] = 31;
+            // The one code a node's program cannot hold: a cluster's own.
+            p.ops[last] = crate::fuse::LOCAL;
         });
         refused("a stack that runs dry", false, |p| {
             let start = p.programs[0] as usize;

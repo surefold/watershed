@@ -169,6 +169,42 @@ fn round(x: f64, digits: f64, how: fn(f64) -> f64) -> f64 {
     if d >= 0 { r / m } else { r * m }
 }
 
+/// How near a whole number, or a half, a number that depends on an input
+/// has to be to count as it: within four parts in ten thousand million
+/// million. `0.29 * 100` is a little under 29, and Excel still rounds it
+/// down to 29, not 28.
+const NEARLY: f64 = 1.0 / (1u64 << 51) as f64;
+
+/// `ROUND`, `ROUNDUP` or `ROUNDDOWN` of a number that depends on an input,
+/// to a fixed number of places: away from zero at a half, as Excel rounds.
+/// It uses only arithmetic that comes out the same on every machine, and
+/// reads the number as few times as it can, since each reading works it
+/// out again.
+fn rounded(x: Expr<f64>, places: f64, name: &str) -> Expr<f64> {
+    let d = places.trunc().clamp(-308.0, 308.0) as i32;
+    let m = 10f64.powi(d.abs());
+    let size = match d >= 0 {
+        true => x.clone().abs() * m,
+        false => x.clone().abs() / m,
+    };
+    let whole = match (name, d) {
+        ("ROUNDDOWN", _) => (size * (1.0 + NEARLY)).floor(),
+        ("ROUNDUP", _) => -(size * (NEARLY - 1.0)).floor(),
+        // To no places a half is a half exactly, as LibreOffice has it. The
+        // part after the point, doubled, is 1 or more from a half up.
+        (_, 0) => {
+            let below = size.clone().floor();
+            below.clone() + ((size - below) * 2.0).floor()
+        }
+        _ => (size * (1.0 + NEARLY) + 0.5).floor(),
+    };
+    let sign = when(x.lt(0.0)).then(-1.0).otherwise(1.0);
+    match d >= 0 {
+        true => sign * whole / m,
+        false => sign * whole * m,
+    }
+}
+
 impl Builder<'_> {
     pub(crate) fn call(&mut self, name: &str, args: &[Ast]) -> Built<Out> {
         let wants = |b: &Self, n: std::ops::RangeInclusive<usize>| {
@@ -520,16 +556,41 @@ impl Builder<'_> {
             "ROUND" | "ROUNDUP" | "ROUNDDOWN" | "INT" | "MOD" => {
                 let wanted = if name == "INT" { 1..=1 } else { 2..=2 };
                 wants(self, wanted)?;
+                let first = self.eval(&args[0])?;
                 let mut all = Vec::new();
-                for arg in args {
-                    match self.eval(arg)? {
+                for (at, arg) in args.iter().enumerate() {
+                    let out = if at == 0 {
+                        first.clone()
+                    } else {
+                        self.eval(arg)?
+                    };
+                    match out {
                         Out::Fixed(v) => all.push(number(&v)),
-                        _ => {
+                        _ if name == "MOD" => {
+                            return self.fail(
+                                "MOD of something that depends on an input is not understood",
+                            );
+                        }
+                        _ if at > 0 => {
                             return self.fail(format!(
-                                "{name} of something that depends on an input is not understood"
+                                "{name} to a number of places that depends on an input is not \
+                                 understood"
                             ));
                         }
+                        _ => {}
                     }
+                }
+                if !matches!(first, Out::Fixed(_)) {
+                    // Only the places are in `all`: the number depends on an input.
+                    let places = all.first().copied().unwrap_or(Some(0.0));
+                    let Some(places) = places else {
+                        return Ok(Out::Fixed(Val::Error));
+                    };
+                    let x = self.as_num(first)?;
+                    return Ok(Out::Num(match name {
+                        "INT" => (x.clone() + x.abs() * NEARLY).floor(),
+                        _ => rounded(x, places, name),
+                    }));
                 }
                 let Some(all) = all.into_iter().collect::<Option<Vec<f64>>>() else {
                     return Ok(Out::Fixed(Val::Error));

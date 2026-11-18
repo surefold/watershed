@@ -77,6 +77,20 @@ fn a_derivative_follows_its_inputs_as_any_node_does() -> Result {
 }
 
 #[test]
+fn a_floor_is_flat_between_its_steps() -> Result {
+    let mut g = Graph::new();
+    let x = g.input("x", 1.3)?;
+    let y = g.input("y", 0.7)?;
+    let stepped = g.define("stepped", (x * 3.0).floor() * y + x)?;
+    let slopes = g.gradient(stepped.id(), &[x.id(), y.id()], "slope")?;
+    g.stabilize();
+    // By x only the plain x counts; by y, the step x is on.
+    assert_eq!(number(&g, slopes[0]), 1.0);
+    assert_eq!(number(&g, slopes[1]), 3.0);
+    Ok(())
+}
+
+#[test]
 fn every_function_has_its_derivative() -> Result {
     let mut g = Graph::new();
     let x = g.input("x", 1.3)?;

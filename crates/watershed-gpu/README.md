@@ -52,7 +52,7 @@ test, a changed tax rule, a shuffled price history.
 ## What it handles
 
 Numbers (`f64`) and yes-or-no values: arithmetic, `min`, `max`, `abs`, `exp`,
-`ln`, `sqrt`, `pow`, `sin`, `cos`, comparisons, `&`, `|`, `!`, and conditions. Both
+`ln`, `sqrt`, `pow`, `sin`, `cos`, `floor`, comparisons, `&`, `|`, `!`, and conditions. Both
 branches of a condition are worked out and one is kept, which gives the
 same answer as the graph because none of these can fail.
 

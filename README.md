@@ -154,7 +154,7 @@ research in progress.
 | Fused kernels | Experimental, off by default | [watershed-gpu](crates/watershed-gpu/README.md#working-nodes-out-in-clusters) |
 | Saved plans, and lots across GPUs | Built; lots run on eight GPUs in one machine, not yet on several machines | [watershed-gpu](crates/watershed-gpu/README.md#running-a-batch-somewhere-else), [watershed-jvm](https://github.com/surefold/watershed-jvm) |
 | Scenario plans from Kotlin, and in the browser on one thread | Experimental | [watershed-jvm](https://github.com/surefold/watershed-jvm), [grid README](crates/watershed-grid/README.md) |
-| Reading a model from an `.xlsx` workbook | Built; 25 functions, each checked against LibreOffice for 24 inputs | [watershed-xlsx](crates/watershed-xlsx/README.md) |
+| Reading a model from an `.xlsx` workbook | Built; 29 functions, each checked against LibreOffice for 24 inputs, and rounding for 396 | [watershed-xlsx](crates/watershed-xlsx/README.md) |
 | Choosing CPU or GPU automatically from measured costs | Research | [research note](docs/research/heterogeneous-execution.md) |
 | Workers on several machines; a release on crates.io and PyPI | Planned | |
 
@@ -280,7 +280,7 @@ The ones that decide whether Watershed fits; the rest are in
 [docs/limitations.md](docs/limitations.md).
 
 - **Plans cover numeric formulas.** `f64` and `bool` with arithmetic,
-  `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, `sin`, `cos`, comparisons, logic and
+  `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, `sin`, `cos`, `floor`, comparisons, logic and
   conditionals; collection and group totals (`sum`, `min`, `max`, `count`);
   and `choose` by an option number that is the same in every scenario.
   Integer arithmetic, decimals and text are incremental only. A plan names

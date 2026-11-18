@@ -241,7 +241,8 @@ impl Expr {
             | UnOp::Ln
             | UnOp::Sqrt
             | UnOp::Sin
-            | UnOp::Cos => false,
+            | UnOp::Cos
+            | UnOp::Floor => false,
         };
         if !ok {
             return Err(PyTypeError::new_err(format!(

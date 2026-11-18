@@ -1772,17 +1772,18 @@ fn maths_functions_work_on_floats_typed_and_as_formulas() {
     let typed = g
         .define(
             "typed",
-            x.sqrt() + x.ln().exp() + x.pow(0.5) + x.sin() + x.cos(),
+            x.sqrt() + x.ln().exp() + x.pow(0.5) + x.sin() + x.cos() + (x * -0.7).floor(),
         )
         .unwrap();
     let written = g
         .define_formula(
             "written",
-            "sqrt(x) + exp(ln(x)) + pow(x, 0.5) + sin(x) + cos(x)",
+            "sqrt(x) + exp(ln(x)) + pow(x, 0.5) + sin(x) + cos(x) + floor(x * -0.7)",
         )
         .unwrap();
     g.stabilize();
-    let want = 4.0f64.sqrt() + 4.0f64.ln().exp() + 4.0f64.powf(0.5) + 4.0f64.sin() + 4.0f64.cos();
+    let want =
+        4.0f64.sqrt() + 4.0f64.ln().exp() + 4.0f64.powf(0.5) + 4.0f64.sin() + 4.0f64.cos() - 3.0;
     assert_eq!(g.get(typed).unwrap(), want);
     assert!(matches!(g.value(written), Value::F64(x) if *x == want));
 

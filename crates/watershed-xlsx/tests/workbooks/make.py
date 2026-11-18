@@ -125,6 +125,11 @@ CASES = [
     ("ROUNDDOWN", "=ROUNDDOWN(Tables!$A$8,-1)+A{r}"),
     ("INT", "=INT(Tables!$A$8)*A{r}"),
     ("MOD", "=MOD(Tables!$A$8,3)+A{r}"),
+    # Rounding what depends on an input; the `Rounding` sheet has more.
+    ("ROUND of an input", "=ROUND(A{r}*B{r},1)"),
+    ("ROUNDUP of an input", "=ROUNDUP(A{r}/7,2)"),
+    ("ROUNDDOWN of an input", "=ROUNDDOWN(A{r}*B{r},0)"),
+    ("INT of an input", "=INT(A{r}*1.5)"),
     ("COUNT", "=COUNT(Tables!$C$2:$C$6,A{r})+A{r}"),
     ("COUNTA", "=COUNTA(Tables!$C$2:$C$6)+A{r}"),
     # Names and places.
@@ -138,7 +143,8 @@ CASES = [
 REFUSED = [
     ("text", '=IF(A{r}>0,A{r},"")'),
     ("joined", '=A{r}&"x"'),
-    ("ROUND", "=ROUND(A{r},1)"),
+    ("places that depends", "=ROUND(3.14159,A{r})"),
+    ("MOD of something", "=MOD(A{r},2)"),
     ("not understood", "=OFFSET(A{r},0,0)"),
     ("keys depend", "=VLOOKUP(1,A{r}:B{r},2,FALSE)"),
     ("not in order", "=VLOOKUP(A{r},Tables!$O$2:$P$4,2)"),
@@ -146,6 +152,54 @@ REFUSED = [
     ("itself", "=A{r}+E{r}"),
     ("itself", "=D{r}*2"),
 ]
+
+
+# Rounding, where it is hard: halves, numbers a hair under a half or a whole
+# number once multiplied (0.29 * 100 is 28.999999999999996), and both signs.
+ROUNDING = [
+    ("to the penny", "=ROUND(A{r},2)"),
+    ("a product to the penny", "=ROUND(A{r}*B{r},2)"),
+    ("to a whole number", "=ROUND(A{r},0)"),
+    ("a product to a whole number", "=ROUND(A{r}*B{r},0)"),
+    ("to tens", "=ROUND(A{r}*B{r},-1)"),
+    ("to thousandths", "=ROUND(A{r}/B{r},3)"),
+    ("down to the penny", "=ROUNDDOWN(A{r},2)"),
+    ("a product down", "=ROUNDDOWN(A{r}*B{r},0)"),
+    ("down to hundreds", "=ROUNDDOWN(A{r}*B{r},-2)"),
+    ("up to the penny", "=ROUNDUP(A{r},2)"),
+    ("a product up", "=ROUNDUP(A{r}*B{r},1)"),
+    ("up to a whole number", "=ROUNDUP(A{r}*B{r},0)"),
+    ("INT", "=INT(A{r})"),
+    ("INT of a product", "=INT(A{r}*B{r})"),
+    ("rounded twice", "=ROUND(ROUND(A{r}*B{r},2)*1.1,2)"),
+    ("interest for a month", "=ROUND(A{r}*1000*B{r}/12,2)"),
+]
+
+
+def rounding_rows():
+    """Pairs to round: the first is an ordinary one, for the model's own."""
+    rows = [(1234.567, 0.079)]
+    # Halves at the third place, alone.
+    for x in [1.005, 2.675, 0.285, 0.125, 1.115, 8.345, 1234.565, 0.005, 19.995, 100.015]:
+        rows += [(x, 1), (-x, 1)]
+    # Products that are halves, or whole, in tenths and hundredths.
+    for x, y in [(0.29, 100), (0.57, 100), (1.15, 100), (4.35, 100), (1.1, 1.1),
+                 (100.5, 0.05), (33.3, 0.25), (0.1, 3), (0.7, 0.1), (2.5, 1), (0.5, 1),
+                 (1.5, 1), (3.5, 3), (0.15, 0.1), (0.35, 10), (2.05, 100), (1.45, 10),
+                 (8.5, 0.5), (16.35, 0.1), (71.25, 0.2), (0.045, 1000), (1.255, 2),
+                 # A hair under a half: 267.49999999999994. To no places
+                 # LibreOffice takes that as it is, and rounds it down.
+                 (2.675, 100), (1.005, 100), (1.115, 100)]:
+        rows += [(x, y), (-x, y), (x, -y)]
+    # Ordinary numbers: amounts in pounds and pence, and rates.
+    state = 12345
+    for _ in range(300):
+        state = (state * 1103515245 + 12345) % 2**31
+        amount = round((state % 5000000) / 100 - 10000, 2)
+        state = (state * 1103515245 + 12345) % 2**31
+        rate = [0.05, 0.079, 0.125, 0.0325, 1.5, 12, 0.3, 7][state % 8]
+        rows.append((amount, rate))
+    return rows
 
 
 def tables(ws):
@@ -194,6 +248,16 @@ def functions(path):
             cases.cell(r, c, formula.format(r=r))
     for c, (what, _) in enumerate(CASES, start=3):
         cases.cell(1, c, what)
+
+    rounding = wb.create_sheet("Rounding")
+    rounding["A1"], rounding["B1"] = "x", "y"
+    for r, (x, y) in enumerate(rounding_rows(), start=2):
+        rounding.cell(r, 1, x)
+        rounding.cell(r, 2, y)
+        for c, (_, formula) in enumerate(ROUNDING, start=3):
+            rounding.cell(r, c, formula.format(r=r))
+    for c, (what, _) in enumerate(ROUNDING, start=3):
+        rounding.cell(1, c, what)
 
     refused = wb.create_sheet("Refused")
     refused["A1"], refused["A2"], refused["B2"] = "x", 1.5, 2
