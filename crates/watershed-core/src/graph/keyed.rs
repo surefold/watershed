@@ -31,7 +31,7 @@
 //! the key, so they have not been reached yet, and the same update counts
 //! the row in its new group.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::{Graph, Kind};
@@ -183,6 +183,9 @@ pub(crate) struct Keyed {
     row_key: Vec<u32>,
     /// How many rows each group has, by number.
     counts: Vec<u32>,
+    /// For an index, each group's rows, by the group's number. Empty for a
+    /// grouping with totals.
+    members: Vec<HashSet<u32>>,
 }
 
 /// A group's key as text, the same for a key however it is given.
@@ -247,6 +250,7 @@ impl Graph {
             in_groups: PerRow::default(),
             row_key: Vec::new(),
             counts: Vec::new(),
+            members: Vec::new(),
         });
         self.keyed.len() - 1
     }
@@ -312,6 +316,13 @@ impl Graph {
         }
         k.counts[group as usize] += 1;
         if k.op.is_none() {
+            if old != NO_GROUP {
+                k.members[old as usize].remove(&(row as u32));
+            }
+            if k.members.len() <= group as usize {
+                k.members.resize_with(group as usize + 1, HashSet::new);
+            }
+            k.members[group as usize].insert(row as u32);
             return Ok(());
         }
         let node = self.pool_member(pool, row, key, group)?;
@@ -477,6 +488,9 @@ impl Graph {
         let old = std::mem::replace(&mut k.row_key[row], NO_GROUP);
         if old != NO_GROUP {
             k.counts[old as usize] -= 1;
+            if k.op.is_none() {
+                k.members[old as usize].remove(&(row as u32));
+            }
         }
     }
 
@@ -499,6 +513,21 @@ impl Graph {
         let k = self.keyed.get(grouping)?;
         let group = *self.pools[k.pool].numbers.get(key)?;
         k.groups.get(group as usize).copied().flatten()
+    }
+
+    /// The rows in one group of an index, in no particular order.
+    pub(crate) fn keyed_rows(
+        &self,
+        grouping: usize,
+        key: &str,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let k = self.keyed.get(grouping);
+        let group = k.and_then(|k| self.pools[k.pool].numbers.get(key).copied());
+        k.zip(group)
+            .and_then(|(k, group)| k.members.get(group as usize))
+            .into_iter()
+            .flatten()
+            .map(|&row| row as usize)
     }
 
     /// The keys of the groups that have rows, sorted.

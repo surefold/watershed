@@ -1957,3 +1957,38 @@ fn giving_one_rows_cell_a_new_expression_leaves_the_other_rows_on_the_shared_one
     g.check_consistency().map_err(CalcError::Invalid)?;
     Ok(())
 }
+
+#[test]
+fn an_index_finds_the_rows_with_a_value_and_follows_rows_that_change() -> Result {
+    let mut g = Graph::new();
+    let mut sales = Collection::new(&g, "sales");
+    let region = sales.field::<String>("region")?;
+    let amount = sales.field::<f64>("amount")?;
+    sales.upsert(&mut g, "s1", &[region.is("EU".into()), amount.is(10.0)])?;
+    // An index added after rows includes them.
+    let by_region = sales.index(&mut g, "region_index", region)?;
+    sales.upsert(&mut g, "s2", &[region.is("EU".into()), amount.is(5.0)])?;
+    sales.upsert(&mut g, "s3", &[region.is("US".into()), amount.is(7.0)])?;
+    g.stabilize();
+    assert_eq!(sales.lookup(&g, by_region, "EU".to_string()), ["s1", "s2"]);
+    assert_eq!(sales.lookup(&g, by_region, "US".to_string()), ["s3"]);
+    assert!(sales.lookup(&g, by_region, "APAC".to_string()).is_empty());
+    assert_eq!(sales.index_values(&g, by_region), ["EU", "US"]);
+
+    // A row that changes value moves.
+    sales.upsert(&mut g, "s2", &[region.is("US".into())])?;
+    g.stabilize();
+    assert_eq!(sales.lookup(&g, by_region, "EU".to_string()), ["s1"]);
+    assert_eq!(sales.lookup(&g, by_region, "US".to_string()), ["s2", "s3"]);
+
+    // A removed row leaves, and the row that reuses its nodes is found by
+    // its own key and value.
+    sales.remove(&mut g, "s1")?;
+    sales.upsert(&mut g, "s4", &[region.is("APAC".into()), amount.is(1.0)])?;
+    g.stabilize();
+    assert!(sales.lookup(&g, by_region, "EU".to_string()).is_empty());
+    assert_eq!(sales.lookup(&g, by_region, "APAC".to_string()), ["s4"]);
+    assert_eq!(sales.index_values(&g, by_region), ["APAC", "US"]);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
