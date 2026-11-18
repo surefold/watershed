@@ -956,4 +956,54 @@ mod on_the_gpu {
         assert!((1..50).contains(&timing.scenarios_at_a_time), "{timing:?}");
         assert_same("in parts", &got, &plan.run_cpu(&inputs));
     }
+
+    #[test]
+    fn more_outputs_than_come_back_in_one_piece_are_each_in_their_place() {
+        // Outputs are gathered on the GPU and copied back at most 2²²
+        // numbers at a time. 800,000 scenarios of six outputs are 4.8
+        // million numbers: two pieces, the second begun part-way through
+        // the scenarios. Each scenario's input is its own, so a number in
+        // another scenario's place, or another output's, is not the CPU's.
+        let mut g = Graph::new();
+        let a = g.input("a", 1.0).unwrap();
+        let data = g.input("data", 3.0).unwrap();
+        let rate = g.input("rate", 0.25).unwrap();
+        let doubled = g.define("doubled", data * 2.0).unwrap();
+        let fixed = g.define("fixed", rate * 10.0).unwrap();
+        let sum = g.define("sum", a + doubled).unwrap();
+        let square = g.define("square", a * a).unwrap();
+        let less = g.define("less", a - fixed).unwrap();
+        let halved = g.define("halved", sum * 0.5).unwrap();
+        g.stabilize();
+        // Four that are worked out for each scenario, with one that is the
+        // same for all of them and one that never changes among them.
+        let outputs = [
+            sum.id(),
+            doubled.id(),
+            square.id(),
+            fixed.id(),
+            less.id(),
+            halved.id(),
+        ];
+        let mut plan = Scenarios::with_shared(&g, &[a.id()], &[data.id()], &outputs).unwrap();
+        let scenarios = 800_000;
+        assert!(scenarios * outputs.len() > 1 << 22);
+        let inputs: Vec<f64> = (0..scenarios).map(|k| k as f64 * 0.5 - 1000.0).collect();
+        let gpu = Gpu::new().unwrap();
+        assert_same(
+            "in several pieces",
+            &gpu.run(&plan, &inputs).unwrap(),
+            &plan.run_cpu(&inputs),
+        );
+        // And from a plan kept on the GPU, again with another shared value.
+        let mut loaded = gpu.load(&plan, &inputs).unwrap();
+        for shared in [3.0, -7.5] {
+            plan.set_shared(&[shared]);
+            assert_same(
+                "loaded, in several pieces",
+                &loaded.run(&plan).unwrap(),
+                &plan.run_cpu(&inputs),
+            );
+        }
+    }
 }

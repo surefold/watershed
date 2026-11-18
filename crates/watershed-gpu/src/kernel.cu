@@ -111,3 +111,26 @@ extern "C" __global__ void total(
     for (unsigned long long s = from; s < to; s++) sum += row[s];
     out[b] = sum;
 }
+
+// Gathers outputs for copying back in one piece: thread `t` writes the
+// `t % picked`th of the outputs that are slots, for scenario
+// `first + t / picked`. `picks` has two numbers for each of those outputs,
+// where it goes in a scenario's `outputs` and its slot; `out` has scenario
+// `first`'s outputs, then the next's.
+extern "C" __global__ void gather(
+    const double* vals,
+    const unsigned* picks,
+    double* out,
+    unsigned picked,
+    unsigned outputs,
+    unsigned first,
+    unsigned count,
+    unsigned scenarios)
+{
+    unsigned long long t = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (unsigned long long)picked * count) return;
+    unsigned long long s = t / picked;
+    unsigned k = (unsigned)(t % picked);
+    out[s * outputs + picks[2 * k]] =
+        vals[(unsigned long long)picks[2 * k + 1] * scenarios + first + s];
+}
