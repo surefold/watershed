@@ -1214,6 +1214,12 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
     let band_counts = c
         .group_count(&mut g, "band_count", band)
         .map_err(|e| e.to_string())?;
+    let group_index = c
+        .index(&mut g, "group_index", group)
+        .map_err(|e| e.to_string())?;
+    let band_index = c
+        .index(&mut g, "band_index", band)
+        .map_err(|e| e.to_string())?;
     let mut model: BTreeMap<String, (i64, i64)> = BTreeMap::new();
     let mut groups: BTreeMap<String, String> = BTreeMap::new();
     let names = ["north", "south", "east", "west"];
@@ -1345,6 +1351,40 @@ fn run_collection(seed: u64, keys: usize, steps: usize, parallel: bool) -> Resul
             return Err(format!(
                 "step {step}: bands {:?}, expected {expected_bands:?}",
                 c.group_keys(&g, band_totals)
+            ));
+        }
+        // Every index lookup against the plain map. `model` and `groups`
+        // are BTreeMaps, so their keys come out sorted like a lookup's.
+        for name in names {
+            let want: Vec<&str> = groups
+                .iter()
+                .filter(|(_, n)| n.as_str() == name)
+                .map(|(k, _)| k.as_str())
+                .collect();
+            let got = c.lookup(&g, group_index, name.to_string());
+            if got != want {
+                return Err(format!(
+                    "step {step}: index has {got:?} in {name}, but the rows say {want:?}"
+                ));
+            }
+        }
+        for name in ["high", "low", "middle"] {
+            let want: Vec<&str> = model
+                .iter()
+                .filter(|&(_, &(x, y))| band_of(x * 2 + y + bonus_value) == name)
+                .map(|(k, _)| k.as_str())
+                .collect();
+            let got = c.lookup(&g, band_index, name.to_string());
+            if got != want {
+                return Err(format!(
+                    "step {step}: band index has {got:?} in {name}, but the rows say {want:?}"
+                ));
+            }
+        }
+        if c.index_values(&g, band_index) != expected_bands {
+            return Err(format!(
+                "step {step}: band index values {:?}, expected {expected_bands:?}",
+                c.index_values(&g, band_index)
             ));
         }
         if c.len() != model.len() {
