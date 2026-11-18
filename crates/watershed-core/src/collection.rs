@@ -40,6 +40,12 @@
 //! (see [`Graph::aggregate`]), which update by only the rows that changed and
 //! give exactly the result of adding everything up from scratch.
 //!
+//! An index ([`Collection::index`]) finds the rows with a given value of a
+//! field or column ([`Collection::lookup`]) at the cost of the rows found,
+//! not the size of the collection. It follows rows the way a grouping does,
+//! including rows whose calculated column changes during an update, but it
+//! adds no nodes to the graph.
+//!
 //! Like [`Graph::set`], changes to rows take effect at the next
 //! [`Graph::stabilize`].
 //!
@@ -678,7 +684,9 @@ impl Collection {
     /// An index on a field or column: [`Collection::lookup`] then finds the
     /// rows with a given value without looking at any other row. Rows that
     /// already exist are indexed. Like a grouping, it follows rows as they
-    /// change, but it keeps no totals and adds no nodes to the graph.
+    /// change, but it keeps no totals and adds no nodes to the graph. When
+    /// only watched nodes are calculated, the field or column it indexes
+    /// still is.
     pub fn index<K: CalcType>(
         &mut self,
         g: &mut Graph,
@@ -696,7 +704,9 @@ impl Collection {
     /// The keys of the rows whose indexed field or column is `value`, sorted.
     /// Indexed by a field, that includes changes since the last update;
     /// indexed by a column, a row is found by the value its column had at
-    /// the last update. Costs what it finds, not the size of the collection.
+    /// the last update, and a row added since then may be found by the value
+    /// its column held for an earlier row until the update moves it. Costs
+    /// what it finds, not the size of the collection.
     pub fn lookup<K: CalcType>(&self, g: &Graph, index: Index<K>, value: K) -> Vec<&str> {
         if index.template != self.template {
             return Vec::new();
@@ -1197,6 +1207,8 @@ impl Collection {
     }
 
     /// The keys of the rows the index at `index` has under `value`, sorted.
+    /// Indexes and groupings are numbered together, so a grouping's number
+    /// finds no rows here.
     pub fn lookup_of(&self, g: &Graph, index: usize, value: &Value) -> Vec<&str> {
         let Some(grouping) = self.groupings.get(index) else {
             return Vec::new();
