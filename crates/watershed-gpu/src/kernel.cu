@@ -54,6 +54,8 @@ extern "C" __global__ void level(
             case 21: stack[sp - 1] = exp(stack[sp - 1]); break;
             case 22: stack[sp - 1] = log(stack[sp - 1]); break;
             case 23: stack[sp - 1] = sqrt(stack[sp - 1]); break;
+            case 29: stack[sp - 1] = sin(stack[sp - 1]); break;
+            case 30: stack[sp - 1] = cos(stack[sp - 1]); break;
             case 19: stack[sp - 1] = (stack[sp - 1] == 0.0) ? 1.0 : 0.0; break;
             // Otherwise, then, condition: keep the one the condition picks.
             case 20: sp -= 2; stack[sp - 1] = (stack[sp - 1] != 0.0) ? stack[sp] : stack[sp + 1]; break;
@@ -108,4 +110,27 @@ extern "C" __global__ void total(
     double sum = 0.0;
     for (unsigned long long s = from; s < to; s++) sum += row[s];
     out[b] = sum;
+}
+
+// Gathers outputs for copying back in one piece: thread `t` writes the
+// `t % picked`th of the outputs that are slots, for scenario
+// `first + t / picked`. `picks` has two numbers for each of those outputs,
+// where it goes in a scenario's `outputs` and its slot; `out` has scenario
+// `first`'s outputs, then the next's.
+extern "C" __global__ void gather(
+    const double* vals,
+    const unsigned* picks,
+    double* out,
+    unsigned picked,
+    unsigned outputs,
+    unsigned first,
+    unsigned count,
+    unsigned scenarios)
+{
+    unsigned long long t = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (unsigned long long)picked * count) return;
+    unsigned long long s = t / picked;
+    unsigned k = (unsigned)(t % picked);
+    out[s * outputs + picks[2 * k]] =
+        vals[(unsigned long long)picks[2 * k + 1] * scenarios + first + s];
 }

@@ -280,7 +280,7 @@ The ones that decide whether Watershed fits; the rest are in
 [docs/limitations.md](docs/limitations.md).
 
 - **Plans cover numeric formulas.** `f64` and `bool` with arithmetic,
-  `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, comparisons, logic and
+  `min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, `sin`, `cos`, comparisons, logic and
   conditionals; collection and group totals (`sum`, `min`, `max`, `count`);
   and `choose` by an option number that is the same in every scenario.
   Integer arithmetic, decimals and text are incremental only. A plan names
@@ -289,7 +289,7 @@ The ones that decide whether Watershed fits; the rest are in
   about a microsecond a node. Watershed earns that back on the second run
   and on every change after.
 - **GPU agreement has documented allowances** for NaN payloads, signed zero
-  and rounding in `exp`, `ln` and `pow`.
+  and rounding in `exp`, `ln`, `pow`, `sin` and `cos`.
 - **CUDA only** on the GPU side.
 
 ### Building, releases and licence

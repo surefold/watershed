@@ -16,6 +16,7 @@ Contents:
 - [Pull mode](#pull-mode)
 - [Redefining and removing nodes](#redefining-and-removing-nodes)
 - [Formulas as text](#formulas-as-text)
+- [Derivatives](#derivatives)
 - [Inspecting a graph](#inspecting-a-graph)
 - [Cargo features](#cargo-features)
 - [Examples](#examples)
@@ -281,12 +282,49 @@ let (line, _) = orders.add_formula_column(&mut g, "line", "qty * price * fx")?;
 ```
 
 The language has `+ - * /`, comparisons, `&&`, `||`, `!`, `if(c, a, b)`,
-`min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, `round`, `text`, `concat`,
-`join`, `choose` and lists of strings. A name refers to a node (in a
+`min`, `max`, `abs`, `exp`, `ln`, `sqrt`, `pow`, `sin`, `cos`, `round`, `text`,
+`concat`, `join`, `choose` and lists of strings. A name refers to a node (in a
 collection, a field or column first). A name with spaces or punctuation
 goes between backticks. A number literal is an `f64` unless it ends in `d`
 (`19.99d`, a decimal) or `i` (`3i`, an `i64`). The grid's formula box and
 the Python `formula` methods use the same parser.
+
+## Derivatives
+
+`gradient` adds a node for the derivative of one node by each of several
+others:
+
+```rust
+let total = g.define("total", qty * price * (1.0 + tax))?;
+let slopes = g.gradient(total.id(), &[price.id(), tax.id()], "slope")?;
+g.stabilize();
+g.value(slopes[0]);          // qty * (1 + tax), in a node named "slope[price]"
+```
+
+They are ordinary nodes. They follow their inputs as any node does, `explain`
+shows where one comes from, and a scenario plan runs them, so a batch can
+return a model's gradient with its value: the sensitivities of a book, or
+the way downhill for a search.
+
+The derivatives are worked out backwards from the node differentiated, so all
+of them together cost a small multiple of the model, however many there are.
+A formula of more than a dozen operations that reads several nodes is taken
+in steps, each step a node, so that the work is shared between the
+derivatives. On one model, a sum of 4,950 formulas of about a hundred
+operations each, the derivative by 300 inputs cost four times the sum itself
+in a plan (1.9 ms against 0.45 ms, one run on four cores of a 2.1 GHz Xeon),
+and added about 75 nodes for each formula.
+
+At a corner the derivative is taken on one side: `abs` at zero as for a
+positive number, `min` and `max` of equal values as for the first, a
+condition as for the branch it takes. A total's smallest or largest value
+passes its derivative to every member equal to it. Comparisons, conditions'
+tests and counts have a derivative of zero. A node in `with_respect_to` is
+taken as free to vary alone, whether or not it is an input.
+
+Not supported: a derivative through whole numbers or decimals (refused, with
+the node's name, and nothing added), and removing the nodes a gradient
+added in one call. A derivative of a derivative has not been tried.
 
 ## Inspecting a graph
 

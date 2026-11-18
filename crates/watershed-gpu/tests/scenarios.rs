@@ -258,7 +258,10 @@ fn with_maths() -> (Scenarios, Graph, Input<f64>, Node<f64>, Vec<f64>) {
     let rate = g.input("rate", 0.05).unwrap();
     let grown = g.define("grown", (1.0 + rate).pow(x)).unwrap();
     let curve = g
-        .define("curve", (x * rate).exp() - (x + 1.0).ln() + x.sqrt())
+        .define(
+            "curve",
+            (x * rate).exp() - (x + 1.0).ln() + x.sqrt() + x.sin() * 0.25 + (x * rate).cos(),
+        )
         .unwrap();
     let both = g.define("both", grown / curve).unwrap();
     g.stabilize();
@@ -275,6 +278,58 @@ fn maths_functions_give_what_the_graph_gives() {
         g.set(x, value).unwrap();
         g.stabilize();
         assert_eq!(g.get(both).unwrap().to_bits(), got.to_bits(), "x = {value}");
+    }
+}
+
+#[test]
+fn derivative_nodes_give_what_the_graph_gives() {
+    // A sum of long formulas with corners in them, and its derivative by
+    // every input: totals, conditions and formulas taken in steps.
+    let mut g = Graph::new();
+    let present = g.input("present", true).unwrap();
+    let inputs: Vec<Input<f64>> = (0..6)
+        .map(|k| g.input(&format!("x{k}"), 0.3 * k as f64 - 0.7).unwrap())
+        .collect();
+    let mut parts = Vec::new();
+    for i in 0..inputs.len() {
+        for j in i + 1..inputs.len() {
+            let (a, b) = (inputs[i], inputs[j]);
+            let d = a - b;
+            let part = (d.clone() * a.cos() + b.sin())
+                .abs()
+                .max((d.clone() * d - 0.2).abs())
+                .min(a * b + 1.5);
+            let part = g
+                .define(&format!("part{i}_{j}"), part.clone() * part)
+                .unwrap();
+            parts.push((part.id(), present.id()));
+        }
+    }
+    let sum = g
+        .aggregate("sum", AggregateOp::Sum, Type::F64, 0, &parts)
+        .unwrap();
+    let by: Vec<_> = inputs.iter().map(|i| i.id()).collect();
+    let slopes = g.gradient(sum, &by, "slope").unwrap();
+    g.stabilize();
+
+    let mut outputs = vec![sum];
+    outputs.extend(&slopes);
+    let plan = Scenarios::new(&g, &by, &outputs).unwrap();
+    let scenarios: Vec<f64> = (0..50 * by.len())
+        .map(|k| ((k * 37 % 101) as f64 - 50.0) / 40.0)
+        .collect();
+    let got = plan.run_cpu(&scenarios);
+    for (scenario, got) in scenarios.chunks(by.len()).zip(got.chunks(outputs.len())) {
+        for (&input, &value) in inputs.iter().zip(scenario) {
+            g.set(input, value).unwrap();
+        }
+        g.stabilize();
+        for (&output, &got) in outputs.iter().zip(got) {
+            let Value::F64(want) = *g.value(output) else {
+                panic!("{} is not a number", g.name(output));
+            };
+            assert_eq!(want.to_bits(), got.to_bits(), "{}", g.name(output));
+        }
     }
 }
 
@@ -979,5 +1034,55 @@ mod on_the_gpu {
             .unwrap();
         assert!((1..50).contains(&timing.scenarios_at_a_time), "{timing:?}");
         assert_same("in parts", &got, &plan.run_cpu(&inputs));
+    }
+
+    #[test]
+    fn more_outputs_than_come_back_in_one_piece_are_each_in_their_place() {
+        // Outputs are gathered on the GPU and copied back at most 2²²
+        // numbers at a time. 800,000 scenarios of six outputs are 4.8
+        // million numbers: two pieces, the second begun part-way through
+        // the scenarios. Each scenario's input is its own, so a number in
+        // another scenario's place, or another output's, is not the CPU's.
+        let mut g = Graph::new();
+        let a = g.input("a", 1.0).unwrap();
+        let data = g.input("data", 3.0).unwrap();
+        let rate = g.input("rate", 0.25).unwrap();
+        let doubled = g.define("doubled", data * 2.0).unwrap();
+        let fixed = g.define("fixed", rate * 10.0).unwrap();
+        let sum = g.define("sum", a + doubled).unwrap();
+        let square = g.define("square", a * a).unwrap();
+        let less = g.define("less", a - fixed).unwrap();
+        let halved = g.define("halved", sum * 0.5).unwrap();
+        g.stabilize();
+        // Four that are worked out for each scenario, with one that is the
+        // same for all of them and one that never changes among them.
+        let outputs = [
+            sum.id(),
+            doubled.id(),
+            square.id(),
+            fixed.id(),
+            less.id(),
+            halved.id(),
+        ];
+        let mut plan = Scenarios::with_shared(&g, &[a.id()], &[data.id()], &outputs).unwrap();
+        let scenarios = 800_000;
+        assert!(scenarios * outputs.len() > 1 << 22);
+        let inputs: Vec<f64> = (0..scenarios).map(|k| k as f64 * 0.5 - 1000.0).collect();
+        let gpu = Gpu::new().unwrap();
+        assert_same(
+            "in several pieces",
+            &gpu.run(&plan, &inputs).unwrap(),
+            &plan.run_cpu(&inputs),
+        );
+        // And from a plan kept on the GPU, again with another shared value.
+        let mut loaded = gpu.load(&plan, &inputs).unwrap();
+        for shared in [3.0, -7.5] {
+            plan.set_shared(&[shared]);
+            assert_same(
+                "loaded, in several pieces",
+                &loaded.run(&plan).unwrap(),
+                &plan.run_cpu(&inputs),
+            );
+        }
     }
 }
