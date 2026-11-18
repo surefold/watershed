@@ -7,7 +7,7 @@
 //! GPU.
 
 use super::{
-    AGG_MAX, CODE, CODE_BITS, CONST, LOAD, LOAD_SHARED, MAX_ARG, MAX_STACK, Output, POW, Scenarios,
+    CODE, CODE_BITS, CONST, COS, LOAD, LOAD_SHARED, MAX_ARG, MAX_STACK, Output, POW, Scenarios,
     arity,
 };
 use crate::fuse::LOCAL;
@@ -15,7 +15,7 @@ use crate::fuse::LOCAL;
 /// Whether `code` is an instruction a node's program can hold (`LOCAL`
 /// only in a cluster's shape).
 fn known(code: u32) -> bool {
-    code <= POW || (code > LOCAL && code <= AGG_MAX)
+    code <= POW || (code > LOCAL && code <= COS)
 }
 
 /// Checks one node's instructions, given what each kind of load may read:
