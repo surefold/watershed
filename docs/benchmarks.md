@@ -91,6 +91,16 @@ row: 9 µs per update and 4 nodes recalculated on average. Removing 1,000
 rows in one update: 1.6 ms. Every total is checked against adding the rows
 up from scratch.
 
+### Indexes
+
+```bash
+cargo run --release --example index -- 1000000
+```
+
+A million rows indexed by a field with 1,000 values in 0.5 s, adding no
+nodes. Finding the 1,000 rows with one value: 35 µs, against 230 ms to
+read every row. Moving one row to another value: 1.2 µs per update.
+
 ### History
 
 ```bash
