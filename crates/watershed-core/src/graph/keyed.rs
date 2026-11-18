@@ -163,7 +163,9 @@ pub(crate) struct Keyed {
     /// groupings by the same key.
     pool: usize,
     name: String,
-    op: AggregateOp,
+    /// The total kept for each group, or `None` for an index, which only
+    /// tracks each group's rows (see `members`) and adds no nodes.
+    op: Option<AggregateOp>,
     value_type: Type,
     /// The height the group totals sit above.
     height: usize,
@@ -214,7 +216,7 @@ impl Graph {
         &mut self,
         owner: &str,
         name: &str,
-        op: AggregateOp,
+        op: Option<AggregateOp>,
         value_type: Type,
         height: usize,
         share: Option<usize>,
@@ -309,6 +311,9 @@ impl Graph {
             k.counts[old as usize] -= 1;
         }
         k.counts[group as usize] += 1;
+        if k.op.is_none() {
+            return Ok(());
+        }
         let node = self.pool_member(pool, row, key, group)?;
         let k = &mut self.keyed[grouping];
         match k.in_groups.take(row, |(_, n)| n == node) {
@@ -403,7 +408,8 @@ impl Graph {
     ) -> Result<(), CalcError> {
         let k = &self.keyed[grouping];
         let value = k.values[row].unwrap_or(node);
-        let (op, value_type, height) = (k.op, k.value_type, k.height);
+        let op = k.op.expect("an index has no totals to join");
+        let (value_type, height) = (k.value_type, k.height);
         match k.groups[group as usize] {
             Some(total) => self.extend_aggregate(total, value, node)?,
             None => {

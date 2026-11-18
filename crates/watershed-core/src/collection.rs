@@ -545,7 +545,7 @@ impl Collection {
         let index = self.grouping(
             g,
             name,
-            AggregateOp::Sum,
+            Some(AggregateOp::Sum),
             T::TYPE,
             by.placeholder(),
             Target::Placeholder(of.placeholder()),
@@ -568,7 +568,7 @@ impl Collection {
         let index = self.grouping(
             g,
             name,
-            AggregateOp::Min,
+            Some(AggregateOp::Min),
             T::TYPE,
             by.placeholder(),
             Target::Placeholder(of.placeholder()),
@@ -591,7 +591,7 @@ impl Collection {
         let index = self.grouping(
             g,
             name,
-            AggregateOp::Max,
+            Some(AggregateOp::Max),
             T::TYPE,
             by.placeholder(),
             Target::Placeholder(of.placeholder()),
@@ -613,7 +613,7 @@ impl Collection {
         let index = self.grouping(
             g,
             name,
-            AggregateOp::Count,
+            Some(AggregateOp::Count),
             Type::I64,
             by.placeholder(),
             Target::Presence,
@@ -657,7 +657,7 @@ impl Collection {
         &mut self,
         g: &mut Graph,
         name: &str,
-        op: AggregateOp,
+        op: Option<AggregateOp>,
         value_type: Type,
         by: NodeRef,
         target: Target,
@@ -1096,7 +1096,7 @@ impl Collection {
                 "{op} needs numbers, not {value_type}"
             )));
         }
-        self.grouping(g, name, op, value_type, *by, target)
+        self.grouping(g, name, Some(op), value_type, *by, target)
     }
 
     /// The total for one group of the grouping at `index`, if any row has had that key.
