@@ -402,6 +402,9 @@ pub struct Graph {
     types: Vec<Type>,
     /// The update in which the value last changed (0 = when it was created).
     changed_in: Vec<u64>,
+    /// How many times what an existing node reads has changed: see
+    /// [`Graph::reshaped`].
+    reshaped: u64,
     names: Names,
 
     /// Who uses each node, packed back to back so that passing on an update
@@ -526,6 +529,7 @@ impl Graph {
             hot: Vec::new(),
             types: Vec::new(),
             changed_in: Vec::new(),
+            reshaped: 0,
             names: Names::default(),
             packed_start: vec![0],
             packed: Vec::new(),
@@ -1027,6 +1031,7 @@ impl Graph {
         self.redefined_from.insert(id, self.epoch + 1);
         self.relink_pending = true;
         self.levels = None;
+        self.reshaped += 1;
         Ok(())
     }
 
@@ -1424,6 +1429,7 @@ impl Graph {
         let hot = self.hot[aggregate.index()];
         let code = hot.code as usize;
         self.aggregates[code].joining_from(from);
+        self.reshaped += 1;
         // One link per node, even when the value and presence are the same
         // node (as in a count) or the node is already part of a member.
         if self.pull && self.needed[aggregate.index()] == pull::NEEDED {
@@ -2143,6 +2149,23 @@ impl Graph {
     /// The number of the last update (0 before the first).
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// The update in which a node's value last changed (0 if it has not
+    /// changed since it was made). Setting an input to the value it had
+    /// does not count, as in an update.
+    pub fn changed_in(&self, id: NodeId) -> u64 {
+        self.changed_in.get(id.index()).copied().unwrap_or(0)
+    }
+
+    /// A count that goes up whenever what an existing node reads changes:
+    /// a node is redefined or removed, a total gains or loses a member (as
+    /// a collection's do when rows are added), or a row's group membership
+    /// is moved to another group. Adding new nodes does not count. Something
+    /// that keeps a view of the graph's shape, such as a scenario plan's
+    /// kept values, can compare it to see whether the shape it saw still holds.
+    pub fn reshaped(&self) -> u64 {
+        self.reshaped
     }
 
     /// The nodes recalculated by the last update, in the order it did them.

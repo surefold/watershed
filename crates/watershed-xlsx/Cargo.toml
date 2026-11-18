@@ -1,0 +1,19 @@
+[package]
+name = "watershed-xlsx"
+version = "0.1.0"
+description = "Turns the formulas of an Excel workbook into a watershed graph"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+watershed-core = { path = "../watershed-core" }
+calamine = "0.35.0"
+
+[dev-dependencies]
+watershed-gpu = { path = "../watershed-gpu" }
+# To write small workbooks in the tests; the version calamine reads them with.
+zip = { version = "7.0", default-features = false, features = ["deflate"] }
+
+[lints]
+workspace = true

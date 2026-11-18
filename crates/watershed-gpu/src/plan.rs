@@ -21,6 +21,7 @@ use rayon::prelude::*;
 use watershed_core::{AggregateOp, BinOp, Graph, Ir, NodeId, Type, UnOp, Value};
 
 use crate::fuse::{Fused, fuse};
+mod check;
 mod file;
 pub use file::LoadError;
 
@@ -176,6 +177,10 @@ pub enum PlanError {
     TooDeep(String),
     /// More nodes or constants than a plan can number.
     TooLarge,
+    /// What a node reads has changed in the graph since kept values were
+    /// made from it (see [`Graph::reshaped`]), so what a change can reach is
+    /// not known: make them again.
+    Reshaped,
 }
 
 impl fmt::Display for PlanError {
@@ -210,6 +215,10 @@ impl fmt::Display for PlanError {
                 )
             }
             PlanError::TooLarge => write!(f, "too many nodes or constants for one plan"),
+            PlanError::Reshaped => write!(
+                f,
+                "the graph's shape has changed since these values were kept (a node redefined or removed, or a total's members changed): keep them again"
+            ),
         }
     }
 }
@@ -1708,6 +1717,11 @@ impl Scenarios {
             shared_ops,
         };
         plan.set_shared(&shared_values);
+        debug_assert_eq!(
+            plan.check(),
+            Ok(()),
+            "a plan the builder made holds together"
+        );
         Ok(plan)
     }
 

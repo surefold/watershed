@@ -215,9 +215,9 @@ yet.
 
 ### Bringing a run up to date after a change
 
-EXPERIMENTAL. A plan has the graph's other inputs built into it, so when one
-of them changes the plan is made again and all of it run again. `Kept` avoids
-that for a change that reaches little:
+A plan has the graph's other inputs built into it, so when one of them
+changes the plan is made again and all of it run again. `Kept` avoids that
+for a change that reaches little:
 
 ```rust,ignore
 // Keep the sums over groups of policies, as well as the outputs.
@@ -228,13 +228,21 @@ kept.hold(inputs, results);
 // Later: one policy's promised amount changes on the graph.
 g.set(promised, 1.1 * was)?;
 g.stabilize();
-kept.refresh_cpu(&g, &[promised.id()])?;   // or `refresh`, to run it yourself
+kept.refresh_cpu(&g, &[])?;                // or `refresh`, to run it yourself
 let now = kept.outputs();                  // every scenario's outputs, up to date
 ```
 
 `refresh` finds the kept nodes the change can reach, following every branch
 of a condition, and makes a small plan of those alone, cut at the kept nodes
-that are still right. The `rerun` example does this on the `liabilities`
+that are still right. It brings in every input that has changed since the
+kept values were as of an update, whether or not it is named (`changed`
+lists them), so a forgotten input cannot leave a value stale. And it
+watches the graph's shape: once a node is redefined or removed, or a total
+gains members (rows added to a collection), what a change reaches is not
+what it was, and a refresh is refused with `PlanError::Reshaped`; make a
+new `Kept`. A test refreshes forty random graphs through six rounds of
+changes, naming every changed input, some, or none, and requires every kept
+value to match making and running the plan again, to the last bit. The `rerun` example does this on the `liabilities`
 book, 20,000 kinds of policy on 10,000 market paths, keeping 11,436 values a
 path (915 MB). Medians of five runs:
 
@@ -296,16 +304,24 @@ repeat it and the cause was not found.
 
 ### Running a batch somewhere else
 
-EXPERIMENTAL. A plan can be written to a file and read back by another
-process or another machine, and gives the same answers to the last bit:
+A plan can be written to a file and read back by another process or
+another machine, and gives the same answers to the last bit:
 
 ```rust,ignore
 plan.save(BufWriter::new(File::create("book.plan")?))?;
 let plan = Scenarios::load(BufReader::new(File::open("book.plan")?))?;
 ```
 
-A file that was cut short or changed is refused; it is not checked for
-being well meant, so load only plans you saved. The insurance book's plan,
+A file that was cut short or changed is refused, and so is one that is
+whole but does not hold together: every number in it that points somewhere
+(a slot, a constant, a shared value, an operand, a level, a group, a
+cluster's layout) must point inside what it points into, every program must
+leave one value on a stack no deeper than 32, and a scenario can ask for no
+more slots than it has inputs and nodes. So a file that `save` did not write
+is refused with `LoadError::NotWhole` rather than run, where on a GPU it
+could read memory it should not. A test changes saved plans at random, 3,000
+times each with and without clusters, with the sum made right again: each is
+refused or runs. The insurance book's plan,
 19.9 million nodes, is a 2 GB file that takes 4 to 5 s to write and 6 to 8 s
 to read.
 
@@ -485,7 +501,9 @@ Its model's numbers are as recalled from the paper it names and have not
 been checked against it; it shows the method and is not advice on dosing.
 
 `spreadsheet` takes an `.xlsx` workbook, the cells to vary and the cells to
-read. The one above is Aswath Damodaran's `fcffsimpleginzu.xlsx`:
+read, and translates the formulas between them with
+[watershed-xlsx](../watershed-xlsx/README.md), which says what it
+understands. The one above is Aswath Damodaran's `fcffsimpleginzu.xlsx`:
 
 ```bash
 cargo run --release --features cuda --example spreadsheet -- fcffsimpleginzu.xlsx \
@@ -534,5 +552,3 @@ detail, with the slot allocation worked through.
   still needs every scenario's answer copied back.
 - Making a plan reads the graph's nodes one after another to find the order
   to work them out in, and that part uses one core.
-- The spreadsheet example has been tried on one workbook. It reads `.xlsx`
-  only, and understands the functions listed at the top of the file.

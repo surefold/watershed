@@ -112,6 +112,7 @@ impl Graph {
         // The nodes it used still list it as a user.
         self.relink_pending = true;
         self.levels = None;
+        self.reshaped += 1;
         Ok(())
     }
 

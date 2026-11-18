@@ -2,7 +2,7 @@
 //! run can be brought up to date by working out only what the change
 //! touches.
 //!
-//! EXPERIMENTAL. A plan has the graph's other inputs built into it, so when
+//! A plan has the graph's other inputs built into it, so when
 //! one of them changes the plan is made again and all of it run again. But
 //! the graph says what the change can reach. If the first run kept the
 //! values of some nodes for every scenario, then only the kept nodes the
@@ -18,6 +18,14 @@
 //!
 //! Which nodes to keep is the caller's choice: more of them means less to
 //! work out after a change and more memory. The outputs are always kept.
+//!
+//! The kept values follow the graph's inputs, not its shape. A `Kept`
+//! notes which update its values are as of, and a refresh brings in every
+//! input that has changed since, whether or not the caller names it. It
+//! also notes [`Graph::reshaped`]: once what a node reads has changed (a
+//! node redefined or removed, rows added to a collection), what a change can
+//! reach is not what it was, and a refresh is refused with
+//! [`PlanError::Reshaped`]; make a new `Kept`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -45,6 +53,10 @@ pub struct Kept {
     plan: Scenarios,
     inputs: Vec<f64>,
     values: Vec<f64>,
+    /// The update the kept values are as of, and the graph's
+    /// [`reshaped`](Graph::reshaped) count when the plan was made.
+    as_of: u64,
+    reshaped: u64,
 }
 
 /// What to run to bring a [`Kept`] up to date: `plan` on `inputs`, on the
@@ -54,6 +66,8 @@ pub struct Refresh {
     pub plan: Scenarios,
     pub inputs: Vec<f64>,
     stale: Vec<u32>,
+    /// The update its results are as of.
+    as_of: u64,
 }
 
 impl Refresh {
@@ -67,7 +81,7 @@ impl Refresh {
 /// the values themselves: a small plan, which kept values it is given, and
 /// which it works out again.
 ///
-/// EXPERIMENTAL. A [`Kept`] makes one with [`Kept::patch`]. It can be
+/// A [`Kept`] makes one with [`Kept::patch`]. It can be
 /// written to a file and read back, so that whoever holds the values of some
 /// of the scenarios, in another process or on another machine, can bring
 /// those up to date: [`inputs`](Self::inputs) makes the small plan's inputs
@@ -289,6 +303,8 @@ impl Kept {
             plan,
             inputs: Vec::new(),
             values: Vec::new(),
+            as_of: g.epoch(),
+            reshaped: g.reshaped(),
         })
     }
 
@@ -378,15 +394,48 @@ impl Kept {
         &self.outputs
     }
 
+    /// The inputs built into the plan that kept values use and that have
+    /// changed in `g` since the kept values were as of: what a refresh brings
+    /// in, as well as what it is told.
+    pub fn changed(&self, g: &Graph) -> Vec<NodeId> {
+        let mut changed: Vec<NodeId> = self
+            .users
+            .keys()
+            .copied()
+            .filter(|&id| g.changed_in(id) > self.as_of)
+            .collect();
+        changed.sort();
+        changed
+    }
+
+    /// Notes that the kept values held elsewhere have been brought up to
+    /// date as of `g`'s last update, by running a [`Patch`] and applying it
+    /// wherever they are. ([`apply`](Self::apply) does this for a
+    /// [`Refresh`].) Until then, a refresh or patch brings in every input
+    /// changed since the values were last as of an update.
+    pub fn caught_up(&mut self, g: &Graph) {
+        self.as_of = g.epoch();
+    }
+
     /// What to run after `changed` inputs of the graph have new values, for
     /// whoever holds the kept values: see [`Patch`]. `None` if no kept
     /// value uses them. Unlike [`refresh`](Self::refresh) this needs no
     /// values to have been given to [`hold`](Self::hold).
+    ///
+    /// Every input that has changed since the kept values were as of an
+    /// update is brought in too, named in `changed` or not. If the graph's
+    /// shape has changed since the plan was made, this is refused with
+    /// [`PlanError::Reshaped`].
     pub fn patch(&self, g: &Graph, changed: &[NodeId]) -> Result<Option<Patch>, PlanError> {
+        if g.reshaped() != self.reshaped {
+            return Err(PlanError::Reshaped);
+        }
         let mut is_stale = vec![false; self.keep.len()];
         let mut stack: Vec<u32> = changed
             .iter()
-            .filter_map(|id| self.users.get(id))
+            .copied()
+            .chain(self.changed(g))
+            .filter_map(|id| self.users.get(&id))
             .flatten()
             .copied()
             .collect();
@@ -442,6 +491,7 @@ impl Kept {
             plan: patch.plan,
             inputs,
             stale: patch.writes,
+            as_of: g.epoch(),
         }))
     }
 
@@ -453,6 +503,7 @@ impl Kept {
     pub fn apply(&mut self, refresh: &Refresh, results: &[f64]) {
         let stale = &refresh.stale;
         assert_eq!(results.len(), self.scenarios() * stale.len());
+        self.as_of = self.as_of.max(refresh.as_of);
         self.values
             .par_chunks_mut(self.keep.len())
             .zip(results.par_chunks(stale.len()))
