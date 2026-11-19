@@ -173,6 +173,8 @@ ROUNDING = [
     ("INT of a product", "=INT(A{r}*B{r})"),
     ("rounded twice", "=ROUND(ROUND(A{r}*B{r},2)*1.1,2)"),
     ("interest for a month", "=ROUND(A{r}*1000*B{r}/12,2)"),
+    # A subtraction loses figures: 628 - 616.715 is held as 11.284999999999968.
+    ("a difference to the penny", "=ROUND(628-A{r}*0.55*B{r},2)"),
 ]
 
 
@@ -189,7 +191,9 @@ def rounding_rows():
                  (8.5, 0.5), (16.35, 0.1), (71.25, 0.2), (0.045, 1000), (1.255, 2),
                  # A hair under a half: 267.49999999999994. To no places
                  # LibreOffice takes that as it is, and rounds it down.
-                 (2.675, 100), (1.005, 100), (1.115, 100)]:
+                 (2.675, 100), (1.005, 100), (1.115, 100),
+                 # Taken from 628 after 55%, halves that have lost figures.
+                 (1121.3, 1), (1001.1, 1), (911.9, 1), (334.7, 1)]:
         rows += [(x, y), (-x, y), (x, -y)]
     # Ordinary numbers: amounts in pounds and pence, and rates.
     state = 12345

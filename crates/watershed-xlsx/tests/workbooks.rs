@@ -42,7 +42,7 @@ fn every_formula_gives_what_libreoffice_gave_for_every_row() {
 /// hair under a half or a whole number, and both signs.
 #[test]
 fn rounding_gives_what_libreoffice_gave_for_every_row() {
-    every_row_agrees("Rounding", 350, 16);
+    every_row_agrees("Rounding", 350, 17);
 }
 
 /// Translates each formula in the sheet's second row, sets its inputs to

@@ -66,7 +66,9 @@ with its checks and timings.
   minute. A risk desk's workbook follows a price feed at 68,000 prices a
   second, working out only what each price reaches. A pension statement's
   workbook is run for 300,000 members, and then tried again and again to
-  find what each member who is short would have to pay in.
+  find what each member who is short would have to pay in. A household's
+  tax and benefit reckoner is run 20 million times, to find who would be
+  worse off for a pay rise.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
   for [Solid](packages/grid-solid) and [React](packages/grid-react). The
@@ -162,7 +164,7 @@ research in progress.
 | Fused kernels | Experimental, off by default | [watershed-gpu](crates/watershed-gpu/README.md#working-nodes-out-in-clusters) |
 | Saved plans, and lots across GPUs | Built; lots run on eight GPUs in one machine, not yet on several machines | [watershed-gpu](crates/watershed-gpu/README.md#running-a-batch-somewhere-else), [watershed-jvm](https://github.com/surefold/watershed-jvm) |
 | Scenario plans from Kotlin, and in the browser on one thread | Experimental | [watershed-jvm](https://github.com/surefold/watershed-jvm), [grid README](crates/watershed-grid/README.md) |
-| Reading a model from an `.xlsx` workbook | Built; 29 functions, each checked against LibreOffice for 24 inputs, and rounding for 396 | [watershed-xlsx](crates/watershed-xlsx/README.md) |
+| Reading a model from an `.xlsx` workbook | Built; 29 functions, each checked against LibreOffice for 24 inputs, and rounding for 408 | [watershed-xlsx](crates/watershed-xlsx/README.md) |
 | Choosing CPU or GPU automatically from measured costs | Research | [research note](docs/research/heterogeneous-execution.md) |
 | Workers on several machines; a release on crates.io and PyPI | Planned | |
 

@@ -170,10 +170,13 @@ fn round(x: f64, digits: f64, how: fn(f64) -> f64) -> f64 {
 }
 
 /// How near a whole number, or a half, a number that depends on an input
-/// has to be to count as it: within four parts in ten thousand million
-/// million. `0.29 * 100` is a little under 29, and Excel still rounds it
-/// down to 29, not 28.
-const NEARLY: f64 = 1.0 / (1u64 << 51) as f64;
+/// has to be to count as it: within four and a half parts in a thousand
+/// million million. `0.29 * 100` is a little under 29, and Excel still
+/// rounds it down to 29, not 28; `628 - 616.715` is a little under 11.285,
+/// and Excel still rounds it to 11.29. That is as far as fifteen figures
+/// reach for a number that starts with a 1; a sum that loses figures, as
+/// that subtraction does, needs all of it.
+const NEARLY: f64 = 4.5e-15;
 
 /// `ROUND`, `ROUNDUP` or `ROUNDDOWN` of a number that depends on an input,
 /// to a fixed number of places: away from zero at a half, as Excel rounds.

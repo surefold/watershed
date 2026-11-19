@@ -33,7 +33,9 @@ version of itself. `sensitivities` asks the graph for an answer's
 derivative by hundreds of the workbook's cells at once. `quotes` works out
 every price a rating workbook can give. `illustrations` works out a pension
 statement for every member of a scheme, and then seeks, member by member,
-the contribution that would put them on track.
+the contribution that would put them on track. `households` raises every
+household's pay step by step through a tax and benefit reckoner, to find
+who would be worse off for earning more.
 
 A workbook's graph can also be kept up to date as its inputs change, with
 no plan at all. The `live` example here follows a price feed with a risk
@@ -101,13 +103,16 @@ that is off. A loop that is followed is refused.
   keys in order, as Excel asks. A table whose keys are not in order is
   refused, since Excel's answer then depends on how it searches.
 - Excel rounds a number as it reads to fifteen figures, so that `0.29 * 100`,
-  which is held as 28.999999999999996, rounds down to 29 and `1.005` rounds
-  to 1.01. For a number that depends on an input, `ROUND`, `ROUNDUP`,
-  `ROUNDDOWN` and `INT` do this by taking a number within four parts in
-  10¹⁶ of a half or a whole number as that half or whole number. Fifteen
-  figures is a little wider: up to five parts in 10¹⁵. A number in the gap
-  between the two can round the other way here. None of the test workbook's
-  does. To no places, `ROUND` takes a half as a half exactly, as LibreOffice
+  which is held as 28.999999999999996, rounds down to 29, and `628 - 616.715`,
+  held as 11.284999999999968, rounds to 11.29. For a number that depends on
+  an input, `ROUND`, `ROUNDUP`, `ROUNDDOWN` and `INT` do this by taking a
+  number within 4.5 parts in 10¹⁵ of a half or a whole number as that half
+  or whole number. That is as far as fifteen figures reach for a number
+  starting with a 1, and up to nine times further than they reach for one
+  starting with a 9. So a number that Excel would read as just short of a
+  half, in its fifteenth figure, can be taken for the half here. None of
+  the test workbook's is, nor any of the examples' reference workbooks'.
+  To no places, `ROUND` takes a half as a half exactly, as LibreOffice
   does. Above 2⁵² once multiplied up, a rounded number may be out in its
   last figure.
 - `.xls` files are not read: their formulas are read incompletely, and a
@@ -125,10 +130,11 @@ repeats them for a different pair of inputs: 24 rows, which take each
 condition both ways and reach errors, zeros and negative numbers. The tests
 translate the first row and set its inputs to each row's in turn. Every
 value must agree with LibreOffice's to twelve figures, on the graph and as
-a plan. A second sheet, `Rounding`, does the same for sixteen formulas that
-round something depending on an input, over 396 pairs of inputs: halves at
+a plan. A second sheet, `Rounding`, does the same for seventeen formulas that
+round something depending on an input, over 408 pairs of inputs: halves at
 the third place, products that are a hair under a half or a whole number,
-both signs, and 300 amounts in pence at eight rates. Other tests write small
+differences that have lost figures, both signs, and 300 amounts in pence at
+eight rates. Other tests write small
 workbooks themselves: where LibreOffice and Excel differ (LibreOffice keeps
 TRUE as 1, and so adds it up in a range),
 for shared formulas, and for a running total 200,000 cells long. A further
