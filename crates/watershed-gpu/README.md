@@ -109,7 +109,7 @@ Where a time is scaled up from a smaller run, it says so.
 | `loans` | Expected losses on 20,000 mortgages over 10,000 paths of the economy | the same sums written out by hand: 3×10⁻¹⁷ | 6.6 s | about 2 minutes (scaled) | by hand, 32 threads: 17.7 s (scaled) |
 | `pensions` | A pension scheme of 299,562 members over 5,000 paths and 75 years | the same sums by hand: 5×10⁻¹³ | 0.9 s | 15.1 s (scaled) | by hand, 32 threads: 5.0 s (scaled) |
 | `spreadsheet` | A public Excel valuation workbook, 10 million trials | Excel's stored values: all 176 cells | 0.5 s | 1.8 s | the graph, a trial at a time: 104 s (scaled) |
-| `credit_loss` | A workbook that works out one mortgage's expected credit loss (2,818 formulas on three paths of the economy), run for 200,000 mortgages | LibreOffice recalculating the workbook for each of 300 loans: 7×10⁻¹⁶; the values saved in the workbook: all 2,818 cells | not run | 4.7 s, on 4 cores of a different machine (a cloud VM) | LibreOffice, a loan at a time, at the 17 ms it took on that machine: 57 minutes (scaled) |
+| `credit_loss` | A workbook that works out one mortgage's expected credit loss (3,124 formulas on three paths of the economy), run for 200,000 mortgages | LibreOffice recalculating the workbook for each of 300 loans: 8×10⁻¹⁶; the values saved in the workbook: all 3,124 cells | not run | 5.4 s, on 4 cores of a different machine (a cloud VM) | LibreOffice, a loan at a time, at the 17.4 ms it took on that machine: 58 minutes (scaled) |
 | `audit` | The same workbook tried at 200,000 points spread over its inputs' ranges and at every corner of them, each input then moved through its range from 300 starting points, and a later version of the workbook run for the same points | its own findings when run on its own: the two cells changed, and which loans the slip in one of them reaches | not run | 17 s for all of it, on the same 4 cores | |
 | `dosing` | An antibiotic's dosing protocol tried on 5 million made-up patients, each followed for 72 hours | SciPy's LSODA solver, 300 patients: 1.7×10⁻¹⁰ | 60 ms a protocol, 51 protocols in 3.0 s | 1.8 s a protocol | the graph: 70 s (scaled) |
 | `monte_carlo` | 200,000 positions on 500 shares, 100,000 futures | the graph, bit for bit | 1.6 s | about 29 s (scaled) | the graph: about 25 minutes (scaled) |
@@ -427,10 +427,14 @@ What is taken from somewhere, and what is made up.
   with two changes: one meant (a loan's chance of default must be three
   times what was expected, not twice, to move to stage 2) and one slip (a
   formula in quarter 57 of the better path reads the expected path's
-  unemployment). What else the example reports about the workbook was not
-  planted: for one, some loans' provisions fall when they pass 90 days past
-  due, because a loan in default is given today's loss on a sale where the
-  loan's life allows for house prices falling.
+  unemployment). Nothing else it reports was planted. Run on the workbook
+  as first written, it showed some loans' provisions falling as they passed
+  90 days past due: a loan in default was given the loss on a sale at
+  today's prices, where a loan's lifetime loss allowed for prices falling.
+  The workbook now prices every sale some quarters after the default, on
+  each path, and the provision rises with days past due on every line
+  tried. It still shows the lifetime loss falling a little as today's
+  chance of default nears nine in ten, which is left for a reader to judge.
 - **`backtest`, `experts`.** Daily prices from 2010 to 2025 for shares with
   a price throughout, from the FINSABER data set on Hugging Face
   (`finsaber-team/FINSABER-V2-Data`), which does not say where its prices
