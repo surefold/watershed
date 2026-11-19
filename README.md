@@ -58,7 +58,8 @@ with its checks and timings.
   10,000 results come up to date in 0.2 s, where a rerun takes 11.2 s.
 - **A spreadsheet, ten million times.** Formulas read from an `.xlsx`
   workbook, checked cell by cell against the values Excel saved, and run as
-  a plan.
+  a plan. A workbook that answers for one loan answers for 200,000 in
+  seconds.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
   for [Solid](packages/grid-solid) and [React](packages/grid-react). The

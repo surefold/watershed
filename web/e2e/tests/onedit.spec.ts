@@ -89,8 +89,9 @@ for (const kind of ["table", "worker"] as const) {
       // One step to undo.
       await page.keyboard.press("ControlOrMeta+z");
       await expect(await cell(grid, "c", "price")).toHaveText("30");
+      // The cell shows the old value before a WorkerTable's edit is reported.
+      await expect.poll(async () => (await edits(page)).length).toBe(2);
       const undone = await edits(page);
-      expect(undone).toHaveLength(2);
       expect(undone[1].cause).toBe("undo");
       expect(undone[1].cells).toHaveLength(4);
     });

@@ -26,7 +26,8 @@ let plan = watershed_gpu::Scenarios::new(model.graph(), &model.inputs(), &model.
 ```
 
 The `spreadsheet` example in watershed-gpu does this for a valuation
-workbook and a million trials.
+workbook and a million trials, and `credit_loss` for a workbook that works
+out one loan's expected credit loss, run for a whole loan book.
 
 ## What is translated
 
