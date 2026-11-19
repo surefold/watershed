@@ -30,7 +30,8 @@ workbook and a million trials, and `credit_loss` for a workbook that works
 out one loan's expected credit loss, run for a whole loan book. `audit`
 tries a workbook over the whole of its inputs' ranges, and against a later
 version of itself. `sensitivities` asks the graph for an answer's
-derivative by hundreds of the workbook's cells at once.
+derivative by hundreds of the workbook's cells at once. `quotes` works out
+every price a rating workbook can give.
 
 ## What is translated
 
