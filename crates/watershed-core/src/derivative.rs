@@ -151,9 +151,22 @@ impl Graph {
                 }
             }
             for used in used {
-                if let Some(slope) = slope(&formula, used) {
-                    pass(used, times(adjoint.clone(), slope), self);
-                }
+                let Some(slope) = slope(&formula, used) else {
+                    continue;
+                };
+                // A slope that can be infinite (a division by nothing, on a
+                // branch not taken) would make nothing times infinity, which
+                // is not a number. Where nothing comes down, nothing is
+                // passed on.
+                let term = match unbounded(&slope) {
+                    true => Arc::new(Ir::If(
+                        binary(BinOp::Eq, adjoint.clone(), number(0.0)),
+                        number(0.0),
+                        times(adjoint.clone(), slope),
+                    )),
+                    false => times(adjoint.clone(), slope),
+                };
+                pass(used, term, self);
             }
         }
 
@@ -358,6 +371,20 @@ fn a_number(of: &Ir) -> bool {
         ),
         Ir::Const(_) | Ir::Ref(_) | Ir::If(..) | Ir::Choose(..) => true,
         Ir::List(_) => false,
+    }
+}
+
+/// Whether an expression can come to infinity from finite numbers: it
+/// divides, or takes a logarithm, a root or a power.
+fn unbounded(of: &Ir) -> bool {
+    match of {
+        Ir::Const(_) | Ir::Ref(_) | Ir::List(_) => false,
+        Ir::Unary(op, a) => matches!(op, UnOp::Ln | UnOp::Sqrt) || unbounded(a),
+        Ir::Binary(op, a, b) => {
+            matches!(op, BinOp::Div | BinOp::Pow) || unbounded(a) || unbounded(b)
+        }
+        Ir::If(test, then, otherwise) => unbounded(test) || unbounded(then) || unbounded(otherwise),
+        Ir::Choose(index, options) => unbounded(index) || options.iter().any(|o| unbounded(o)),
     }
 }
 

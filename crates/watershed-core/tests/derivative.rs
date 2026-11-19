@@ -77,6 +77,44 @@ fn a_derivative_follows_its_inputs_as_any_node_does() -> Result {
 }
 
 #[test]
+fn a_division_by_nothing_on_a_branch_not_taken_leaves_no_trace() -> Result {
+    // The share of a loan lost when its property is sold, guarded for a
+    // loan with nothing owed, as a spreadsheet guards it. With nothing
+    // owed the loss is nothing and so is its derivative, not the nothing
+    // times infinity the division's own slope would make of it.
+    let mut g = Graph::new();
+    let owed = g.input("owed", 0.0)?;
+    let sold = g.input("sold", 150.0)?;
+    let cut = g.input("cut", 0.2)?;
+    let chance = g.input("chance", 0.1)?;
+    let costs = g.input("costs", 0.07)?;
+    let rate = g.input("rate", 0.0)?;
+    // Long enough, and of enough nodes, to be taken in steps: the division
+    // is then a step of its own, outside the condition that guards it.
+    let lost = g.define(
+        "lost",
+        when(owed.le(0.0)).then(0.0).otherwise(
+            (1.0 - sold * (1.0 - cut) * (1.0 - costs) / (1.0 + rate).pow(2.0) / owed)
+                .min(1.0)
+                .max(0.05),
+        ),
+    )?;
+    let loss = g.define("loss", chance * lost * owed)?;
+    let by = [sold.id(), cut.id(), chance.id(), owed.id()];
+    let slopes = g.gradient(loss.id(), &by, "slope")?;
+    g.stabilize();
+    for &slope in &slopes[..3] {
+        assert_eq!(number(&g, slope), 0.0);
+    }
+    // And with something owed, the slopes are the model's own.
+    g.set(owed, 200.0)?;
+    g.stabilize();
+    let want = -0.1 * 0.8 * 0.93;
+    assert!((number(&g, slopes[0]) - want).abs() < 1e-12);
+    Ok(())
+}
+
+#[test]
 fn a_floor_is_flat_between_its_steps() -> Result {
     let mut g = Graph::new();
     let x = g.input("x", 1.3)?;

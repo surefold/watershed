@@ -320,7 +320,10 @@ positive number, `min` and `max` of equal values as for the first, a
 condition as for the branch it takes. A total's smallest or largest value
 passes its derivative to every member equal to it. Comparisons, conditions'
 tests and counts have a derivative of zero. A node in `with_respect_to` is
-taken as free to vary alone, whether or not it is an input.
+taken as free to vary alone, whether or not it is an input. Where nothing
+comes down to a node, nothing is passed on through it, so a division by
+zero on a branch that is not taken (`when(owed <= 0).then(0).otherwise(x /
+owed)`) leaves the derivative at zero and not at not-a-number.
 
 Not supported: a derivative through whole numbers or decimals (refused, with
 the node's name, and nothing added), and removing the nodes a gradient
