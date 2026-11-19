@@ -109,6 +109,7 @@ Where a time is scaled up from a smaller run, it says so.
 | `loans` | Expected losses on 20,000 mortgages over 10,000 paths of the economy | the same sums written out by hand: 3×10⁻¹⁷ | 6.6 s | about 2 minutes (scaled) | by hand, 32 threads: 17.7 s (scaled) |
 | `pensions` | A pension scheme of 299,562 members over 5,000 paths and 75 years | the same sums by hand: 5×10⁻¹³ | 0.9 s | 15.1 s (scaled) | by hand, 32 threads: 5.0 s (scaled) |
 | `spreadsheet` | A public Excel valuation workbook, 10 million trials | Excel's stored values: all 176 cells | 0.5 s | 1.8 s | the graph, a trial at a time: 104 s (scaled) |
+| `credit_loss` | A workbook that works out one mortgage's expected credit loss (2,818 formulas on three paths of the economy), run for 200,000 mortgages | LibreOffice recalculating the workbook for each of 300 loans: 7×10⁻¹⁶; the values saved in the workbook: all 2,818 cells | not run | 4.7 s, on 4 cores of a different machine (a cloud VM) | LibreOffice, a loan at a time, at the 17 ms it took on that machine: 57 minutes (scaled) |
 | `dosing` | An antibiotic's dosing protocol tried on 5 million made-up patients, each followed for 72 hours | SciPy's LSODA solver, 300 patients: 1.7×10⁻¹⁰ | 60 ms a protocol, 51 protocols in 3.0 s | 1.8 s a protocol | the graph: 70 s (scaled) |
 | `monte_carlo` | 200,000 positions on 500 shares, 100,000 futures | the graph, bit for bit | 1.6 s | about 29 s (scaled) | the graph: about 25 minutes (scaled) |
 | `tax_benefit` | A country's tax and benefit rules over 10 million households | the graph, bit for bit | 0.7 s | 0.5 s | the graph: 28 s (scaled) |
@@ -414,6 +415,12 @@ What is taken from somewhere, and what is made up.
 - **`spreadsheet`.** `fcffsimpleginzu.xlsx` is from Aswath Damodaran's
   [page of valuation spreadsheets](https://pages.stern.nyu.edu/~adamodar/New_Home_Page/spreadsh.htm),
   as downloaded. The ranges the inputs were varied over are made up.
+- **`credit_loss`.** The workbook, `examples/shared/credit_loss.xlsx`, is
+  written by `examples/shared/credit_loss.py` and worked out by LibreOffice,
+  which the same script then drives through 300 loans for the reference.
+  The loans, the model's numbers and the three paths of the economy are
+  made up. A loan's stage is judged across the three paths together, on its
+  weighted chance of default.
 - **`backtest`, `experts`.** Daily prices from 2010 to 2025 for shares with
   a price throughout, from the FINSABER data set on Hugging Face
   (`finsaber-team/FINSABER-V2-Data`), which does not say where its prices
@@ -440,6 +447,7 @@ cargo run --release --features cuda --example tax_benefit
 cargo run --release --features cuda --example insurance
 cargo run --release --features cuda --example loans
 cargo run --release --features cuda --example pensions
+cargo run --release --features cuda --example credit_loss
 ```
 
 Without `--features cuda` each runs on the CPU, with fewer scenarios unless
