@@ -94,6 +94,9 @@ jobs:
       # A per-loan workbook over 20,000 loans, checked against the values saved
       # in it, LibreOffice's answers for 300 loans, and the graph bit for bit.
       - run: cargo run --locked --release -p watershed-gpu --example credit_loss -- 20000
+      # That workbook against a later version of it: the cells changed are
+      # found, and which loans a slip in one of them reaches.
+      - run: cargo run --locked --release -p watershed-gpu --example audit -- 20000
 
   web:
     name: Web demo (WebAssembly)

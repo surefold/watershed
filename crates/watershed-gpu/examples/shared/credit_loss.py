@@ -12,6 +12,13 @@ be installed:
 
     python3 crates/watershed-gpu/examples/shared/credit_loss.py
 
+It also writes `credit_loss_changed.xlsx`, a later version of the workbook
+for the `audit` example to compare with the first. Two things differ in it.
+One is meant: a loan's chance of default must now be three times what was
+expected, not twice, for it to move to stage 2 (`Model!B18`). The other is a slip of the kind a copied formula
+makes: in quarter 57 of the better path, the chance of default reads the
+expected path's unemployment (`Schedule!Q61`).
+
 Then LibreOffice is driven directly: the loan's cells are set to each of
 some made-up loans in turn and the workbook recalculated, as a macro looping
 over a loan book would. What it answers, and how long a loan took, go in the
@@ -75,7 +82,7 @@ def economy(ws):
         ws.cell(r, 9, f"=MAX(0.3,C{r}+Model!$B$8*G{r})")
 
 
-def model(ws):
+def model(ws, changed):
     """The bank's choices."""
     ws["A1"] = "The model's numbers"
     rows = [
@@ -90,7 +97,8 @@ def model(ws):
         (13, "by, for each further whole of it", 2.0),
         (15, "Cost of selling a repossessed property", 0.07),
         (16, "Least share of a defaulted loan that is lost", 0.05),
-        (18, "Looking shakier: the chance of default over its life is this many times what was expected", 2.0),
+        (18, "Looking shakier: the chance of default over its life is this many times what was expected",
+         3.0 if changed else 2.0),
         (19, "and higher by at least", 0.01),
         (20, "or it is more than this many days past due", 30),
         (21, "In default: days past due", 90),
@@ -115,7 +123,7 @@ def col(n):
     return openpyxl.utils.get_column_letter(n)
 
 
-def schedule(ws):
+def schedule(ws, changed):
     """The loan, quarter by quarter, on each path."""
     ws["A1"] = "The loan, quarter by quarter"
     ws["A2"], ws["B2"] = "Payment each quarter", "=ROUND(PMT(Loan!B5/4,Loan!B6,-Loan!B4),2)"
@@ -138,7 +146,9 @@ def schedule(ws):
         ws.cell(r, 4, f"=IF(A{r}>Loan!$B$6,0,IF(A{r}=Loan!$B$6,B{r}+C{r},MIN(B{r}+C{r},$B$2)))")
         ws.cell(r, 5, f"=B{r}+C{r}-D{r}")
         ws.cell(r, 7, f"=1/(1+Loan!$B$5/4)^A{r}")
-        for _, start, u, h in PATHS:
+        for name, start, u, h in PATHS:
+            if changed and name == "Better" and t == 57:
+                u = "B"
             prop, ltv, hazard, alive, lost, chance, loss = (col(start + k) for k in range(7))
             ws.cell(r, start, f"=Loan!$B$7*Economy!{h}{r}")
             ws.cell(r, start + 1, f"=$B{r}/{prop}{r}")
@@ -194,14 +204,14 @@ def loan(ws):
         ws[cell].font = Font(bold=True)
 
 
-def write(path):
+def write(path, changed=False):
     wb = openpyxl.Workbook()
     loan_sheet = wb.active
     loan_sheet.title = "Loan"
     loan(loan_sheet)
-    schedule(wb.create_sheet("Schedule"))
+    schedule(wb.create_sheet("Schedule"), changed)
     economy(wb.create_sheet("Economy"))
-    model(wb.create_sheet("Model"))
+    model(wb.create_sheet("Model"), changed)
     for ws in wb:
         ws.column_dimensions["A"].width = 58 if ws.title in ("Loan", "Model") else 12
     wb.save(path)
@@ -315,6 +325,9 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "credit_loss.xlsx")
         write(path)
+        worked_out(path, HERE)
+        path = os.path.join(tmp, "credit_loss_changed.xlsx")
+        write(path, changed=True)
         worked_out(path, HERE)
     print("wrote", target, file=sys.stderr)
     if "--no-reference" not in sys.argv:
