@@ -106,6 +106,9 @@ jobs:
       # A workbook following 20,000 prices one at a time, checked against
       # LibreOffice for the first 300 and a second graph at the end.
       - run: cargo run --locked --release -p watershed-xlsx --example live -- 20000
+      # A pension statement's workbook for 20,000 members, checked against
+      # LibreOffice for 300, and each answer it seeks checked to be the least.
+      - run: cargo run --locked --release -p watershed-gpu --example illustrations -- 20000
 
   web:
     name: Web demo (WebAssembly)

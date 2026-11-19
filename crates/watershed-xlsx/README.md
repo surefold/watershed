@@ -31,7 +31,9 @@ out one loan's expected credit loss, run for a whole loan book. `audit`
 tries a workbook over the whole of its inputs' ranges, and against a later
 version of itself. `sensitivities` asks the graph for an answer's
 derivative by hundreds of the workbook's cells at once. `quotes` works out
-every price a rating workbook can give.
+every price a rating workbook can give. `illustrations` works out a pension
+statement for every member of a scheme, and then seeks, member by member,
+the contribution that would put them on track.
 
 A workbook's graph can also be kept up to date as its inputs change, with
 no plan at all. The `live` example here follows a price feed with a risk

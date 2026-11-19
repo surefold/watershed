@@ -64,7 +64,9 @@ with its checks and timings.
   of its inputs comes with it, for a few times the cost of the answer. A
   rating workbook gives every quote it can, 16 million of them, in half a
   minute. A risk desk's workbook follows a price feed at 68,000 prices a
-  second, working out only what each price reaches.
+  second, working out only what each price reaches. A pension statement's
+  workbook is run for 300,000 members, and then tried again and again to
+  find what each member who is short would have to pay in.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
   for [Solid](packages/grid-solid) and [React](packages/grid-react). The
