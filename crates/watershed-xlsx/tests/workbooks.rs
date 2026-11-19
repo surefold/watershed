@@ -158,6 +158,18 @@ fn what_cannot_be_translated_is_refused_with_the_reason() {
 }
 
 #[test]
+fn every_cell_that_holds_something_is_listed() {
+    let book = Workbook::from_bytes(workbook(&[
+        ("B2", 3.0, None),
+        ("D2", 6.0, Some("<f>B2*2</f>")),
+        ("A5", 1.5, None),
+    ]))
+    .unwrap();
+    let names: Vec<String> = book.cells().map(|c| book.name(c)).collect();
+    assert_eq!(names, ["Model!B2", "Model!D2", "Model!A5"]);
+}
+
+#[test]
 fn cells_are_found_by_name() {
     let book = functions();
     let tables = sheet(&book, "Tables");

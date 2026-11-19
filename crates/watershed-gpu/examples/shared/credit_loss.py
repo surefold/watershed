@@ -4,13 +4,22 @@
 The workbook is the kind a credit risk team keeps: one mortgage on the
 `Loan` sheet, three paths the economy might take on `Economy`, the loan
 worked through each of them quarter by quarter on `Schedule`, and the bank's
-choices on `Model`. Everything in it is made up; the shape is the usual one
+choices on `Model`. A property is sold some quarters after a default, at
+that quarter's prices on each path; a loan already in default is given the
+loss on such a sale. Everything in it is made up; the shape is the usual one
 for IFRS 9.
 
 It is written with `openpyxl` and worked out by LibreOffice, which must both
 be installed:
 
     python3 crates/watershed-gpu/examples/shared/credit_loss.py
+
+It also writes `credit_loss_changed.xlsx`, a later version of the workbook
+for the `audit` example to compare with the first. Two things differ in it.
+One is meant: a loan's chance of default must now be three times what was
+expected, not twice, for it to move to stage 2 (`Model!B18`). The other is a slip of the kind a copied formula
+makes: in quarter 57 of the better path, the chance of default reads the
+expected path's unemployment (`Schedule!R61`).
 
 Then LibreOffice is driven directly: the loan's cells are set to each of
 some made-up loans in turn and the workbook recalculated, as a macro looping
@@ -34,6 +43,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 QUARTERS = 100
 FIRST = 5  # The first quarter's row on Economy and Schedule.
 LAST = FIRST + QUARTERS - 1
+# The economy runs on past the last quarter, for a property repossessed then
+# and sold some quarters later.
+AFTER = 12
 REFERENCE_LOANS = 300
 
 # The loan's cells, in the order the example and the reference file use.
@@ -53,7 +65,7 @@ def economy(ws):
              "Slump: unemployment", "Slump: house prices"]
     for c, head in enumerate(heads, start=1):
         ws.cell(4, c, head).font = Font(bold=True)
-    for t in range(1, QUARTERS + 1):
+    for t in range(1, QUARTERS + AFTER + 1):
         r = FIRST + t - 1
         # Expected: a small rise in unemployment that passes; prices up 2% a year.
         base_u = 4.5 + 0.4 * math.exp(-((t - 4) / 5.0) ** 2)
@@ -75,7 +87,7 @@ def economy(ws):
         ws.cell(r, 9, f"=MAX(0.3,C{r}+Model!$B$8*G{r})")
 
 
-def model(ws):
+def model(ws, changed):
     """The bank's choices."""
     ws["A1"] = "The model's numbers"
     rows = [
@@ -88,9 +100,11 @@ def model(ws):
         (11, "Defaults rise with each point of unemployment by", 0.25),
         (12, "and with the loan above this share of the property's value", 0.8),
         (13, "by, for each further whole of it", 2.0),
+        (14, "Quarters from a default to the property's sale", 6),
         (15, "Cost of selling a repossessed property", 0.07),
         (16, "Least share of a defaulted loan that is lost", 0.05),
-        (18, "Looking shakier: the chance of default over its life is this many times what was expected", 2.0),
+        (18, "Looking shakier: the chance of default over its life is this many times what was expected",
+         3.0 if changed else 2.0),
         (19, "and higher by at least", 0.01),
         (20, "or it is more than this many days past due", 30),
         (21, "In default: days past due", 90),
@@ -108,14 +122,14 @@ def model(ws):
 
 
 # Where each path's columns start on Schedule, and its columns on Economy.
-PATHS = [("Expected", 8, "B", "C"), ("Better", 15, "D", "E"), ("Slump", 22, "H", "I")]
+PATHS = [("Expected", 8, "B", "C"), ("Better", 16, "D", "E"), ("Slump", 24, "H", "I")]
 
 
 def col(n):
     return openpyxl.utils.get_column_letter(n)
 
 
-def schedule(ws):
+def schedule(ws, changed):
     """The loan, quarter by quarter, on each path."""
     ws["A1"] = "The loan, quarter by quarter"
     ws["A2"], ws["B2"] = "Payment each quarter", "=ROUND(PMT(Loan!B5/4,Loan!B6,-Loan!B4),2)"
@@ -126,8 +140,8 @@ def schedule(ws):
     for name, start, _, _ in PATHS:
         ws.cell(3, start, name).font = Font(bold=True)
         for k, head in enumerate(["Property", "Loan to value", "Chance of default if still paying",
-                                  "Still paying", "Share lost on default", "Chance of default",
-                                  "Loss expected"]):
+                                  "Still paying", "Property when sold, if it defaults",
+                                  "Share lost on default", "Chance of default", "Loss expected"]):
             ws.cell(4, start + k, head).font = Font(bold=True)
     for t in range(1, QUARTERS + 1):
         r = FIRST + t - 1
@@ -138,19 +152,25 @@ def schedule(ws):
         ws.cell(r, 4, f"=IF(A{r}>Loan!$B$6,0,IF(A{r}=Loan!$B$6,B{r}+C{r},MIN(B{r}+C{r},$B$2)))")
         ws.cell(r, 5, f"=B{r}+C{r}-D{r}")
         ws.cell(r, 7, f"=1/(1+Loan!$B$5/4)^A{r}")
-        for _, start, u, h in PATHS:
-            prop, ltv, hazard, alive, lost, chance, loss = (col(start + k) for k in range(7))
+        for name, start, u, h in PATHS:
+            if changed and name == "Better" and t == 57:
+                u = "B"
+            prop, ltv, hazard, alive, sold, lost, chance, loss = (col(start + k) for k in range(8))
             ws.cell(r, start, f"=Loan!$B$7*Economy!{h}{r}")
             ws.cell(r, start + 1, f"=$B{r}/{prop}{r}")
             ws.cell(r, start + 2,
                     f"=MIN(1,$B$3*EXP(Model!$B$11*(Economy!{u}{r}-Model!$B$10)"
                     f"+Model!$B$13*MAX(0,{ltv}{r}-Model!$B$12)))")
             ws.cell(r, start + 3, 1 if t == 1 else f"={alive}{r - 1}*(1-{hazard}{r - 1})")
+            # A property is sold some quarters after the default, at the
+            # prices of that quarter on this path.
             ws.cell(r, start + 4,
-                    f"=IF($B{r}<=0,0,MAX(Model!$B$16,MIN(1,1-{prop}{r}"
+                    f"=Loan!$B$7*INDEX(Economy!{h}${FIRST}:{h}${LAST + AFTER},$A{r}+Model!$B$14)")
+            ws.cell(r, start + 5,
+                    f"=IF($B{r}<=0,0,MAX(Model!$B$16,MIN(1,1-{sold}{r}"
                     f"*(1-VLOOKUP({ltv}{r},Model!$D$5:$E$10,2,TRUE))*(1-Model!$B$15)/$B{r})))")
-            ws.cell(r, start + 5, f"=IF($A{r}>Loan!$B$6,0,{alive}{r}*{hazard}{r})")
-            ws.cell(r, start + 6, f"={chance}{r}*{lost}{r}*$B{r}*$G{r}")
+            ws.cell(r, start + 6, f"=IF($A{r}>Loan!$B$6,0,{alive}{r}*{hazard}{r})")
+            ws.cell(r, start + 7, f"={chance}{r}*{lost}{r}*$B{r}*$G{r}")
 
 
 def loan(ws):
@@ -183,7 +203,7 @@ def loan(ws):
                              start=4):
         ws.cell(12, c, head).font = Font(bold=True)
     for r, (name, start, _, _) in enumerate(PATHS, start=13):
-        chance, loss, lost = col(start + 5), col(start + 6), col(start + 4)
+        chance, loss, lost = col(start + 6), col(start + 7), col(start + 5)
         ws.cell(r, 4, name)
         ws.cell(r, 5, f"=Model!B{r - 9}")
         ws.cell(r, 6, f"=SUM(Schedule!{loss}{FIRST}:{loss}{FIRST + 3})")
@@ -194,14 +214,14 @@ def loan(ws):
         ws[cell].font = Font(bold=True)
 
 
-def write(path):
+def write(path, changed=False):
     wb = openpyxl.Workbook()
     loan_sheet = wb.active
     loan_sheet.title = "Loan"
     loan(loan_sheet)
-    schedule(wb.create_sheet("Schedule"))
+    schedule(wb.create_sheet("Schedule"), changed)
     economy(wb.create_sheet("Economy"))
-    model(wb.create_sheet("Model"))
+    model(wb.create_sheet("Model"), changed)
     for ws in wb:
         ws.column_dimensions["A"].width = 58 if ws.title in ("Loan", "Model") else 12
     wb.save(path)
@@ -315,6 +335,9 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "credit_loss.xlsx")
         write(path)
+        worked_out(path, HERE)
+        path = os.path.join(tmp, "credit_loss_changed.xlsx")
+        write(path, changed=True)
         worked_out(path, HERE)
     print("wrote", target, file=sys.stderr)
     if "--no-reference" not in sys.argv:

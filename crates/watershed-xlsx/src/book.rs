@@ -128,6 +128,31 @@ impl Workbook {
         }
     }
 
+    /// Every cell that holds a value or a formula, sheet by sheet, each
+    /// sheet in order of row and then column.
+    pub fn cells(&self) -> impl Iterator<Item = Cell> + '_ {
+        self.sheets.iter().enumerate().flat_map(|(sheet, s)| {
+            let (values, formulas) = (s.values.start(), s.formulas.start());
+            let held = s
+                .values
+                .used_cells()
+                .filter(|(_, _, v)| !matches!(v, Data::Empty))
+                .filter_map(move |(row, col, _)| {
+                    values.map(|(top, left)| (top + row as u32, left + col as u32))
+                });
+            let worked = s
+                .formulas
+                .used_cells()
+                .filter(|(_, _, f)| !f.is_empty())
+                .filter_map(move |(row, col, _)| {
+                    formulas.map(|(top, left)| (top + row as u32, left + col as u32))
+                });
+            let all: std::collections::BTreeSet<(u32, u32)> = held.chain(worked).collect();
+            all.into_iter()
+                .map(move |(row, col)| Cell { sheet, row, col })
+        })
+    }
+
     /// The value Excel last worked out for a cell.
     pub fn value(&self, c: Cell) -> Val {
         let Some(sheet) = self.sheets.get(c.sheet) else {
