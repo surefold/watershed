@@ -63,7 +63,8 @@ with its checks and timings.
   breaks or what a change to it moved. Its answer's derivative by hundreds
   of its inputs comes with it, for a few times the cost of the answer. A
   rating workbook gives every quote it can, 16 million of them, in half a
-  minute.
+  minute. A risk desk's workbook follows a price feed at 68,000 prices a
+  second, working out only what each price reaches.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
   for [Solid](packages/grid-solid) and [React](packages/grid-react). The
