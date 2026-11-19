@@ -288,6 +288,11 @@ macro_rules! methods {
             pub fn cos(self) -> Expr<f64> {
                 unary(UnOp::Cos, self.into_expr())
             }
+            /// The largest whole number not above this: 2.7 gives 2, and
+            /// -2.1 gives -3.
+            pub fn floor(self) -> Expr<f64> {
+                unary(UnOp::Floor, self.into_expr())
+            }
             /// This to the power of `exponent`.
             pub fn pow(self, exponent: impl IntoExpr<f64>) -> Expr<f64> {
                 binary(BinOp::Pow, self.into_expr(), exponent.into_expr())

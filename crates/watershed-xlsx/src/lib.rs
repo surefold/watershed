@@ -88,6 +88,7 @@ pub const FUNCTIONS: &[&str] = &[
     "IF",
     "IFERROR",
     "INDEX",
+    "INT",
     "LN",
     "LOG",
     "LOG10",
@@ -99,6 +100,9 @@ pub const FUNCTIONS: &[&str] = &[
     "OR",
     "PMT",
     "POWER",
+    "ROUND",
+    "ROUNDDOWN",
+    "ROUNDUP",
     "SIGN",
     "SQRT",
     "SUM",
@@ -109,15 +113,7 @@ pub const FUNCTIONS: &[&str] = &[
 /// The functions understood only when what they are given does not depend
 /// on a varied input. `COUNT` and `COUNTA` count a varied cell as a number
 /// whatever it comes to.
-pub const FIXED_FUNCTIONS: &[&str] = &[
-    "COUNT",
-    "COUNTA",
-    "INT",
-    "MOD",
-    "ROUND",
-    "ROUNDDOWN",
-    "ROUNDUP",
-];
+pub const FIXED_FUNCTIONS: &[&str] = &["COUNT", "COUNTA", "MOD"];
 
 /// Why a workbook could not be read or translated.
 #[derive(Debug, Clone, PartialEq)]

@@ -67,6 +67,7 @@ const AGG_MIN: u32 = 27;
 const AGG_MAX: u32 = 28;
 const SIN: u32 = 29;
 const COS: u32 = 30;
+const FLOOR: u32 = 31;
 
 /// Where a load reads from.
 #[cfg(feature = "gpu")]
@@ -80,7 +81,7 @@ pub(crate) enum Source {
 pub(crate) fn arity(code: u32) -> usize {
     match code {
         LOAD | CONST | LOAD_SHARED | crate::fuse::LOCAL => 0,
-        NEG | ABS | NOT | EXP | LN | SQRT | SIN | COS => 1,
+        NEG | ABS | NOT | EXP | LN | SQRT | SIN | COS | FLOOR => 1,
         SELECT => 3,
         _ => 2,
     }
@@ -111,6 +112,7 @@ pub(crate) fn in_c(code: u32, on: &[&str]) -> String {
         SQRT => format!("sqrt({a})"),
         SIN => format!("sin({a})"),
         COS => format!("cos({a})"),
+        FLOOR => format!("floor({a})"),
         NOT => truth(format!("{a} == 0.0")),
         // Condition, then, otherwise.
         SELECT => format!("({a} != 0.0) ? {b} : {}", on[2]),
@@ -747,6 +749,7 @@ impl Program<'_> {
                     (UnOp::Sqrt, Kind::Float) => self.op(SQRT),
                     (UnOp::Sin, Kind::Float) => self.op(SIN),
                     (UnOp::Cos, Kind::Float) => self.op(COS),
+                    (UnOp::Floor, Kind::Float) => self.op(FLOOR),
                     (UnOp::Not, Kind::Bool) => self.op(NOT),
                     (_, Kind::Int) => return Err(self.unsupported("arithmetic of whole numbers")),
                     (other, _) => return Err(self.unsupported(format!("a {other:?}"))),
@@ -1133,6 +1136,7 @@ fn eval(ops: &[u32], consts: &[f64], shared: &[f64], vals: &[f64]) -> f64 {
             SQRT => stack[sp - 1] = stack[sp - 1].sqrt(),
             SIN => stack[sp - 1] = stack[sp - 1].sin(),
             COS => stack[sp - 1] = stack[sp - 1].cos(),
+            FLOOR => stack[sp - 1] = stack[sp - 1].floor(),
             NOT => stack[sp - 1] = truth(stack[sp - 1] == 0.0),
             SELECT => {
                 sp -= 2;

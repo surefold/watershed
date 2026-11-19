@@ -44,15 +44,18 @@ on any sheet), defined names, and shared formulas (a formula filled down,
 which Excel saves once). These functions are understood whether or not what
 they are given depends on an input:
 
-`ABS` `AND` `AVERAGE` `CHOOSE` `EXP` `HLOOKUP` `IF` `IFERROR` `INDEX` `LN`
-`LOG` `LOG10` `MATCH` `MAX` `MIN` `NOT` `NPV` `OR` `PMT` `POWER` `SIGN`
-`SQRT` `SUM` `SUMPRODUCT` `VLOOKUP`
+`ABS` `AND` `AVERAGE` `CHOOSE` `EXP` `HLOOKUP` `IF` `IFERROR` `INDEX` `INT`
+`LN` `LOG` `LOG10` `MATCH` `MAX` `MIN` `NOT` `NPV` `OR` `PMT` `POWER` `ROUND`
+`ROUNDDOWN` `ROUNDUP` `SIGN` `SQRT` `SUM` `SUMPRODUCT` `VLOOKUP`
 
 A lookup by a value that depends on an input becomes a chain of
 conditions, one for each row of the table. These are understood only when
 what they are given does not depend on an input:
 
-`COUNT` `COUNTA` `INT` `MOD` `ROUND` `ROUNDDOWN` `ROUNDUP`
+`COUNT` `COUNTA` `MOD`
+
+The number of places given to `ROUND`, `ROUNDUP` and `ROUNDDOWN` must not
+depend on an input either.
 
 Cells that read each other in a loop (a circular reference, worked out by
 Excel's iterative calculation) are fine as long as the formulas followed do
@@ -74,6 +77,16 @@ that is off. A loop that is followed is refused.
 - Approximate lookups (`VLOOKUP` with TRUE, `MATCH` with 1 or -1) need their
   keys in order, as Excel asks. A table whose keys are not in order is
   refused, since Excel's answer then depends on how it searches.
+- Excel rounds a number as it reads to fifteen figures, so that `0.29 * 100`,
+  which is held as 28.999999999999996, rounds down to 29 and `1.005` rounds
+  to 1.01. For a number that depends on an input, `ROUND`, `ROUNDUP`,
+  `ROUNDDOWN` and `INT` do this by taking a number within four parts in
+  10¹⁶ of a half or a whole number as that half or whole number. Fifteen
+  figures is a little wider: up to five parts in 10¹⁵. A number in the gap
+  between the two can round the other way here. None of the test workbook's
+  does. To no places, `ROUND` takes a half as a half exactly, as LibreOffice
+  does. Above 2⁵² once multiplied up, a rounded number may be out in its
+  last figure.
 - `.xls` files are not read: their formulas are read incompletely, and a
   cell whose formula is missing would be taken for a constant.
 
@@ -89,12 +102,16 @@ repeats them for a different pair of inputs: 24 rows, which take each
 condition both ways and reach errors, zeros and negative numbers. The tests
 translate the first row and set its inputs to each row's in turn. Every
 value must agree with LibreOffice's to twelve figures, on the graph and as
-a plan. Other tests write small workbooks themselves: where LibreOffice and
-Excel differ (LibreOffice keeps TRUE as 1, and so adds it up in a range),
+a plan. A second sheet, `Rounding`, does the same for sixteen formulas that
+round something depending on an input, over 396 pairs of inputs: halves at
+the third place, products that are a hair under a half or a whole number,
+both signs, and 300 amounts in pence at eight rates. Other tests write small
+workbooks themselves: where LibreOffice and Excel differ (LibreOffice keeps
+TRUE as 1, and so adds it up in a range),
 for shared formulas, and for a running total 200,000 cells long. A further
 sheet holds formulas that must be refused, each with the reason it must
-give. Changing the lookups, `IFERROR`, `CHOOSE`, `NPV`, how text is compared
-or how loops are found makes a test fail.
+give. Changing the lookups, `IFERROR`, `CHOOSE`, `NPV`, how text is compared,
+how loops are found or how a number is rounded makes a test fail.
 
 Damodaran's `fcffsimpleginzu.xlsx` was also tried, by hand, not in CI.
 Varying each of its 15 inputs that reach the valuation, every translated
