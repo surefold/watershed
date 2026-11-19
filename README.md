@@ -60,7 +60,8 @@ with its checks and timings.
   workbook, checked cell by cell against the values Excel saved, and run as
   a plan. A workbook that answers for one loan answers for 200,000 in
   seconds, and can be tried everywhere its inputs can go, to see where it
-  breaks or what a change to it moved.
+  breaks or what a change to it moved. Its answer's derivative by hundreds
+  of its inputs comes with it, for a few times the cost of the answer.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
   for [Solid](packages/grid-solid) and [React](packages/grid-react). The

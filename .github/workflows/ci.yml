@@ -97,6 +97,9 @@ jobs:
       # That workbook against a later version of it: the cells changed are
       # found, and which loans a slip in one of them reaches.
       - run: cargo run --locked --release -p watershed-gpu --example audit -- 20000
+      # The provision's derivative by 689 of that workbook's inputs, each
+      # checked against nudging the input.
+      - run: cargo run --locked --release -p watershed-gpu --example sensitivities -- 5000
 
   web:
     name: Web demo (WebAssembly)

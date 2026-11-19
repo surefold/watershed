@@ -111,6 +111,7 @@ Where a time is scaled up from a smaller run, it says so.
 | `spreadsheet` | A public Excel valuation workbook, 10 million trials | Excel's stored values: all 176 cells | 0.5 s | 1.8 s | the graph, a trial at a time: 104 s (scaled) |
 | `credit_loss` | A workbook that works out one mortgage's expected credit loss (3,124 formulas on three paths of the economy), run for 200,000 mortgages | LibreOffice recalculating the workbook for each of 300 loans: 8×10⁻¹⁶; the values saved in the workbook: all 3,124 cells | not run | 5.4 s, on 4 cores of a different machine (a cloud VM) | LibreOffice, a loan at a time, at the 17.4 ms it took on that machine: 58 minutes (scaled) |
 | `audit` | The same workbook tried at 200,000 points spread over its inputs' ranges and at every corner of them, each input then moved through its range from 300 starting points, and a later version of the workbook run for the same points | its own findings when run on its own: the two cells changed, and which loans the slip in one of them reaches | not run | 17 s for all of it, on the same 4 cores | |
+| `sensitivities` | The same workbook's provision with its derivative by 689 inputs (17 of the bank's choices and every quarter of three paths of the economy), for 50,000 mortgages | nudging each input up and down for the workbook's own loan: all 689 agree, the furthest by 4×10⁻⁹ | not run | 7.6 s, against 1.4 s for the provision alone, on the same 4 cores | nudging each for the book, 1,378 runs of it: 32 minutes (scaled) |
 | `dosing` | An antibiotic's dosing protocol tried on 5 million made-up patients, each followed for 72 hours | SciPy's LSODA solver, 300 patients: 1.7×10⁻¹⁰ | 60 ms a protocol, 51 protocols in 3.0 s | 1.8 s a protocol | the graph: 70 s (scaled) |
 | `monte_carlo` | 200,000 positions on 500 shares, 100,000 futures | the graph, bit for bit | 1.6 s | about 29 s (scaled) | the graph: about 25 minutes (scaled) |
 | `tax_benefit` | A country's tax and benefit rules over 10 million households | the graph, bit for bit | 0.7 s | 0.5 s | the graph: 28 s (scaled) |
@@ -435,6 +436,11 @@ What is taken from somewhere, and what is made up.
   each path, and the provision rises with days past due on every line
   tried. It still shows the lifetime loss falling a little as today's
   chance of default nears nine in ten, which is left for a reader to judge.
+- **`sensitivities`.** The `credit_loss` workbook and the same made-up book
+  of loans. A derivative is the slope where each loan stands: it says
+  nothing of a loan that a change would move to another stage, and it is
+  nought through a number the workbook rounds, which is why the loan's own
+  cells are not among the 689.
 - **`backtest`, `experts`.** Daily prices from 2010 to 2025 for shares with
   a price throughout, from the FINSABER data set on Hugging Face
   (`finsaber-team/FINSABER-V2-Data`), which does not say where its prices
@@ -463,6 +469,7 @@ cargo run --release --features cuda --example loans
 cargo run --release --features cuda --example pensions
 cargo run --release --features cuda --example credit_loss
 cargo run --release --features cuda --example audit
+cargo run --release --features cuda --example sensitivities
 ```
 
 Without `--features cuda` each runs on the CPU, with fewer scenarios unless
