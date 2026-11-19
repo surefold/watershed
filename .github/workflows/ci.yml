@@ -100,6 +100,9 @@ jobs:
       # The provision's derivative by 689 of that workbook's inputs, each
       # checked against nudging the input.
       - run: cargo run --locked --release -p watershed-gpu --example sensitivities -- 5000
+      # A rating workbook's quotes for 3 of its 50 vehicle groups, checked
+      # against LibreOffice's for 300 customers and the graph's for 2,000.
+      - run: cargo run --locked --release -p watershed-gpu --example quotes -- 3
 
   web:
     name: Web demo (WebAssembly)
