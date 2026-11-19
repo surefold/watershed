@@ -411,3 +411,22 @@ def test_decimals_are_exact_and_round_as_asked():
     g.stabilize()
     assert str(revenue.value) == "120.00"
     g.check_consistency()
+
+
+def test_an_index_finds_the_rows_with_a_value():
+    g = ws.Graph()
+    sales = g.collection("sales")
+    region = sales.field("region", str)
+    sales.field("amount", float)
+    by_region = sales.index("region_index", region)
+    sales.upsert("s1", region="EU", amount=10)
+    sales.upsert("s2", region="EU", amount=5)
+    sales.upsert("s3", region="US", amount=7)
+    g.stabilize()
+    assert by_region.lookup("EU") == ["s1", "s2"]
+    assert by_region.lookup("APAC") == []
+    assert by_region.values() == ["EU", "US"]
+
+    sales.upsert("s2", region="US")
+    g.stabilize()
+    assert by_region.lookup("US") == ["s2", "s3"]

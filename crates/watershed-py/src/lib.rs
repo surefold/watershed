@@ -966,6 +966,22 @@ impl Collection {
         Collection::grouping(slf, name, AggregateOp::Count, by, None)
     }
 
+    /// An index on a field or column, for finding rows by value.
+    fn index(slf: &Bound<'_, Self>, name: &str, by: &Bound<'_, Expr>) -> PyResult<Index> {
+        let py = slf.py();
+        let mut this = slf.borrow_mut();
+        let graph = this.graph.clone_ref(py);
+        let index = this
+            .inner
+            .add_index(&mut graph.bind(py).borrow_mut().inner, name, &by.get().ir)
+            .map_err(to_py_err)?;
+        Ok(Index {
+            collection: slf.clone().unbind(),
+            index,
+            key_type: by.get().ty,
+        })
+    }
+
     /// Adds a row, or changes the given fields of an existing one:
     /// `upsert("o-1", qty=2, price=9.99)`. A new row needs every field.
     /// Takes effect at the next `stabilize()`.
@@ -1101,6 +1117,36 @@ impl Groups {
     }
 }
 
+/// An index on a field or column: finds the keys of the rows with a value.
+#[pyclass(module = "watershed")]
+struct Index {
+    collection: Py<Collection>,
+    index: usize,
+    key_type: Type,
+}
+
+#[pymethods]
+impl Index {
+    /// The keys of the rows with this value, sorted.
+    fn lookup(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+        let value = value_for(self.key_type, value)?;
+        let c = self.collection.borrow(py);
+        let graph = c.graph.bind(py).borrow();
+        Ok(c.inner
+            .lookup_of(&graph.inner, self.index, &value)
+            .into_iter()
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// The values that have rows, sorted as text.
+    fn values(&self, py: Python<'_>) -> Vec<String> {
+        let c = self.collection.borrow(py);
+        c.inner
+            .group_keys_of(&c.graph.bind(py).borrow().inner, self.index)
+    }
+}
+
 // ---------------------------------------------------------------- module
 
 /// watershed: an incremental calculation engine. Change an input, and only
@@ -1112,6 +1158,7 @@ fn watershed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Collection>()?;
     m.add_class::<Report>()?;
     m.add_class::<Groups>()?;
+    m.add_class::<Index>()?;
     m.add_class::<When>()?;
     m.add_class::<Then>()?;
     m.add_function(wrap_pyfunction!(when, m)?)?;

@@ -1958,3 +1958,120 @@ fn giving_one_rows_cell_a_new_expression_leaves_the_other_rows_on_the_shared_one
     g.check_consistency().map_err(CalcError::Invalid)?;
     Ok(())
 }
+
+#[test]
+fn an_index_finds_the_rows_with_a_value_and_follows_rows_that_change() -> Result {
+    let mut g = Graph::new();
+    let mut sales = Collection::new(&g, "sales");
+    let region = sales.field::<String>("region")?;
+    let amount = sales.field::<f64>("amount")?;
+    sales.upsert(&mut g, "s1", &[region.is("EU".into()), amount.is(10.0)])?;
+    // An index added after rows includes them.
+    let by_region = sales.index(&mut g, "region_index", region)?;
+    sales.upsert(&mut g, "s2", &[region.is("EU".into()), amount.is(5.0)])?;
+    sales.upsert(&mut g, "s3", &[region.is("US".into()), amount.is(7.0)])?;
+    g.stabilize();
+    assert_eq!(sales.lookup(&g, by_region, "EU".to_string()), ["s1", "s2"]);
+    assert_eq!(sales.lookup(&g, by_region, "US".to_string()), ["s3"]);
+    assert!(sales.lookup(&g, by_region, "APAC".to_string()).is_empty());
+    assert_eq!(sales.index_values(&g, by_region), ["EU", "US"]);
+
+    // A row that changes value moves.
+    sales.upsert(&mut g, "s2", &[region.is("US".into())])?;
+    g.stabilize();
+    assert_eq!(sales.lookup(&g, by_region, "EU".to_string()), ["s1"]);
+    assert_eq!(sales.lookup(&g, by_region, "US".to_string()), ["s2", "s3"]);
+
+    // A removed row leaves, and the row that reuses its nodes is found by
+    // its own key and value.
+    sales.remove(&mut g, "s1")?;
+    sales.upsert(&mut g, "s4", &[region.is("APAC".into()), amount.is(1.0)])?;
+    g.stabilize();
+    assert!(sales.lookup(&g, by_region, "EU".to_string()).is_empty());
+    assert_eq!(sales.lookup(&g, by_region, "APAC".to_string()), ["s4"]);
+    assert_eq!(sales.index_values(&g, by_region), ["APAC", "US"]);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn rows_indexed_by_a_column_move_in_the_update_that_changes_it() -> Result {
+    let mut g = Graph::new();
+    let limit = g.input("limit", 100.0)?;
+    let mut trades = Collection::new(&g, "trades");
+    let notional = trades.field::<f64>("notional")?;
+    let size = trades.column(
+        &mut g,
+        "size",
+        when(notional.gt(limit))
+            .then("large".to_string())
+            .otherwise("small".to_string()),
+    )?;
+    let by_size = trades.index(&mut g, "size_index", size)?;
+    trades.upsert(&mut g, "t1", &[notional.is(50.0)])?;
+    trades.upsert(&mut g, "t2", &[notional.is(150.0)])?;
+    trades.upsert(&mut g, "t3", &[notional.is(250.0)])?;
+    g.stabilize();
+    assert_eq!(trades.lookup(&g, by_size, "small".to_string()), ["t1"]);
+    assert_eq!(
+        trades.lookup(&g, by_size, "large".to_string()),
+        ["t2", "t3"]
+    );
+
+    // A node outside the collection moves several rows in one update.
+    g.set(limit, 200.0)?;
+    g.stabilize();
+    assert_eq!(
+        trades.lookup(&g, by_size, "small".to_string()),
+        ["t1", "t2"]
+    );
+    assert_eq!(trades.lookup(&g, by_size, "large".to_string()), ["t3"]);
+
+    // A reused slot is found under its new row's own value.
+    trades.remove(&mut g, "t3")?;
+    trades.upsert(&mut g, "t4", &[notional.is(10.0)])?;
+    g.stabilize();
+    assert!(trades.lookup(&g, by_size, "large".to_string()).is_empty());
+    assert_eq!(
+        trades.lookup(&g, by_size, "small".to_string()),
+        ["t1", "t2", "t4"]
+    );
+    assert_eq!(trades.index_values(&g, by_size), ["small"]);
+    g.check_consistency().map_err(CalcError::Invalid)?;
+    Ok(())
+}
+
+#[test]
+fn an_index_adds_no_nodes_to_the_graph() -> Result {
+    let mut g = Graph::new();
+    let mut players = Collection::new(&g, "players");
+    let team = players.field::<String>("team")?;
+    for (key, name) in [("p1", "red"), ("p2", "blue"), ("p3", "red")] {
+        players.upsert(&mut g, key, &[team.is(name.into())])?;
+    }
+    g.stabilize();
+    let nodes = g.len();
+    let by_team = players.index(&mut g, "team_index", team)?;
+    assert_eq!(g.len(), nodes);
+
+    // Rows moving to values never seen before add nothing either.
+    players.upsert(&mut g, "p1", &[team.is("green".into())])?;
+    players.upsert(&mut g, "p2", &[team.is("gold".into())])?;
+    g.stabilize();
+    assert_eq!(g.len(), nodes);
+    assert_eq!(players.lookup(&g, by_team, "red".to_string()), ["p3"]);
+    Ok(())
+}
+
+#[test]
+fn an_index_and_a_grouping_cannot_share_a_name() -> Result {
+    let mut g = Graph::new();
+    let mut sales = Collection::new(&g, "sales");
+    let region = sales.field::<String>("region")?;
+    sales.group_count(&mut g, "by_region", region)?;
+    assert!(matches!(
+        sales.index(&mut g, "by_region", region),
+        Err(CalcError::DuplicateName(_))
+    ));
+    Ok(())
+}

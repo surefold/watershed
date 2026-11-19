@@ -40,6 +40,12 @@
 //! (see [`Graph::aggregate`]), which update by only the rows that changed and
 //! give exactly the result of adding everything up from scratch.
 //!
+//! An index ([`Collection::index`]) finds the rows with a given value of a
+//! field or column ([`Collection::lookup`]) at the cost of the rows found,
+//! not the size of the collection. It follows rows the way a grouping does,
+//! including rows whose calculated column changes during an update, but it
+//! adds no nodes to the graph.
+//!
 //! Like [`Graph::set`], changes to rows take effect at the next
 //! [`Graph::stabilize`].
 //!
@@ -189,6 +195,9 @@ pub struct Collection {
     columns: Vec<ColumnDef>,
     slots: Vec<Slot>,
     keys: HashMap<String, usize>,
+    /// Each slot's key, `None` while the slot is free. The reverse of `keys`,
+    /// so rows an index finds by slot can be named.
+    slot_keys: Vec<Option<String>>,
     /// For each key, the slots it held before the one it holds now (if
     /// any), so it can be found at earlier updates.
     past_slots: HashMap<String, Vec<usize>>,
@@ -214,6 +223,8 @@ struct Grouping {
     target: Target,
     /// The grouping's number in the graph.
     keyed: usize,
+    /// Whether it is an index: no totals, and no membership nodes.
+    index: bool,
 }
 
 /// A grouped total: one total per distinct value of a field or column,
@@ -232,6 +243,21 @@ impl<K, T> Clone for Groups<K, T> {
 }
 impl<K, T> Copy for Groups<K, T> {}
 
+/// An index on a field or column, made by [`Collection::index`]: finds the
+/// rows with a given value. `K` is the type of the field or column.
+pub struct Index<K> {
+    template: GraphId,
+    index: usize,
+    _type: PhantomData<fn() -> K>,
+}
+
+impl<K> Clone for Index<K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K> Copy for Index<K> {}
+
 impl Collection {
     /// A new, empty collection in graph `g`. Its nodes are named
     /// `name[slot].field`.
@@ -245,6 +271,7 @@ impl Collection {
             columns: Vec::new(),
             slots: Vec::new(),
             keys: HashMap::new(),
+            slot_keys: Vec::new(),
             past_slots: HashMap::new(),
             key_changes: HashMap::new(),
             recorded_at: 0,
@@ -494,6 +521,7 @@ impl Collection {
         };
         g.set_value(self.slots[slot].present, Value::Bool(true))?;
         self.keys.insert(key.to_string(), slot);
+        self.slot_keys[slot] = Some(key.to_string());
         for (grouping, new) in self.groupings.iter().zip(group_keys) {
             // A column still holds what it held for the row before, if the
             // row's nodes are being reused; if this row's value differs,
@@ -523,6 +551,7 @@ impl Collection {
         self.key_changed(g, slot, key.to_string());
         g.set_value(self.slots[slot].present, Value::Bool(false))?;
         self.free.push(slot);
+        self.slot_keys[slot] = None;
         for grouping in &self.groupings {
             g.keyed_remove(grouping.keyed, slot);
         }
@@ -545,7 +574,7 @@ impl Collection {
         let index = self.grouping(
             g,
             name,
-            AggregateOp::Sum,
+            Some(AggregateOp::Sum),
             T::TYPE,
             by.placeholder(),
             Target::Placeholder(of.placeholder()),
@@ -568,7 +597,7 @@ impl Collection {
         let index = self.grouping(
             g,
             name,
-            AggregateOp::Min,
+            Some(AggregateOp::Min),
             T::TYPE,
             by.placeholder(),
             Target::Placeholder(of.placeholder()),
@@ -591,7 +620,7 @@ impl Collection {
         let index = self.grouping(
             g,
             name,
-            AggregateOp::Max,
+            Some(AggregateOp::Max),
             T::TYPE,
             by.placeholder(),
             Target::Placeholder(of.placeholder()),
@@ -613,7 +642,7 @@ impl Collection {
         let index = self.grouping(
             g,
             name,
-            AggregateOp::Count,
+            Some(AggregateOp::Count),
             Type::I64,
             by.placeholder(),
             Target::Presence,
@@ -652,12 +681,53 @@ impl Collection {
         g.keyed_keys(self.groupings[groups.index].keyed)
     }
 
+    /// An index on a field or column: [`Collection::lookup`] then finds the
+    /// rows with a given value without looking at any other row. Rows that
+    /// already exist are indexed. Like a grouping, it follows rows as they
+    /// change, but it keeps no totals and adds no nodes to the graph. When
+    /// only watched nodes are calculated, the field or column it indexes
+    /// still is.
+    pub fn index<K: CalcType>(
+        &mut self,
+        g: &mut Graph,
+        name: &str,
+        by: impl Part<K>,
+    ) -> Result<Index<K>, CalcError> {
+        let index = self.grouping(g, name, None, Type::I64, by.placeholder(), Target::Presence)?;
+        Ok(Index {
+            template: self.template,
+            index,
+            _type: PhantomData,
+        })
+    }
+
+    /// The keys of the rows whose indexed field or column is `value`, sorted.
+    /// Indexed by a field, that includes changes since the last update;
+    /// indexed by a column, a row is found by the value its column had at
+    /// the last update, and a row added since then may be found by the value
+    /// its column held for an earlier row until the update moves it. Costs
+    /// what it finds, not the size of the collection.
+    pub fn lookup<K: CalcType>(&self, g: &Graph, index: Index<K>, value: K) -> Vec<&str> {
+        if index.template != self.template {
+            return Vec::new();
+        }
+        self.lookup_of(g, index.index, &value.into_value())
+    }
+
+    /// The values the index has rows for, sorted as text.
+    pub fn index_values<K>(&self, g: &Graph, index: Index<K>) -> Vec<String> {
+        if index.template != self.template {
+            return Vec::new();
+        }
+        g.keyed_keys(self.groupings[index.index].keyed)
+    }
+
     /// Adds a grouping; rows that already exist join their groups.
     fn grouping(
         &mut self,
         g: &mut Graph,
         name: &str,
-        op: AggregateOp,
+        op: Option<AggregateOp>,
         value_type: Type,
         by: NodeRef,
         target: Target,
@@ -686,13 +756,21 @@ impl Collection {
         .max(self.height_of(g, by) + 1);
         // A grouping by a key another grouping uses already shares its
         // membership nodes.
-        let share = self.groupings.iter().find(|x| x.by == by).map(|x| x.keyed);
+        let share = match op {
+            Some(_) => self
+                .groupings
+                .iter()
+                .find(|x| x.by == by && !x.index)
+                .map(|x| x.keyed),
+            None => None,
+        };
         let keyed = g.keyed_groups(&self.name, name, op, value_type, height, share);
         self.groupings.push(Grouping {
             name: name.to_string(),
             by,
             target,
             keyed,
+            index: op.is_none(),
         });
         // Every row's nodes, including removed rows', which can be reused.
         for slot in 0..self.slots.len() {
@@ -1096,7 +1174,7 @@ impl Collection {
                 "{op} needs numbers, not {value_type}"
             )));
         }
-        self.grouping(g, name, op, value_type, *by, target)
+        self.grouping(g, name, Some(op), value_type, *by, target)
     }
 
     /// The total for one group of the grouping at `index`, if any row has had that key.
@@ -1114,6 +1192,33 @@ impl Collection {
                 _type: PhantomData,
             },
         )
+    }
+
+    /// Adds an index on a field or column, given as its placeholder
+    /// expression; returns its number for [`Collection::lookup_of`].
+    pub fn add_index(&mut self, g: &mut Graph, name: &str, by: &Ir) -> Result<usize, CalcError> {
+        let Ir::Ref(by) = by else {
+            return Err(CalcError::Invalid(format!(
+                "{}: index one of its fields or columns",
+                self.name
+            )));
+        };
+        self.grouping(g, name, None, Type::I64, *by, Target::Presence)
+    }
+
+    /// The keys of the rows the index at `index` has under `value`, sorted.
+    /// Indexes and groupings are numbered together, so a grouping's number
+    /// finds no rows here.
+    pub fn lookup_of(&self, g: &Graph, index: usize, value: &Value) -> Vec<&str> {
+        let Some(grouping) = self.groupings.get(index) else {
+            return Vec::new();
+        };
+        let mut keys: Vec<&str> = g
+            .keyed_rows(grouping.keyed, &key_text(value))
+            .filter_map(|slot| self.slot_keys[slot].as_deref())
+            .collect();
+        keys.sort_unstable();
+        keys
     }
 
     // ---------------------------------------------------------------- inside
@@ -1246,6 +1351,7 @@ impl Collection {
         g.reserve_rows(self.row_names, rows, nodes, edges, &totals);
         self.slots.reserve(rows);
         self.keys.reserve(rows);
+        self.slot_keys.reserve(rows);
     }
 
     /// Makes a new row's nodes, absent until the update; it joins every total.
@@ -1282,6 +1388,7 @@ impl Collection {
             fields,
             columns: Vec::with_capacity(self.columns.len()),
         });
+        self.slot_keys.push(None);
         for c in 0..self.columns.len() {
             let node =
                 self.define_column(g, s, c, NodeName::Row(row(1 + self.fields.len() + c)))?;

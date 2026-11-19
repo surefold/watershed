@@ -71,7 +71,7 @@ pub mod sink;
 pub mod value;
 
 pub use aggregate::AggregateOp;
-pub use collection::{Collection, Column, Field, Groups, Part, Set};
+pub use collection::{Collection, Column, Field, Groups, Index, Part, Set};
 pub use decimal::{Decimal, Rounding};
 pub use error::CalcError;
 pub use expr::{Expr, IntoExpr, choose, list, text, when};
