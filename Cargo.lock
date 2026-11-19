@@ -1108,10 +1108,10 @@ dependencies = [
 name = "watershed-gpu"
 version = "0.1.0"
 dependencies = [
- "calamine",
  "cudarc",
  "rayon",
  "watershed-core",
+ "watershed-xlsx",
 ]
 
 [[package]]
@@ -1147,6 +1147,16 @@ dependencies = [
  "wasm-bindgen",
  "watershed-core",
  "watershed-gpu",
+]
+
+[[package]]
+name = "watershed-xlsx"
+version = "0.1.0"
+dependencies = [
+ "calamine",
+ "watershed-core",
+ "watershed-gpu",
+ "zip",
 ]
 
 [[package]]

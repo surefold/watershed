@@ -29,6 +29,7 @@ its `parallel` feature), the workspace tests on stable Rust and on Rust 1.85
 | Doc examples in `crates/watershed-core/src/` | The examples in the API documentation run as tests. Two in [`lib.rs`](../crates/watershed-core/src/lib.rs) must fail to compile: a number plus a string, and setting a calculated node. |
 | [`crates/watershed-gpu/tests/scenarios.rs`](../crates/watershed-gpu/tests/scenarios.rs) | Scenario plans against the graph, and with `--features cuda` the GPU against the CPU. See below. |
 | [`crates/watershed-grid/tests/grid.rs`](../crates/watershed-grid/tests/grid.rs) | The grid's table logic, natively. |
+| [`crates/watershed-xlsx/tests/workbooks.rs`](../crates/watershed-xlsx/tests/workbooks.rs) | Each Excel function understood, translated and run on the graph and as a plan for 24 pairs of inputs, against LibreOffice's values for each; rounding what depends on an input for 396 pairs, halves and near-halves among them; formulas that must be refused, with their reasons. The [crate's README](../crates/watershed-xlsx/README.md#how-it-is-checked) says how the workbook was made. |
 | [`crates/watershed-parquet/tests/roundtrip.rs`](../crates/watershed-parquet/tests/roundtrip.rs) | Changes written to Parquet and read back. |
 | [`crates/watershed-py/tests/test_watershed.py`](../crates/watershed-py/tests/test_watershed.py) | The Python API. |
 

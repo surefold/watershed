@@ -762,6 +762,7 @@ impl Compiler<'_> {
                             | UnOp::Sqrt
                             | UnOp::Sin
                             | UnOp::Cos
+                            | UnOp::Floor
                     )
                 {
                     self.ops.push(Op::Un(*op));
@@ -781,7 +782,8 @@ impl Compiler<'_> {
                         | UnOp::Ln
                         | UnOp::Sqrt
                         | UnOp::Sin
-                        | UnOp::Cos,
+                        | UnOp::Cos
+                        | UnOp::Floor,
                         _,
                     ) => {
                         unreachable!("handled above")

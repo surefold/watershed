@@ -383,6 +383,7 @@ impl Graph {
                 unreachable!("a membership node and its comparison are general programs");
             };
             self.general[hot.code as usize] = program;
+            self.reshaped += 1;
             self.reads[hot.len as usize] = Box::default();
             match self.updating {
                 true => self.queue[hot.height as usize].push(node),
@@ -448,6 +449,7 @@ impl Graph {
         let hole = self.hole()?;
         let hot = self.hot[total.index()];
         if self.aggregates[hot.code as usize].vacate(node.0, hole.0) {
+            self.reshaped += 1;
             match self.updating {
                 true => self.queue[hot.height as usize].push(total),
                 false => {

@@ -1,8 +1,9 @@
 //! A plan written to a file and read back, so that another process or
 //! another machine can run it.
 //!
-//! EXPERIMENTAL. The layout is this build's own: a plan is read back by the
-//! version of the crate that wrote it, and the first eight bytes say which.
+//! The layout is this build's own: a plan is read back by the version of the
+//! crate that wrote it, and the first eight bytes say which. What is read is
+//! checked for holding together before it is run (see `check`).
 
 use std::io::{self, Read, Write};
 
@@ -29,6 +30,9 @@ pub enum LoadError {
     NotAPlan,
     /// The file was cut short or changed after it was written.
     Damaged,
+    /// The file is whole, but what it holds does not make a plan: it was not
+    /// written by `save`. It is refused rather than run.
+    NotWhole(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -39,6 +43,7 @@ impl std::fmt::Display for LoadError {
             LoadError::Damaged => {
                 write!(f, "the plan was cut short or changed after it was written")
             }
+            LoadError::NotWhole(why) => write!(f, "the file does not hold a plan: {why}"),
         }
     }
 }
@@ -211,7 +216,7 @@ impl<R: Read> Summed<R> {
 impl Scenarios {
     /// Writes the plan out, to be read back by [`Scenarios::load`].
     ///
-    /// EXPERIMENTAL. The shared inputs' values go with it as they are now.
+    /// The shared inputs' values go with it as they are now.
     /// A plan made with [`Scenarios::with_clusters`] is written with its
     /// clusters, and read back runs with them.
     /// A plan of 20 million nodes is about 2 GB; give this a
@@ -262,8 +267,10 @@ impl Scenarios {
     /// Reads a plan written by [`Scenarios::save`]. It runs as the plan
     /// that was saved does, to the last bit.
     ///
-    /// EXPERIMENTAL. The file is checked for being whole and unchanged, not
-    /// for being well meant: load only plans you saved.
+    /// The file is checked for being whole and unchanged, and
+    /// what it holds for making a plan: every number that points somewhere
+    /// points inside what it points into, and every program is well formed,
+    /// so a file not written by `save` is refused rather than run.
     pub fn load(from: impl Read) -> Result<Scenarios, LoadError> {
         let mut from = Summed::new(from);
         let mut magic = [0; 8];
@@ -322,7 +329,7 @@ impl Scenarios {
         if u64::from_le_bytes(written) != sum {
             return Err(LoadError::Damaged);
         }
-        Ok(Scenarios {
+        let plan = Scenarios {
             vary,
             slots,
             programs,
@@ -340,7 +347,9 @@ impl Scenarios {
             shared,
             shared_programs,
             shared_ops,
-        })
+        };
+        plan.check().map_err(LoadError::NotWhole)?;
+        Ok(plan)
     }
 }
 
@@ -513,5 +522,166 @@ mod tests {
             Scenarios::load(&changed[..]),
             Err(LoadError::Damaged)
         ));
+    }
+}
+
+#[cfg(test)]
+mod not_whole {
+    use super::*;
+    use crate::plan::{CODE, CODE_BITS, LOAD, Output, SELECT};
+    use watershed_core::prelude::*;
+
+    /// A plan with every part: levels, groups, shared values, a cluster
+    /// layout if `clusters`.
+    fn plan(clusters: bool) -> Scenarios {
+        let mut g = Graph::new();
+        let rate = g.input("rate", 0.01).unwrap();
+        let shock = g.input("shock", 0.0).unwrap();
+        let fee = g.input("fee", 0.002).unwrap();
+        let yearly = g.define("yearly", fee * 12.0).unwrap();
+        let mut sum = (rate * 1.0).into_expr();
+        for n in 0..8 {
+            let mut v = g
+                .define(&format!("v{n}"), rate * (n as f64) + yearly)
+                .unwrap();
+            for t in 0..3 {
+                v = g
+                    .define(
+                        &format!("v{n}_{t}"),
+                        when(v.gt(shock)).then(v - fee).otherwise(v + 1.0),
+                    )
+                    .unwrap();
+            }
+            sum = sum + v;
+        }
+        let total = g.define("total", sum).unwrap();
+        g.stabilize();
+        let make = match clusters {
+            true => Scenarios::with_clusters,
+            false => Scenarios::with_shared,
+        };
+        make(
+            &g,
+            &[rate.id(), shock.id()],
+            &[fee.id()],
+            &[total.id(), yearly.id()],
+        )
+        .unwrap()
+    }
+
+    /// The plan written out and read back after `change`, with the sum made
+    /// right again, so that only the check can tell.
+    fn read_after(
+        clusters: bool,
+        change: impl FnOnce(&mut Scenarios),
+    ) -> Result<Scenarios, LoadError> {
+        let mut plan = plan(clusters);
+        change(&mut plan);
+        let mut file = Vec::new();
+        plan.save(&mut file).unwrap();
+        Scenarios::load(&file[..])
+    }
+
+    fn refused(what: &str, clusters: bool, change: impl FnOnce(&mut Scenarios)) {
+        match read_after(clusters, change) {
+            Err(LoadError::NotWhole(_)) => {}
+            other => panic!("{what}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_whole_plan_is_read_back() {
+        assert!(read_after(false, |_| {}).is_ok());
+        assert!(read_after(true, |_| {}).is_ok());
+    }
+
+    #[test]
+    fn a_file_whose_numbers_point_outside_is_refused() {
+        let first_load = |p: &Scenarios| p.ops.iter().position(|op| op & CODE == LOAD).unwrap();
+        refused("a load past the slots", false, |p| {
+            let at = first_load(p);
+            p.ops[at] = LOAD | (p.slots as u32 + 5) << CODE_BITS;
+        });
+        refused("a constant past the constants", false, |p| {
+            p.consts.clear();
+        });
+        refused("a node writing a varied input", false, |p| {
+            p.programs[2] = 0
+        });
+        refused("a program past the instructions", false, |p| {
+            p.programs[1] += 1_000
+        });
+        refused("an unknown instruction", false, |p| {
+            let last = p.ops.len() - 1;
+            // The one code a node's program cannot hold: a cluster's own.
+            p.ops[last] = crate::fuse::LOCAL;
+        });
+        refused("a stack that runs dry", false, |p| {
+            let start = p.programs[0] as usize;
+            p.ops[start] = SELECT;
+        });
+        refused("operands that are not what is read", false, |p| {
+            p.operands[0] = p.operands[0].wrapping_add(1);
+        });
+        refused("levels that leave a gap", false, |p| p.levels[0].end -= 1);
+        refused("a group of no shape", false, |p| p.groups[0].shape = 999);
+        refused("an output past the slots", false, |p| {
+            p.outputs[0] = Output::Slot(p.slots as u32);
+        });
+        refused("a shared program reading a slot", false, |p| {
+            p.shared_ops[0] = LOAD;
+        });
+        refused("a cluster reading past its slots", true, |p| {
+            let fused = p.fused.as_mut().unwrap();
+            let last = fused.operands.len() - 1;
+            fused.operands[last] = fused.slots as u32;
+        });
+        refused("a cluster's node reading a later one", true, |p| {
+            let fused = p.fused.as_mut().unwrap();
+            let shape = fused.shapes.iter_mut().find(|s| s.len() > 6).unwrap();
+            shape[2] = crate::fuse::LOCAL | 99 << CODE_BITS;
+        });
+    }
+
+    #[test]
+    fn a_file_changed_anywhere_is_refused_or_runs() {
+        // Random words of the file changed, and the sum made right again: the
+        // plan read back is refused, or runs without failing.
+        for clusters in [false, true] {
+            let mut file = Vec::new();
+            plan(clusters).save(&mut file).unwrap();
+            let body = file.len() - 8;
+            let mut rng = 0x2545_F491_4F6C_DD1Du64;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng
+            };
+            let mut ran = 0;
+            for _ in 0..3000 {
+                let mut changed = file.clone();
+                for _ in 0..1 + next() % 3 {
+                    let at = 8 + (next() as usize % ((body - 8) / 4)) * 4;
+                    let word = match next() % 3 {
+                        0 => (next() % 64) as u32,
+                        1 => u32::MAX - (next() % 4) as u32,
+                        _ => next() as u32,
+                    };
+                    changed[at..at + 4].copy_from_slice(&word.to_le_bytes());
+                }
+                let mut sum = Summed::new(());
+                sum.add(&changed[8..body]);
+                changed[body..].copy_from_slice(&sum.sum.to_le_bytes());
+                if let Ok(plan) = Scenarios::load(&changed[..]) {
+                    // A plan read back can still ask a lot of every scenario
+                    // (as a real one with as many inputs would); here, one.
+                    let scenario = vec![0.25; plan.inputs()];
+                    plan.run_cpu(&scenario);
+                    ran += 1;
+                }
+            }
+            assert!(ran < 3000, "every change was read back");
+        }
     }
 }
