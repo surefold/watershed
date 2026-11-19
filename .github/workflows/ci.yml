@@ -109,6 +109,9 @@ jobs:
       # A pension statement's workbook for 20,000 members, checked against
       # LibreOffice for 300, and each answer it seeks checked to be the least.
       - run: cargo run --locked --release -p watershed-gpu --example illustrations -- 20000
+      # A household's tax and benefit workbook for 20,000 households, each
+      # with its pay raised forty times over, checked against LibreOffice.
+      - run: cargo run --locked --release -p watershed-gpu --example households -- 20000
 
   web:
     name: Web demo (WebAssembly)
