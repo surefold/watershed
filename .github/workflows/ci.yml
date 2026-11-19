@@ -112,6 +112,9 @@ jobs:
       # A household's tax and benefit workbook for 20,000 households, each
       # with its pay raised forty times over, checked against LibreOffice.
       - run: cargo run --locked --release -p watershed-gpu --example households -- 20000
+      # A project's estimate, programme and risk register for 50,000 trials,
+      # checked against LibreOffice for 300, and again without each risk.
+      - run: cargo run --locked --release -p watershed-gpu --example project_risk -- 50000
 
   web:
     name: Web demo (WebAssembly)

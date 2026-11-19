@@ -35,7 +35,9 @@ every price a rating workbook can give. `illustrations` works out a pension
 statement for every member of a scheme, and then seeks, member by member,
 the contribution that would put them on track. `households` raises every
 household's pay step by step through a tax and benefit reckoner, to find
-who would be worse off for earning more.
+who would be worse off for earning more. `project_risk` draws a project's
+cost and finish a million times from the lows, highs and chances in its
+workbook, and again without each risk on its register.
 
 A workbook's graph can also be kept up to date as its inputs change, with
 no plan at all. The `live` example here follows a price feed with a risk

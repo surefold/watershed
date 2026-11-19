@@ -68,7 +68,9 @@ with its checks and timings.
   workbook is run for 300,000 members, and then tried again and again to
   find what each member who is short would have to pay in. A household's
   tax and benefit reckoner is run 20 million times, to find who would be
-  worse off for a pay rise.
+  worse off for a pay rise. A project's estimate, programme and risk
+  register are run for a million trials, and again without each risk in
+  turn.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
   for [Solid](packages/grid-solid) and [React](packages/grid-react). The
