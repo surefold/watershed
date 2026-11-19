@@ -33,6 +33,22 @@ version of itself. `sensitivities` asks the graph for an answer's
 derivative by hundreds of the workbook's cells at once. `quotes` works out
 every price a rating workbook can give.
 
+A workbook's graph can also be kept up to date as its inputs change, with
+no plan at all. The `live` example here follows a price feed with a risk
+desk's workbook of 3,705 formulas:
+
+```bash
+cargo run --release -p watershed-xlsx --example live
+```
+
+A price that moves reaches about a hundred of those cells, and only they
+are worked out again: 15 µs a price on one core of a cloud VM, 68,000
+prices a second, where every cell again takes 280 µs and LibreOffice took
+14 ms a price on the same machine. The example checks itself against
+LibreOffice following the same first 300 prices, and against a second graph
+given the final prices at once. Afterwards it asks the graph why a desk went
+over its limit at one update of the 200,000, from the history it kept.
+
 ## What is translated
 
 Only what lies between the inputs and the outputs. A cell that does not

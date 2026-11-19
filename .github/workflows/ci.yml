@@ -103,6 +103,9 @@ jobs:
       # A rating workbook's quotes for 3 of its 50 vehicle groups, checked
       # against LibreOffice's for 300 customers and the graph's for 2,000.
       - run: cargo run --locked --release -p watershed-gpu --example quotes -- 3
+      # A workbook following 20,000 prices one at a time, checked against
+      # LibreOffice for the first 300 and a second graph at the end.
+      - run: cargo run --locked --release -p watershed-xlsx --example live -- 20000
 
   web:
     name: Web demo (WebAssembly)
