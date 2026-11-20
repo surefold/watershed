@@ -11,9 +11,9 @@
   },
   "dependencies": {
     "@solidjs/web": "^2.0.3",
-    "@surefold/grid": "0.5.0",
-    "@surefold/grid-react": "0.5.0",
-    "@surefold/grid-solid": "0.5.0",
+    "@surefold/grid": "0.6.0",
+    "@surefold/grid-react": "0.6.0",
+    "@surefold/grid-solid": "0.6.0",
     "effect": "4.1.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

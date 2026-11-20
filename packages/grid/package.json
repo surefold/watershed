@@ -1,6 +1,6 @@
 {
   "name": "@surefold/grid",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A data grid whose rows, formulas and totals are worked out incrementally by the watershed engine, in WebAssembly.",
   "license": "Apache-2.0",
   "homepage": "https://surefold.dev/watershed/grid/",
