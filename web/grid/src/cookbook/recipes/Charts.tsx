@@ -1,4 +1,4 @@
-import { For, onCleanup, onMount } from "solid-js";
+import { For, onCleanup, onSettled } from "solid-js";
 import { GroupChart, Table, type GridView } from "@surefold/grid";
 import { Grid, createGroups } from "@surefold/grid-solid";
 
@@ -23,7 +23,7 @@ export function Charts() {
   // 1. The package's own chart: draw it again after every recalculation.
   let box!: HTMLDivElement;
   let view: GridView | undefined;
-  onMount(() => {
+  onSettled(() => {
     const chart = new GroupChart(box, { onPick: (key) => view?.revealGroup(key) });
     const draw = () =>
       chart.update({
@@ -34,7 +34,7 @@ export function Charts() {
         format: (v) => money.format(v),
       });
     draw();
-    onCleanup(stock.watch(draw));
+    return stock.watch(draw);
   });
 
   // 2. Your own chart: a signal that follows groups(), set when a group's totals change. Hand it to any chart library.

@@ -48,6 +48,9 @@ Then:
 npm install @surefold/grid @surefold/grid-solid
 ```
 
+It needs Solid 2: `solid-js` and `@solidjs/web`, 2.0 or later. For Solid 1,
+use `@surefold/grid-solid` 0.5.0.
+
 ## In a worker
 
 `table` can also be a `WorkerTable`, whose engine runs in a Web Worker (see
@@ -76,6 +79,8 @@ when they are called, so a new one is used without drawing again.
 - `createChange(table)`: what the last recalculation did.
 
 Each follows the table from its first recalculation after it is made, and
-stops when its owner is cleaned up.
+stops when its owner is cleaned up. Solid applies what was set at the end of
+the turn, so several recalculations in one turn are seen as one, with the
+last values. A reading must not itself be a function.
 
 The site's grid page, [`web/grid`](https://github.com/surefold/watershed/tree/main/web/grid), is built with this.

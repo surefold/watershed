@@ -1,8 +1,8 @@
 // The cookbook page in Solid: each recipe running, with its source beside it.
 // The source shown is the file itself, so what you read is what runs.
 
-import { For, type JSX } from "solid-js";
-import { render } from "solid-js/web";
+import { For } from "solid-js";
+import { render, type JSX } from "@solidjs/web";
 import "@surefold/grid/grid.css";
 import "./cookbook.css";
 import { install, recipes } from "./text";

@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, Show } from "solid-js";
+import { createSignal, onCleanup, onSettled, Show } from "solid-js";
 import { Table } from "@surefold/grid";
 import { Grid, createTotal } from "@surefold/grid-solid";
 
@@ -60,7 +60,7 @@ export function FromAnApi() {
       setStatus("failed");
     }
   }
-  void load();
+  onSettled(() => void load()); // once it is on the page: a component may not set signals as it is made
 
   return (
     <>

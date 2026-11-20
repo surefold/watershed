@@ -31,17 +31,19 @@ function block(first: number, count: number) {
   return { keys, columns: { symbol, qty, price, mark } };
 }
 
-/** The grid and figures, once the worker's table is there. */
-function Book(props: { trades: Trades }) {
-  const pnl = createTotal(props.trades, "pnl");
-  const change = createChange(props.trades); // what the last recalculation did, in the worker
+// The grid and figures, once the worker's table is there. A function called
+// with the table, not a component given it: Solid warns when a prop is read as
+// a component is made.
+function book(trades: Trades) {
+  const pnl = createTotal(trades, "pnl");
+  const change = createChange(trades); // what the last recalculation did, in the worker
 
   function movePrices() {
     // One message to the worker: one recalculation, one step for undo.
-    void props.trades.batch(() => {
+    void trades.batch(() => {
       for (let k = 0; k < 1000; k++) {
-        const row = Math.floor(Math.random() * props.trades.size);
-        props.trades.set(`T-${row}`, "mark", 90 + Math.random() * 25);
+        const row = Math.floor(Math.random() * trades.size);
+        trades.set(`T-${row}`, "mark", 90 + Math.random() * 25);
       }
     });
   }
@@ -62,7 +64,7 @@ function Book(props: { trades: Trades }) {
           )}
         </Show>
       </div>
-      <Grid class="grid" table={props.trades} keyColumn={{ title: "trade" }} columns={{ qty: { decimals: 0 }, pnl: { signed: true, width: 140 } }} />
+      <Grid class="grid" table={trades} keyColumn={{ title: "trade" }} columns={{ qty: { decimals: 0 }, pnl: { signed: true, width: 140 } }} />
     </>
   );
 }
@@ -100,6 +102,7 @@ export function InAWorker() {
   return (
     <Show
       when={trades()}
+      keyed
       fallback={
         <div class="bar">
           <button disabled={loading() !== ""} onClick={load}>
@@ -114,7 +117,7 @@ export function InAWorker() {
           <Show when={loading()}>
             <div class="bar muted">{loading()}</div>
           </Show>
-          <Book trades={t()} />
+          {book(t)}
         </>
       )}
     </Show>
