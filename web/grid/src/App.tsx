@@ -2,8 +2,8 @@
 // @surefold/grid-solid. Everything the page shows comes from the table and
 // from what the view reports; the page adds nothing up itself.
 
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { render } from "solid-js/web";
+import { createSignal, flush, For, onCleanup, onSettled, Show } from "solid-js";
+import { render } from "@solidjs/web";
 import { GroupChart, themes, type Column, type Focus, type GridView, type Layout, type Status, type AnyGridTable, type ViewState } from "@surefold/grid";
 import { WorkerTradeBook } from "@surefold/grid/demo";
 import { Grid } from "@surefold/grid-solid";
@@ -100,12 +100,14 @@ export function App() {
   function drawChart() {
     // Its columns can be added as it runs, so it is read as a table of any columns.
     const t: AnyGridTable | undefined = book()?.table;
-    const info = columns().find((c) => c.name === chartName() && c.total !== "none");
-    if (!t || !info || !chart) return;
+    if (!t || !chart) return;
+    // Asked of the table, not the signals: a signal set a moment ago still reads as it was.
+    const info = t.columns().find((c) => c.name === chartName() && c.total !== "none");
+    if (!info) return;
     const decimals = info.total === "count" ? 0 : ((looks as Record<string, { decimals?: number }>)[info.name]?.decimals ?? 2);
     const number = new Intl.NumberFormat("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
     const format = (v: number) => number.format(v);
-    const by = columns()[group()]?.name;
+    const by = t.viewState().group;
     const value = t.total(info.name);
     const trend = t.totalTrend(info.name, 120);
     let line = "";
@@ -176,7 +178,8 @@ export function App() {
     loaded = 0;
     setGroupSignal(-1); // a grid built again starts with its rows not grouped
     setColumns(next.table.columns());
-    setBook(next); // <Grid> draws the new table, and calls onView
+    setBook(next);
+    flush(); // <Grid> draws the new table, and calls onView
     old?.table.dispose();
     if (scrolling) {
       await view!.fetchMore();
@@ -241,6 +244,7 @@ export function App() {
   function lookBack(epoch: number | null) {
     if (epoch !== null) setStreaming(false);
     setLookingBack(epoch);
+    flush(); // onStatus reads it
     view?.setAsOf(epoch);
     say(epoch !== null ? "Showing the grid as it was. Go back to now to edit or stream." : "");
   }
@@ -341,35 +345,34 @@ export function App() {
     else say(`Every node matches a full recalculation (${ms} ms).`, "good");
   }
 
-  onMount(() => {
-    // The header is in the page's HTML, so it is there before any script runs;
-    // only its stream switch is drawn here.
-    const slot = document.getElementById("pill-slot");
-    if (slot) {
-      onCleanup(
-        render(
-          () => (
-            <button
-              type="button"
-              class="pill"
-              classList={{ on: streaming() }}
-              aria-pressed={streaming()}
-              title="Start or pause the stream of price changes"
-              onClick={() => setStreaming(!streaming())}
-            >
-              <span>{pillText()}</span>
-              <span class="act">{streaming() ? "Pause" : "Stream"}</span>
-            </button>
-          ),
-          slot,
+  const pillText = () => (streaming() ? `Streaming · ${whole.format(rate())}/s` : lookingBack() !== null ? "Looking back" : "Paused");
+  // The header is in the page's HTML, so it is there before any script runs;
+  // only its stream switch is drawn here.
+  const slot = document.getElementById("pill-slot");
+  if (slot) {
+    onCleanup(
+      render(
+        () => (
+          <button
+            type="button"
+            class={["pill", { on: streaming() }]}
+            aria-pressed={streaming() ? "true" : "false"}
+            title="Start or pause the stream of price changes"
+            onClick={() => setStreaming(!streaming())}
+          >
+            <span>{pillText()}</span>
+            <span class="act">{streaming() ? "Pause" : "Stream"}</span>
+          </button>
         ),
-      );
-    }
+        slot,
+      ),
+    );
+  }
+  onSettled(() => {
     chart = new GroupChart(chartBox, { onPick: (key) => view?.revealGroup(key) });
     void build(size());
   });
 
-  const pillText = () => (streaming() ? `Streaming · ${whole.format(rate())}/s` : lookingBack() !== null ? "Looking back" : "Paused");
   const viewText = () => {
     const s = stats();
     return s.rebuilt ? "The view was filtered and sorted again." : s.patched ? "Only the rows that changed were moved in the view." : "The view stood: only cells and totals changed.";
@@ -402,7 +405,7 @@ export function App() {
         <div class="stat">
           <dt>{total().title}</dt>
           <div class="with-line">
-            <dd classList={{ neg: total().negative }}>{total().text}</dd>
+            <dd class={{ neg: total().negative }}>{total().text}</dd>
             <svg class="t-line" viewBox="0 0 96 26" preserveAspectRatio="none" aria-hidden="true" style={{ visibility: total().line ? "visible" : "hidden" }}>
               <path d={total().line} />
             </svg>
@@ -427,7 +430,7 @@ export function App() {
             Group by{" "}
             <select value={String(group())} onChange={(e) => setGroup(Number(e.currentTarget.value))}>
               <option value="-1">nothing</option>
-              <For each={groupable()}>{(c) => <option value={String(c.col)}>{c.name}</option>}</For>
+              <For each={groupable()} keyed={(c) => c.name}>{(c) => <option value={String(c().col)}>{c().name}</option>}</For>
             </select>
           </label>
           <button disabled={group() < 0} onClick={() => view?.expandAll(true)}>
@@ -483,7 +486,7 @@ export function App() {
           </button>
         </div>
         <div class="bar">
-          <button class="stream" aria-pressed={streaming()} onClick={() => setStreaming(!streaming())}>
+          <button class="stream" aria-pressed={streaming() ? "true" : "false"} onClick={() => setStreaming(!streaming())}>
             {streaming() ? "Pause prices" : "Stream prices"}
           </button>
           <label class="rate-control" title="How many trades' marks move each second. Slow enough to follow by default; drag right for thousands.">
@@ -534,11 +537,11 @@ export function App() {
           </span>
           <label>
             New column{" "}
-            <input ref={formulaName} type="text" class="code formula-name" placeholder="name" spellcheck={false} aria-label="New column name" onKeyDown={(e) => e.key === "Enter" && addColumn()} />
+            <input ref={formulaName} type="text" class="code formula-name" placeholder="name" spellcheck="false" aria-label="New column name" onKeyDown={(e) => e.key === "Enter" && addColumn()} />
           </label>
           <label>
             ={" "}
-            <input ref={formula} type="text" class="code formula-src" placeholder="pnl / notional * 10000" spellcheck={false} aria-label="New column formula" onKeyDown={(e) => e.key === "Enter" && addColumn()} />
+            <input ref={formula} type="text" class="code formula-src" placeholder="pnl / notional * 10000" spellcheck="false" aria-label="New column formula" onKeyDown={(e) => e.key === "Enter" && addColumn()} />
           </label>
           <label>
             total{" "}
@@ -588,17 +591,18 @@ export function App() {
                 value={chartName()}
                 onChange={(e) => {
                   setChartName(e.currentTarget.value);
+                  flush();
                   drawChart();
                 }}
               >
-                <For each={totalled()}>{(c) => <option value={c.name}>{`${c.total} of ${c.name}`}</option>}</For>
+                <For each={totalled()} keyed={(c) => c.name}>{(c) => <option value={c().name}>{`${c().total} of ${c().name}`}</option>}</For>
               </select>
             </div>
             <div ref={chartBox} class="chart-box" />
           </div>
           <div class="card">
             <h2>{why() ? `Why · ${why()!.title}` : "Why this value"}</h2>
-            <pre class="why" classList={{ hint: !why() }}>
+            <pre class={["why", { hint: !why() }]}>
               {why()?.text ?? WHY_HINT}
             </pre>
           </div>

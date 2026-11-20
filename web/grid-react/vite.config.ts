@@ -15,8 +15,6 @@ export default defineConfig({
     outDir: "../dist/grid/react",
     emptyOutDir: false,
     // The page, and the cookbook under it.
-    rollupOptions: { input: { main: resolve(__dirname, "index.html"), cookbook: resolve(__dirname, "cookbook/index.html") } },
+    rollupOptions: { input: { main: resolve(import.meta.dirname, "index.html"), cookbook: resolve(import.meta.dirname, "cookbook/index.html") } },
   },
-  esbuild: { target: "es2022" },
-  optimizeDeps: { esbuildOptions: { target: "es2022" } },
 });

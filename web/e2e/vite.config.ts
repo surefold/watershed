@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { defaultClientConditions, defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import solid from "vite-plugin-solid";
+import solid from "@solidjs/vite-plugin";
 
 // The pages the tests drive, built into web/dist/e2e beside the grid's pages
 // so that one server serves both. They are not part of the site: web/build.sh
@@ -12,7 +12,7 @@ import solid from "vite-plugin-solid";
 const SOLID = [/\/web\/grid\/src\/.*\.tsx$/, /\/packages\/grid-solid\/src\/.*\.tsx$/, /\/fixtures\/unmount-solid\.tsx$/];
 
 export default defineConfig({
-  root: resolve(__dirname, "fixtures"),
+  root: resolve(import.meta.dirname, "fixtures"),
   base: "./",
   // Use the packages' TypeScript source from this repository, not their built dist/.
   resolve: { conditions: ["source", ...defaultClientConditions] },
@@ -21,17 +21,15 @@ export default defineConfig({
   worker: { format: "es" },
   build: {
     target: "es2022",
-    outDir: resolve(__dirname, "../dist/e2e"),
+    outDir: resolve(import.meta.dirname, "../dist/e2e"),
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        onedit: resolve(__dirname, "fixtures/onedit.html"),
-        decimal: resolve(__dirname, "fixtures/decimal.html"),
-        "unmount-solid": resolve(__dirname, "fixtures/unmount-solid.html"),
-        "unmount-react": resolve(__dirname, "fixtures/unmount-react.html"),
+        onedit: resolve(import.meta.dirname, "fixtures/onedit.html"),
+        decimal: resolve(import.meta.dirname, "fixtures/decimal.html"),
+        "unmount-solid": resolve(import.meta.dirname, "fixtures/unmount-solid.html"),
+        "unmount-react": resolve(import.meta.dirname, "fixtures/unmount-react.html"),
       },
     },
   },
-  esbuild: { target: "es2022" },
-  optimizeDeps: { esbuildOptions: { target: "es2022" } },
 });

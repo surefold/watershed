@@ -5,8 +5,8 @@
 //   const groups = createGroups(trades);         // changes only when a group does
 //   <Grid table={trades} theme="dark" columns={{ qty: { decimals: 0 } }} />
 
-import { createEffect, createSignal, on, onCleanup, type Accessor, type JSX } from "solid-js";
-import { spread } from "solid-js/web";
+import { createEffect, createSignal, onCleanup, untrack, type Accessor } from "solid-js";
+import { spread, type JSX } from "@solidjs/web";
 import { drawGrid, type AnyGridTable, type Change, type GridOptions, type GridView, type Group } from "@surefold/grid";
 
 export interface GridProps extends Omit<GridOptions, "theme"> {
@@ -25,47 +25,45 @@ export interface GridProps extends Omit<GridOptions, "theme"> {
 export function Grid(props: GridProps): JSX.Element {
   // Written without JSX, so the package is plain JavaScript that any bundler takes.
   const root = document.createElement("div");
-  spread(root, { get style() { return props.style; } }, false, false);
+  spread(root, { get style() { return props.style; } }, true);
   // The view puts classes of its own on the element, so `class` adds and takes
   // away only its own names rather than replacing them all.
-  createEffect<string[]>((before) => {
-    const names = (props.class ?? "").split(/\s+/).filter(Boolean);
-    root.classList.remove(...before.filter((name) => !names.includes(name)));
-    root.classList.add(...names);
-    return names;
-  }, []);
   createEffect(
-    on(
-      () => props.table,
-      (table) => {
-        const view = drawGrid(root, table, {
-          keyColumn: props.keyColumn,
-          columns: props.columns,
-          theme: props.theme,
-          rowHeight: props.rowHeight,
-          label: props.label,
-          // Read the props when called, so a new handler is used without drawing again.
-          loadMore: props.loadMore && (() => props.loadMore!()),
-          onStatus: (s) => props.onStatus?.(s),
-          onFocus: (f) => props.onFocus?.(f),
-          onGroup: (c) => props.onGroup?.(c),
-          onError: (m) => (props.onError ? props.onError(m) : console.warn(m)),
-          onNote: (m) => props.onNote?.(m),
-          onEdit: (e) => props.onEdit?.(e),
-          rowClass: (key) => props.rowClass?.(key),
-        });
-        createEffect(on(() => props.theme, (theme) => view.setTheme(theme ?? ""), { defer: true }));
-        props.ref?.(view);
-        onCleanup(() => view.destroy());
-      },
-    ),
+    () => (props.class ?? "").split(/\s+/).filter(Boolean),
+    (names, before = []) => {
+      root.classList.remove(...before.filter((name) => !names.includes(name)));
+      root.classList.add(...names);
+    },
   );
+  let view: GridView | undefined;
+  createEffect(
+    // Only a new table draws again: the rest is read once, when it does.
+    () => [props.table, untrack(() => ({ keyColumn: props.keyColumn, columns: props.columns, theme: props.theme, rowHeight: props.rowHeight, label: props.label, paged: Boolean(props.loadMore) }))] as const,
+    ([table, { paged, ...options }]) => {
+      const drawn = (view = drawGrid(root, table, {
+        ...options,
+        // Read the props when called, so a new handler is used without drawing again.
+        loadMore: paged ? () => props.loadMore!() : undefined,
+        onStatus: (s) => props.onStatus?.(s),
+        onFocus: (f) => props.onFocus?.(f),
+        onGroup: (c) => props.onGroup?.(c),
+        onError: (m) => (props.onError ? props.onError(m) : console.warn(m)),
+        onNote: (m) => props.onNote?.(m),
+        onEdit: (e) => props.onEdit?.(e),
+        rowClass: (key) => props.rowClass?.(key),
+      }));
+      props.ref?.(drawn);
+      return () => drawn.destroy();
+    },
+  );
+  createEffect(() => props.theme, (theme) => view?.setTheme(theme ?? ""), { defer: true });
   return root;
 }
 
 /** The last recalculation of a table, as a signal; `undefined` until there is one. */
 export function createChange(table: AnyGridTable): Accessor<Change | undefined> {
-  const [change, setChange] = createSignal<Change>();
+  // ownedWrite: the table may be changed, and so this set, while a component is being made.
+  const [change, setChange] = createSignal<Change | undefined>(undefined, { ownedWrite: true });
   onCleanup(table.watch(setChange));
   return change;
 }
@@ -74,13 +72,15 @@ export function createChange(table: AnyGridTable): Accessor<Change | undefined> 
  * Follows anything read from a table, such as `(t) => t.total("pnl")`, as a
  * signal. It is set after every recalculation; with `isEqual`, only when the
  * value compares unequal to the last, so what follows it runs only then.
+ * The reading must not itself be a function: Solid takes a function as a
+ * signal's value to be a calculation.
  */
 export function createReading<T, Tb extends AnyGridTable = AnyGridTable>(
   table: Tb,
   read: (table: Tb) => T,
   isEqual?: (a: T, b: T) => boolean,
 ): Accessor<T> {
-  const [value, setValue] = createSignal<T>(read(table), { equals: isEqual ?? false });
+  const [value, setValue] = createSignal<T>(read(table) as Exclude<T, Function>, { equals: isEqual ?? false, ownedWrite: true });
   onCleanup(table.watch(() => setValue(() => read(table))));
   return value;
 }

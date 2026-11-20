@@ -2,7 +2,7 @@
 // with web/grid, whose JSX it is.
 
 import { Show, createSignal } from "solid-js";
-import { render } from "solid-js/web";
+import { render } from "@solidjs/web";
 import "@surefold/grid/grid.css";
 import { EffectPrices } from "../../grid/src/cookbook/recipes/EffectPrices";
 

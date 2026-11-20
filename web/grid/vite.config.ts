@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { defaultClientConditions, defineConfig } from "vite";
-import solid from "vite-plugin-solid";
+import solid from "@solidjs/vite-plugin";
 
 // The site's grid page. Built into web/dist/grid, beside the playground.
 export default defineConfig({
@@ -15,8 +15,6 @@ export default defineConfig({
     outDir: "../dist/grid",
     emptyOutDir: false,
     // The page, and the cookbook under it.
-    rollupOptions: { input: { main: resolve(__dirname, "index.html"), cookbook: resolve(__dirname, "cookbook/index.html") } },
+    rollupOptions: { input: { main: resolve(import.meta.dirname, "index.html"), cookbook: resolve(import.meta.dirname, "cookbook/index.html") } },
   },
-  esbuild: { target: "es2022" },
-  optimizeDeps: { esbuildOptions: { target: "es2022" } },
 });
