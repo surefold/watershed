@@ -121,6 +121,7 @@ Where a time is scaled up from a smaller run, it says so.
 | `tax_benefit` | A country's tax and benefit rules over 10 million households | the graph, bit for bit | 0.7 s | 0.5 s | the graph: 28 s (scaled) |
 | `insurance` | A car insurer's pricing over 5 million policies | the graph, bit for bit | 0.4 s | 0.15 s | the graph: 10.5 s (scaled) |
 | `insurance`, its search | 1,000 price reviews, each priced on all 5 million policies and added up | | 4.9 s, 5 ms a review | | |
+| `replay` | A portfolio run by rules (holdings sold after a fall, part of it bought with borrowed money) put through every 60-day stretch of real daily prices since 1973: 13,526 stretches, for 12 choices of rules | the same sums by hand for every stretch: 1×10⁻¹⁵; the graph for 20 stretches, bit for bit | not run | 0.7 s a choice of rules for 43 shares, 2.8 s for the 200 with prices from 1985, on 4 cores of a different machine (a cloud VM) | |
 | `backtest`, `experts` | Trading rules on 500 shares over 16 years, each against 1,000 shuffled histories | the CPU, bit for bit | 49 ms to 5 s a history | | |
 
 ### What that says
@@ -477,6 +478,16 @@ What is taken from somewhere, and what is made up.
   (`finsaber-team/FINSABER-V2-Data`), which does not say where its prices
   come from. Shares that stopped trading are missing, which flatters the
   market and every rule alike.
+- **`replay`.** Daily prices from Yahoo Finance for today's members of the
+  S&P 500, fetched by `examples/shared/prices.py` when it is run and not
+  kept in the repository; they are for personal use. Prices are adjusted
+  for splits and dividends. Yahoo's histories start in 1970 at the
+  earliest, and few go back that far: 26 of the 503 shares had prices from
+  1970 when this was written, 44 from 1973, 93 from 1980 and 201 from
+  1985. These are survivors: every company that failed or was bought on
+  the way is missing, so every figure is kinder than the truth, and more
+  so the earlier the year. A holding is sold at the day's close with no
+  cost.
 - **`tax_benefit`, `insurance`, `monte_carlo`.** Made up throughout.
 - **`grid_balancing`.** Made up throughout unless given a folder of real
   readings, which `examples/shared/grid_data.py` fetches from Elexon's
@@ -579,6 +590,16 @@ cargo run --release --features cuda --example spreadsheet -- fcffsimpleginzu.xls
 `backtest` and `experts` take a folder of daily prices, one CSV a share
 (`Date,Open,High,Low,Close,Volume`), or `made-up` for prices that wander at
 random.
+
+`replay` takes the same, and `examples/shared/prices.py` fetches such a
+folder: every member of the S&P 500, as far back as Yahoo Finance has it.
+
+```bash
+python3 examples/shared/prices.py prices              # about 200 MB, a few minutes
+cargo run --release --example replay -- prices        # shares with prices from 1973, 60-day stretches
+cargo run --release --example replay -- prices 1985   # more shares, fewer years
+cargo run --release --example replay -- made-up
+```
 
 ## How it runs
 

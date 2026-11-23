@@ -89,17 +89,32 @@ for (const { name, path, unmount } of COOKBOOKS) {
     test("paged API: a page that fails to load is asked for again", async ({ page, net }) => {
       // The browser logs the failed request.
       net.allow(/500/);
-      // The second page fails until `failing` is turned off.
-      let failing = true;
+      // The second page fails until Try again has been clicked. A scroll near the
+      // end asks for the page too, and can come at any moment: were the failures
+      // simply turned off before the click, such a request could succeed first
+      // and take the button away before it was clicked.
+      const clicked = () => page.evaluate(() => (window as { triedAgain?: boolean }).triedAgain === true);
       let failed = 0;
       await page.route(/dummyjson\.com\/products\?.*skip=20/, async (route) => {
-        if (route.request().method() === "GET" && failing) {
+        if (route.request().method() === "GET" && !(await clicked())) {
           failed++;
           return route.fulfill({ status: 500, headers: { "access-control-allow-origin": "*" }, json: { message: "down" } });
         }
         return route.fallback();
       });
       await page.reload();
+      // Noted on the way down to the button, before its own handler asks for the page.
+      await page.evaluate(() =>
+        document.addEventListener(
+          "click",
+          (e) => {
+            if (e.target instanceof HTMLButtonElement && e.target.textContent === "Try again") {
+              (window as { triedAgain?: boolean }).triedAgain = true;
+            }
+          },
+          true,
+        ),
+      );
       const recipe = live(page, "paged");
       const body = recipe.locator(".wg-body");
       await expect(async () => {
@@ -121,7 +136,6 @@ for (const { name, path, unmount } of COOKBOOKS) {
       expect(failed).toBeGreaterThanOrEqual(1);
       await expect(row(recipe, "P-21")).toHaveCount(0);
       // A list at its end cannot be scrolled further, so the recipe offers to try again.
-      failing = false;
       await tryAgain.click();
       await expect(tryAgain).toHaveCount(0);
       await expect(row(recipe, "P-21")).toBeAttached();

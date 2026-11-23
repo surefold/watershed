@@ -115,6 +115,9 @@ jobs:
       # A project's estimate, programme and risk register for 50,000 trials,
       # checked against LibreOffice for 300, and again without each risk.
       - run: cargo run --locked --release -p watershed-gpu --example project_risk -- 50000
+      # A portfolio and its rules through every stretch of made-up prices,
+      # checked against the same sums written out by hand.
+      - run: cargo run --locked --release -p watershed-gpu --example replay -- made-up
 
   web:
     name: Web demo (WebAssembly)

@@ -71,6 +71,8 @@ with its checks and timings.
   worse off for a pay rise. A project's estimate, programme and risk
   register are run for a million trials, and again without each risk in
   turn.
+- **What if it happened again.** A portfolio and the rules it is run by,
+  put through every 60 days of real share prices since 1973.
 - **Live tables in the browser.** A grid whose cells, columns and totals are
   formulas, updated as edits arrive, as a TypeScript package with components
   for [Solid](packages/grid-solid) and [React](packages/grid-react). The
